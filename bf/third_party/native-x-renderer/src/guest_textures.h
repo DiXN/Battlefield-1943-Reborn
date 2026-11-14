@@ -25,6 +25,7 @@
 
 #include "Buffer.h"
 #include "DeviceContext.h"
+#include "recorder.h"
 #include "PipelineState.h"
 #include "RefCntAutoPtr.hpp"
 #include "RenderDevice.h"
@@ -40,7 +41,7 @@ class ResolvedTextures;
 class GuestTextures final : public rex::graphics::TextureCache {
  public:
   GuestTextures(const rex::graphics::RegisterFile& registers, GuestMemory& memory, ResolvedTextures& resolved,
-                Diligent::IRenderDevice* device, Diligent::IDeviceContext* context);
+                Diligent::IRenderDevice* device, Recorder* recorder);
   ~GuestTextures() override;
 
   bool Initialize();
@@ -120,7 +121,7 @@ class GuestTextures final : public rex::graphics::TextureCache {
   GuestMemory& memory_;
   ResolvedTextures& resolved_;
   Diligent::IRenderDevice* device_;
-  Diligent::IDeviceContext* context_;
+  Recorder* recorder_;
   std::array<LoadPipeline, kLoadShaderCount> load_pipelines_;
   // The load shaders' output, copied into the textures: one buffer for every load, grown as a texture needs (D108).
   Diligent::RefCntAutoPtr<Diligent::IBuffer> scratch_;

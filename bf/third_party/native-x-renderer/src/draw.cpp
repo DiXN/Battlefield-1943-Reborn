@@ -155,21 +155,27 @@ RefCntAutoPtr<IBuffer> CreateConstantBuffer(IRenderDevice* device, const char* n
   return buffer;
 }
 
-// A dynamic buffer mapped for writing (new memory each time) until the end of the scope.
+// A dynamic buffer's new contents (new memory each time), written until the end of the scope and recorded then.
 class MappedBuffer {
  public:
-  MappedBuffer(IDeviceContext* context, IBuffer* buffer) : context_(context), buffer_(buffer) {
-    context->MapBuffer(buffer, MAP_WRITE, MAP_FLAG_DISCARD, data_);
-  }
+  MappedBuffer(Recorder& recorder, IBuffer* buffer)
+      : recorder_(recorder), buffer_(buffer), size_(buffer->GetDesc().Size), data_(recorder.Bytes(size_)) {}
   ~MappedBuffer() {
-    if (data_) context_->UnmapBuffer(buffer_, MAP_WRITE);
+    recorder_.Do([buffer = buffer_, size = size_, data = data_](IDeviceContext* context) {
+      void* mapped = nullptr;
+      context->MapBuffer(buffer, MAP_WRITE, MAP_FLAG_DISCARD, mapped);
+      if (!mapped) return;
+      std::memcpy(mapped, data, size);
+      context->UnmapBuffer(buffer, MAP_WRITE);
+    });
   }
-  uint8_t* data() const { return static_cast<uint8_t*>(data_); }
+  uint8_t* data() const { return data_; }
 
  private:
-  IDeviceContext* context_;
+  Recorder& recorder_;
   IBuffer* buffer_;
-  void* data_ = nullptr;
+  uint64_t size_;
+  uint8_t* data_;
 };
 
 // The motion pixel shader (D48): the two positions the motion vertex shader writes, in clip space, to host
@@ -273,21 +279,21 @@ bool DrawPath::Initialize(Device& device, rg::RegisterFile& registers, rex::memo
   registers_ = &registers;
   scale_ = scale;
   IRenderDevice* render_device = device.device();
-  IDeviceContext* context = device.context();
+  Recorder* recorder = &device.recorder();
 
-  memory_ = std::make_unique<GuestMemory>(memory, render_device, context);
+  memory_ = std::make_unique<GuestMemory>(memory, render_device, recorder);
   if (!memory_->Initialize()) return false;
   // Resolved textures are invalidated when their guest memory changes, which the mirror's watches report (D70).
   resolved_ = &resolved;
   resolved.Watch(memory_.get());
-  primitives_ = std::make_unique<Primitives>(registers, memory, *memory_, render_device, context);
+  primitives_ = std::make_unique<Primitives>(registers, memory, *memory_, render_device, recorder);
   if (!primitives_->Initialize()) {
     REXLOG_ERROR("[native_x_renderer] could not initialize primitive processing");
     return false;
   }
   shaders_ = std::make_unique<ShaderCache>();
   if (!shaders_->Initialize(render_device, scale_)) return false;
-  guest_textures_ = std::make_unique<GuestTextures>(registers, *memory_, resolved, render_device, context);
+  guest_textures_ = std::make_unique<GuestTextures>(registers, *memory_, resolved, render_device, recorder);
   if (!guest_textures_->Initialize()) return false;
   // Frame numbers are the device's: frame N is recorded after N - 1 presents and complete when the device's
   // frame fence reaches N.
@@ -732,7 +738,7 @@ bool InlineExtent(std::span<const DrawPath::Copy> copies, uint32_t count, float 
 bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const StateTracker::Program& pixel_program,
                             std::span<const Copy> copies, const std::array<HostTarget*, 5>& targets) {
   const rg::RegisterFile& regs = *registers_;
-  IDeviceContext* context = device_->context();
+  Recorder& recorder = device_->recorder();
   const uint64_t copies_at_start = memory_->copies();  // D98
 
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
@@ -1372,7 +1378,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
             write.address = l.address, write.width = l.width, write.height = l.height, write.pitch = l.pitch;
             write.guest_format = l.guest_format, write.tiled = l.tiled, write.endian = l.endian;
             write.scale_x = l.scale_x, write.scale_y = l.scale_y, write.slice = l.slice;
-            if (blit_->WriteToMirror(context, t->ArrayView(), memory_->buffer(), memory_->uav(), write)) {
+            if (blit_->WriteToMirror(device_->context(), t->ArrayView(), memory_->buffer(), memory_->uav(), write)) {
               TargetsChanged();  // the compute pass bound its own
               REXLOG_INFO("[native_x_renderer] D155: the resolve at {:#x} written to the mirror before its first draw",
                           t->address);
@@ -1391,7 +1397,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   }
   // An inline draw's data, if the game reused its memory since the draw was captured (D71).
   for (const Copy& copy : copies) {
-    if (memory_->WriteIfChanged(context, copy.address, copy.data, copy.size)) ++stats_.inline_restored;
+    if (memory_->WriteIfChanged(copy.address, copy.data, copy.size)) ++stats_.inline_restored;
   }
   if (primitives_->UploadConverted()) ++stats_.copies;
   // This draw's own data or textures copied, ending the render pass: the queued draws' data copied now too (D98).
@@ -1400,14 +1406,14 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   stats_.uploaded_bytes += memory_->TakeUploadedBytes();
   stats_.unchanged_bytes += memory_->TakeUnchangedBytes();
   stats_.unwatched_hashed_bytes += memory_->TakeUnwatchedHashedBytes();
-  memory_->PrepareForRead(context);
+  memory_->PrepareForRead();
 
   // Constants.
   DrawContext draw{&regs, &primitives, &viewport_info, polygonal, used_texture_mask, alpha_to_coverage_blended,
                    state.depth_enable && state.depth_write};
   FillSystemConstants(draw);
   {
-    MappedBuffer map(context, system_constants_buffer_);
+    MappedBuffer map(recorder, system_constants_buffer_);
     std::memcpy(map.data(), &system_constants_, sizeof(system_constants_));
   }
   const rg::SpirvShader* stage_shaders[2] = {vertex_shader, pixel_shader};
@@ -1417,7 +1423,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   for (uint32_t stage = 0; stage < 2; ++stage) {
     const rg::SpirvShader* shader = stage_shaders[stage];
     if (!shader || !shader->constant_register_map().float_count) continue;
-    MappedBuffer map(context, pipeline->float_constants[stage]);
+    MappedBuffer map(recorder, pipeline->float_constants[stage]);
     uint8_t* out = map.data();
     const rg::Shader::ConstantRegisterMap& constants = shader->constant_register_map();
     uint32_t first = stage ? rg::XE_GPU_REG_SHADER_CONSTANT_256_X : rg::XE_GPU_REG_SHADER_CONSTANT_000_X;
@@ -1574,13 +1580,13 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   uint64_t frame = device_->frames_presented();
   const auto* bool_loop = reinterpret_cast<const uint8_t*>(&regs[rg::XE_GPU_REG_SHADER_CONSTANT_BOOL_000_031]);
   if (uploaded_frame_ != frame || std::memcmp(uploaded_bool_loop_.data(), bool_loop, kBoolLoopConstantsSize)) {
-    MappedBuffer map(context, bool_loop_constants_buffer_);
+    MappedBuffer map(recorder, bool_loop_constants_buffer_);
     std::memcpy(map.data(), bool_loop, kBoolLoopConstantsSize);
     std::memcpy(uploaded_bool_loop_.data(), bool_loop, kBoolLoopConstantsSize);
     uploaded_frame_ = frame;
   }
   {
-    MappedBuffer map(context, fetch_constants_buffer_);
+    MappedBuffer map(recorder, fetch_constants_buffer_);
     std::memcpy(map.data(), &regs[rg::XE_GPU_REG_SHADER_CONSTANT_FETCH_00_0], kFetchConstantsSize);
     // 13 Nov 2026 ("set a clamp on texture bias with Anisotropic Filtering enabled"): with anisotropic filtering
     // forced (anisotropic_override 2x and up), a texture's own negative LOD bias (its fetch constant's word 4, bits
@@ -1625,7 +1631,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         IDeviceObject* view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                               binding.dimension, binding.is_signed);
         if (pipeline->texture_objects[stage][i] != view) {
-          variable->Set(view);
+          recorder.Do([variable, view](IDeviceContext*) { variable->Set(view); });
           pipeline->texture_objects[stage][i] = view;
           ++stats_.bindings_set;
           bindings_changed = true;
@@ -1647,7 +1653,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         IDeviceObject* sampler =
             textures_->Sampler(regs.GetTextureFetch(sampler_bindings[i].fetch_constant), sampler_bindings[i], lod_bias);
         if (pipeline->sampler_objects[stage][i] != sampler) {
-          variable->Set(sampler);
+          recorder.Do([variable, sampler](IDeviceContext*) { variable->Set(sampler); });
           pipeline->sampler_objects[stage][i] = sampler;
           ++stats_.bindings_set;
           bindings_changed = true;
@@ -1672,15 +1678,16 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   std::array<ITextureView*, 5> views{render_target_views[0], render_target_views[1], render_target_views[2],
                                      render_target_views[3], depth ? depth->view : nullptr};
   if (!bound_valid_ || bound_count_ != render_target_count || bound_ != views) {
-    context->SetRenderTargets(render_target_count, render_target_views, views[4],
-                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    recorder.Do([views, count = render_target_count](IDeviceContext* context) mutable {
+      context->SetRenderTargets(count, views.data(), views[4], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    });
     bound_ = views;
     bound_count_ = render_target_count;
     bound_valid_ = true;
     viewport_valid_ = false;  // DiligentCore sets the viewport to the targets' size (D81)
     committed_ = nullptr;     // and the shader resources are committed again, transitioning what was a target (D82)
   }
-  context->SetPipelineState(pipeline->pso);
+  recorder.Do([pso = pipeline->pso.RawPtr()](IDeviceContext* context) { context->SetPipelineState(pso); });
   // The shader resources are committed when something changed since the last draw committed them (D82): another
   // pipeline, a texture or sampler, the render targets, or a texture no longer readable (loaded, copied or drawn
   // into since). DiligentCore allocates and writes a descriptor set for the textures and samplers on every
@@ -1688,12 +1695,15 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   if (set) {
     // D111: the set's binding, its variables written when it was created; committed when it is not the last
     // committed one, or one of its textures is no longer readable.
-    if (committed_ != set || !TexturesReadable(*set)) {
-      context->CommitShaderResources(set->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      committed_ = set;
-      ++stats_.committed;
-    }
-  } else if (bindings_changed || committed_ != pipeline || !TexturesReadable(*pipeline)) {
+    const bool changed = committed_ != set;
+    recorder.Do([set, changed](IDeviceContext* context) {
+      if (changed || !TexturesReadable(*set))
+        context->CommitShaderResources(set->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    });
+    committed_ = set;
+    if (changed) ++stats_.committed;
+  } else if (IDeviceContext* context = device_->context();
+             bindings_changed || committed_ != pipeline || !TexturesReadable(*pipeline)) {
     context->CommitShaderResources(pipeline->srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     committed_ = pipeline;
     ++stats_.committed;
@@ -1888,18 +1898,20 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   }
   // Set when they change (D81): DiligentCore records them on every call.
   if (!viewport_valid_ || std::memcmp(&viewport, &viewport_, sizeof(viewport))) {
-    context->SetViewports(1, &viewport, 0, 0);
+    recorder.Do([viewport](IDeviceContext* context) { context->SetViewports(1, &viewport, 0, 0); });
     viewport_ = viewport;
   }
   if (!viewport_valid_ || scissor_rect != scissor_) {
-    context->SetScissorRects(1, &scissor_rect, 0, 0);
+    recorder.Do([scissor_rect](IDeviceContext* context) { context->SetScissorRects(1, &scissor_rect, 0, 0); });
     scissor_ = scissor_rect;
   }
   viewport_valid_ = true;
-  if (state.stencil_enable) context->SetStencilRef(stencil_reference);
   const float blend_factors[4] = {regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_RED), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_GREEN),
                                   regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_BLUE), regs.Get<float>(rg::XE_GPU_REG_RB_BLEND_ALPHA)};
-  context->SetBlendFactors(blend_factors);
+  recorder.Do([blend_factors, stencil = state.stencil_enable, stencil_reference](IDeviceContext* context) {
+    if (stencil) context->SetStencilRef(stencil_reference);
+    context->SetBlendFactors(blend_factors);
+  });
   // D169 research (NXR_SKY_PROBE=1, tests): each new shader pair drawn at the output's size, once, with its vertex
   // constants c12 to c15 (where the terrain's world-view-projection is), to find the sky dome's camera.
   if (output_sized && pixel_shader && render_target_count) {
@@ -1995,25 +2007,28 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       ++stats_.failed;
       return false;
   }
-  if (index_buffer) context->SetIndexBuffer(index_buffer, index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-  auto issue = [&] {
-    if (index_buffer) {
-      DrawIndexedAttribs attribs{primitives.host_draw_vertex_count, index_type, DRAW_FLAG_NONE};
-      context->DrawIndexed(attribs);
-    } else {
-      DrawAttribs attribs{primitives.host_draw_vertex_count, DRAW_FLAG_NONE};
-      context->Draw(attribs);
+  recorder.Do([index_buffer, index_offset, index_type, count = primitives.host_draw_vertex_count, oversize,
+               stretched_viewport, stretched_scissor, viewport, scissor_rect](IDeviceContext* context) {
+    if (index_buffer) context->SetIndexBuffer(index_buffer, index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    auto issue = [&] {
+      if (index_buffer) {
+        DrawIndexedAttribs attribs{count, index_type, DRAW_FLAG_NONE};
+        context->DrawIndexed(attribs);
+      } else {
+        DrawAttribs attribs{count, DRAW_FLAG_NONE};
+        context->Draw(attribs);
+      }
+    };
+    if (oversize) {
+      // Stretched first (its black reaches the screen's edges), then in the box over it (its hole round).
+      context->SetViewports(1, &stretched_viewport, 0, 0);
+      context->SetScissorRects(1, &stretched_scissor, 0, 0);
+      issue();
+      context->SetViewports(1, &viewport, 0, 0);
+      context->SetScissorRects(1, &scissor_rect, 0, 0);
     }
-  };
-  if (oversize) {
-    // Stretched first (its black reaches the screen's edges), then in the box over it (its hole round).
-    context->SetViewports(1, &stretched_viewport, 0, 0);
-    context->SetScissorRects(1, &stretched_scissor, 0, 0);
     issue();
-    context->SetViewports(1, &viewport, 0, 0);
-    context->SetScissorRects(1, &scissor_rect, 0, 0);
-  }
-  issue();
+  });
   // D163: a model with lamps (a jeep's body, by its index count): its world matrix for the night's lights, in the
   // registers given with it (rigid rows, the position in their fourth floats); taken only when rigid.
   if (model_lamp_counts_ && model_lamp_report_ && index_buffer && output_sized && state.depth_write) {
@@ -2173,11 +2188,13 @@ uint32_t DrawPath::DrawObjectMotion(ITextureView* motion, ITextureView* depth) {
   const auto started = std::chrono::steady_clock::now();
   uint32_t drawn = 0;
   if (motion && depth && !motion_draws_.empty()) {
-    IDeviceContext* context = device_->context();
-    context->SetRenderTargets(1, &motion, depth, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    Recorder& recorder = device_->recorder();
+    recorder.Do([motion, depth](IDeviceContext* context) mutable {
+      context->SetRenderTargets(1, &motion, depth, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    });
     TargetsChanged();
     uploaded_frame_ = UINT64_MAX;  // its own bool/loop and fetch constants go into the draws' buffers (D81)
-    memory_->PrepareForRead(context);
+    memory_->PrepareForRead();
     for (const MotionDraw& draw : motion_draws_) {
       // D120: it moved with the camera only, the vote's winner.
       if (draw.has_reprojection && camera_winner_valid_ &&
@@ -2188,13 +2205,13 @@ uint32_t DrawPath::DrawObjectMotion(ITextureView* motion, ITextureView* depth) {
       const uint8_t* data = motion_data_.data() + draw.data;
       Pipeline& pipeline = *draw.pipeline;
       auto upload = [&](IBuffer* buffer, size_t size) {
-        MappedBuffer map(context, buffer);
+        MappedBuffer map(recorder, buffer);
         std::memcpy(map.data(), data, size);
         data += size;
       };
       upload(pipeline.float_constants[0], draw.constants_size);
       {
-        MappedBuffer map(context, pipeline.previous_float_constants);
+        MappedBuffer map(recorder, pipeline.previous_float_constants);
         std::memcpy(map.data(), draw.previous_constants, draw.constants_size);
       }
       upload(system_constants_buffer_, sizeof(system_constants_));
@@ -2202,21 +2219,23 @@ uint32_t DrawPath::DrawObjectMotion(ITextureView* motion, ITextureView* depth) {
       upload(fetch_constants_buffer_, kFetchConstantsSize);
       {
         const float ndc_to_pixels[4] = {0.5f * draw.viewport.Width, -0.5f * draw.viewport.Height, 0.0f, 0.0f};
-        MappedBuffer map(context, motion_constants_buffer_);
+        MappedBuffer map(recorder, motion_constants_buffer_);
         std::memcpy(map.data(), ndc_to_pixels, sizeof(ndc_to_pixels));
       }
-      context->SetPipelineState(pipeline.pso);
-      context->CommitShaderResources(pipeline.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      context->SetViewports(1, &draw.viewport, 0, 0);
-      context->SetScissorRects(1, &draw.scissor, 0, 0);
-      if (draw.index_buffer) {
-        context->SetIndexBuffer(draw.index_buffer, draw.index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-        DrawIndexedAttribs attribs{draw.vertex_count, draw.index_type, DRAW_FLAG_NONE};
-        context->DrawIndexed(attribs);
-      } else {
-        DrawAttribs attribs{draw.vertex_count, DRAW_FLAG_NONE};
-        context->Draw(attribs);
-      }
+      recorder.Do([pso = pipeline.pso.RawPtr(), srb = pipeline.srb.RawPtr(), draw](IDeviceContext* context) {
+        context->SetPipelineState(pso);
+        context->CommitShaderResources(srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        context->SetViewports(1, &draw.viewport, 0, 0);
+        context->SetScissorRects(1, &draw.scissor, 0, 0);
+        if (draw.index_buffer) {
+          context->SetIndexBuffer(draw.index_buffer, draw.index_offset, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+          DrawIndexedAttribs attribs{draw.vertex_count, draw.index_type, DRAW_FLAG_NONE};
+          context->DrawIndexed(attribs);
+        } else {
+          DrawAttribs attribs{draw.vertex_count, DRAW_FLAG_NONE};
+          context->Draw(attribs);
+        }
+      });
       ++drawn;
     }
   }

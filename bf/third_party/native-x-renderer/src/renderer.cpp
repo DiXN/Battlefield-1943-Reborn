@@ -177,6 +177,9 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_thread, true, "NativeXRenderer",
                     "Run the renderer on a thread of its own (read at startup, D71): the game's render thread only "
                     "captures what each D3D call needs, and the renderer's thread draws, through DiligentCore and the "
                     "driver. Off: all of it on the game's render thread, inside its D3D calls");
+REXCVAR_DEFINE_BOOL(native_x_renderer_record_thread, true, "NativeXRenderer",
+                    "With native_x_renderer_thread: the draws' DiligentCore calls made on a second thread, the "
+                    "recorder's, while the renderer's thread prepares the next draws (read at startup)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_present_with_swaps, false, "NativeXRenderer",
                     "Show each frame when the command processor executes the game's swap for it, as the SDK's "
                     "presenters do, instead of when the game calls Present (read at startup, D86): the game's CPU "
@@ -3313,9 +3316,17 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
     }
   }
   CommandQueue::Poller poller = nullptr;
-  if (g_present_with_swaps) poller = [] { PresentPending(); };
+  if (g_present_with_swaps) poller = [] {
+    g_device->recorder().BeginInline();
+    PresentPending();
+    g_device->recorder().EndInline();
+  };
   const bool raise = REXCVAR_GET(native_x_renderer_raise_priority);
   g_queue.SetRaisePriority(raise);
+  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) {
+    g_device->recorder().Start();
+    g_queue.SetDeferredCompletion(true);
+  }
   g_queue.Start(threaded, &Execute, poller);
   if (threaded) {
     // The gate is called on the command processor's thread: its priority raised there, the first time (D136).
@@ -3328,7 +3339,10 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
           g_queue.WaitIdle(tag);
         },
         nullptr, [](void*) { return g_queue.Produced(); });
-    std::atexit([] { g_queue.Stop(); });
+    std::atexit([] {
+      g_queue.Stop();
+      if (g_device) g_device->recorder().Stop();
+    });
   }
   if (g_present_with_swaps) {
     graphics->SetSwapObserver(
@@ -3824,7 +3838,27 @@ void ExecuteFrameEnd(const Command& c) {
   g_stats = {};
 }
 
+// A draw's context calls are recorded for the recorder's thread; any other command, and a draw that presents
+// first, makes its own at once, after the recorded ones.
+void ExecuteCommand(Command& c);
+
 void Execute(Command& c) {
+  Recorder* recorder = g_device && g_device->recorder().threaded() ? &g_device->recorder() : nullptr;
+  if (!recorder) return ExecuteCommand(c);
+  const bool record = c.type == Command::Type::kDraw && !g_pending_count;
+  if (!record) recorder->BeginInline();
+  ExecuteCommand(c);
+  const uint64_t done = g_queue.running_index() + 1;
+  if (record) {
+    recorder->Do([done](IDeviceContext*) { g_queue.Complete(done); });
+    recorder->Publish();
+  } else {
+    recorder->EndInline();
+    g_queue.Complete(done);
+  }
+}
+
+void ExecuteCommand(Command& c) {
   if (g_pending_count) PresentPending();
   // A command past the last uploads-ahead window (D98): its data is no longer known to be as the window found it.
   if (g_draw && g_queue.running_index() >= g_ahead_until) g_draw->EndAheadWindow();
