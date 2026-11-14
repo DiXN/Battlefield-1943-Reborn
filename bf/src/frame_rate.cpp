@@ -284,7 +284,8 @@ REX_EXTERN(__imp__sub_82609000);
 REX_HOOK_RAW(sub_82609000) {
   const uint32_t caller = uint32_t(ctx.lr);
   __imp__sub_82609000(ctx, base);
-  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && caller == 0x823C24C8u;
+  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && caller == 0x823C24C8u &&
+                     (!Unlocked() || REXCVAR_GET(bf_max_fps) > 0);
   if (!sleep && !REXCVAR_GET(bf_job_wait_yield)) return;
   thread_local uint32_t empty = 0;
   if (ctx.r3.u32 & 0xFF) {
