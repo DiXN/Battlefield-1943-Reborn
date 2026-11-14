@@ -320,6 +320,7 @@ bool Device::CreateSwapChain() {
   window.pDisplay = host->display;
   window.pWaylandSurface = host->wayland_surface;
   window.WindowId = host->x11_window;
+  if (host->pixel_size) swap_chain_desc.Width = host->pixel_size(false), swap_chain_desc.Height = host->pixel_size(true);
 #endif
   // Issue 26: made with the present mode and the V-Sync it is presented with (Present: V-Sync off, or on after a
   // failure), so the first Present needs no second swap chain. Before, the first one was made with V-Sync and made
