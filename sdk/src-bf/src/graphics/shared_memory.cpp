@@ -10,6 +10,7 @@
  */
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <utility>
 
@@ -387,6 +388,21 @@ bool SharedMemory::RequestRanges(const std::pair<uint32_t, uint32_t>* ranges, si
     if (!EnsureHostGpuMemoryAllocated(range.first, range.second)) {
       return false;
     }
+  }
+
+  auto valid = [this](const std::pair<uint32_t, uint32_t>& range) {
+    uint32_t page_first = range.first >> page_size_log2_;
+    uint32_t page_last = (range.first + range.second - 1) >> page_size_log2_;
+    for (uint32_t i = page_first >> 6; i <= page_last >> 6; ++i) {
+      uint64_t mask = ~uint64_t(0);
+      if (i == page_first >> 6) mask &= ~((uint64_t(1) << (page_first & 63)) - 1);
+      if (i == page_last >> 6 && (page_last & 63) != 63) mask &= (uint64_t(1) << ((page_last & 63) + 1)) - 1;
+      if (~std::atomic_ref<uint64_t>(system_page_flags_valid_[i]).load(std::memory_order_relaxed) & mask) return false;
+    }
+    return true;
+  };
+  if (std::all_of(merged_ranges.begin(), merged_ranges.end(), valid)) {
+    return true;
   }
 
   upload_ranges_.clear();
