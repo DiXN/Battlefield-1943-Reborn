@@ -3323,10 +3323,7 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   };
   const bool raise = REXCVAR_GET(native_x_renderer_raise_priority);
   g_queue.SetRaisePriority(raise);
-  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) {
-    g_device->recorder().Start();
-    g_queue.SetDeferredCompletion(true);
-  }
+  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) g_device->recorder().Start();
   g_queue.Start(threaded, &Execute, poller);
   if (threaded) {
     // The gate is called on the command processor's thread: its priority raised there, the first time (D136).
@@ -3839,7 +3836,8 @@ void ExecuteFrameEnd(const Command& c) {
 }
 
 // A draw's context calls are recorded for the recorder's thread; any other command, and a draw that presents
-// first, makes its own at once, after the recorded ones.
+// first, makes its own at once, after the recorded ones. A command counts as run once this thread is past it: a
+// recorded call holds copies of what it uploads, and a draw changes nothing the game reads.
 void ExecuteCommand(Command& c);
 
 void Execute(Command& c) {
@@ -3848,14 +3846,8 @@ void Execute(Command& c) {
   const bool record = c.type == Command::Type::kDraw && !g_pending_count;
   if (!record) recorder->BeginInline();
   ExecuteCommand(c);
-  const uint64_t done = g_queue.running_index() + 1;
-  if (record) {
-    recorder->Do([done](IDeviceContext*) { g_queue.Complete(done); });
-    recorder->Publish();
-  } else {
-    recorder->EndInline();
-    g_queue.Complete(done);
-  }
+  if (record) recorder->Publish();
+  else recorder->EndInline();
 }
 
 void ExecuteCommand(Command& c) {
