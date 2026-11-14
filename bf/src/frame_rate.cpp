@@ -28,7 +28,9 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/hook.h>
 #include <rex/logging.h>
@@ -43,6 +45,14 @@
 #endif
 #include <windows.h>
 #include <timeapi.h>
+#else
+#include <linux/futex.h>
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <ctime>
 #endif
 
 REXCVAR_DEFINE_BOOL(bf_unlock_fps, true, "BF1943", "Run above the original 30 frames per second");
@@ -280,16 +290,194 @@ REXCVAR_DEFINE_BOOL(bf_job_wait_yield, true, "BF1943",
 // jobsleep1, jobsleep0); without our limit 110 FPS either way, 2.46 cores instead of 3.01 (jobsleep1u, 0u). On.
 REXCVAR_DEFINE_BOOL(bf_job_wait_sleep, true, "BF1943",
                     "The game's main thread sleeps 0.25 ms at a time while it waits for its jobs, not spinning");
+#if defined(BF_DEV_TOOLS)
+// BF_DEV_JOBWAITS=1 (dev builds): the game's waits for its jobs by caller, logged every 10 s: how many waits (runs of
+// empty polls from one call site on one thread), their total and longest time, and the empty polls. A wait ends at
+// a poll that ran a job, or when the thread next polls from another call site.
+namespace jobwake {
+std::string Stats();
+}
+namespace jobwaits {
+using Clock = std::chrono::steady_clock;
+struct Site {
+  uint64_t waits = 0, polls = 0, total_us = 0, max_us = 0;
+};
+std::mutex g_mutex;
+std::vector<std::pair<uint32_t, Site>> g_sites;
+Clock::time_point g_logged{};
+bool On() {
+  static const bool on = [] {
+    const char* v = std::getenv("BF_DEV_JOBWAITS");
+    return v && *v == '1';
+  }();
+  return on;
+}
+struct Run {
+  uint32_t caller = 0, polls = 0;
+  Clock::time_point first{}, last{};
+};
+void End(Run& run) {
+  if (!run.polls) return;
+  const uint64_t us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(run.last - run.first).count());
+  std::lock_guard lock(g_mutex);
+  auto it = std::find_if(g_sites.begin(), g_sites.end(), [&](const auto& s) { return s.first == run.caller; });
+  if (it == g_sites.end()) it = g_sites.insert(g_sites.end(), {run.caller, Site{}});
+  ++it->second.waits, it->second.polls += run.polls, it->second.total_us += us;
+  it->second.max_us = std::max(it->second.max_us, us);
+  run.polls = 0;
+  const auto now = Clock::now();
+  if (g_logged == Clock::time_point{}) g_logged = now;
+  const double secs = std::chrono::duration<double>(now - g_logged).count();
+  if (secs < 10) return;
+  std::sort(g_sites.begin(), g_sites.end(), [](const auto& a, const auto& b) { return a.second.total_us > b.second.total_us; });
+  std::string line;
+  for (size_t i = 0; i < g_sites.size() && i < 10; ++i) {
+    const Site& s = g_sites[i].second;
+    line += fmt::format("; {:08X}: {:.0f} waits/s, {:.1f} ms/s, longest {:.2f} ms, {:.0f} polls/s", g_sites[i].first,
+                        s.waits / secs, s.total_us / 1000.0 / secs, s.max_us / 1000.0, s.polls / secs);
+  }
+  REXLOG_INFO("BF job waits over {:.0f} s{}; {}", secs, line, jobwake::Stats());
+  g_sites.clear();
+  g_logged = now;
+}
+void Poll(uint32_t caller, bool ran) {
+  thread_local Run run;
+  if (ran || run.caller != caller) End(run);
+  if (ran) return;
+  const auto now = Clock::now();
+  if (!run.polls) run.caller = caller, run.first = now;
+  run.last = now;
+  ++run.polls;
+}
+}  // namespace jobwaits
+#endif
+
+// bf_job_wait_wake (with bf_job_wait_sleep): the main thread's frame wait (sub_823C2430: while the frame's job group
+// at client+3248 is not done, poll the scheduler) sleeps until another thread's poll has run a job, or a quarter
+// millisecond, instead of a quarter millisecond after every 64 polls. The wait ends when the frame's jobs are done,
+// and the game's jobs run in these polls (its JobManager threads), so a job run is when it can have ended. Measured
+// before (BF_DEV_JOBWAITS, run pr_jw1, Wake Island at the 90 FPS cap): that wait took 817 ms a second of the main
+// thread's time in 102,000 polls a second, each through the scheduler's lock: the main thread's 39% of a core was
+// nearly all those polls. Every wait still starts with 64 polls, so a short one never sleeps.
+REXCVAR_DEFINE_BOOL(bf_job_wait_wake, true, "BF1943",
+                    "The game's main thread sleeps in its frame wait until another thread has run a job");
+namespace jobwake {
+std::atomic<uint32_t> g_runs{0};       // jobs run by any thread's poll (the futex word on Linux)
+std::atomic<bool> g_sleeping{false};  // the main thread sleeps in its frame wait
+#if defined(_WIN32)
+HANDLE Event() {
+  static const HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  return event;
+}
+#endif
+#if defined(BF_DEV_TOOLS)
+std::atomic<uint64_t> g_woken{0}, g_timed_out{0}, g_skipped{0};
+#endif
+void Ran() {
+  g_runs.fetch_add(1);
+  if (!g_sleeping.load()) return;
+#if defined(_WIN32)
+  SetEvent(Event());
+#else
+  syscall(SYS_futex, reinterpret_cast<uint32_t*>(&g_runs), FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
+#endif
+}
+// With fewer processors the main thread's polls in this wait are the ones that pick up the frame's jobs first, while
+// the JobManager threads wait for a core: there, the wait polls as before (see bf_job_wait_wake's measurements).
+constexpr uint32_t kMinProcessors = 4;
+// The processors this process may run on (its affinity), read again at most once a second.
+uint32_t Processors() {
+  using Clock = std::chrono::steady_clock;
+  static std::atomic<uint32_t> count{0};
+  static std::atomic<int64_t> read_at{0};
+  const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+  if (count.load(std::memory_order_relaxed) && now - read_at.load(std::memory_order_relaxed) < 1000)
+    return count.load(std::memory_order_relaxed);
+  read_at.store(now, std::memory_order_relaxed);
+  uint32_t n = 0;
+#if defined(_WIN32)
+  DWORD_PTR process = 0, system = 0;
+  if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system))
+    for (; process; process &= process - 1) ++n;
+#else
+  cpu_set_t set;
+  if (sched_getaffinity(0, sizeof(set), &set) == 0) n = uint32_t(CPU_COUNT(&set));
+#endif
+  if (!n) n = std::max(1u, std::thread::hardware_concurrency());
+  count.store(n, std::memory_order_relaxed);
+  return n;
+}
+// Sleeps unless a job was run since `before` (read before this thread's poll); false when the wait could not be made.
+bool Sleep(uint32_t before) {
+  g_sleeping.store(true);
+  if (g_runs.load() != before) {
+    g_sleeping.store(false);
+#if defined(BF_DEV_TOOLS)
+    ++g_skipped;
+#endif
+    return true;
+  }
+  bool woken = false, ok = false;
+#if defined(_WIN32)
+  static thread_local HANDLE timer =
+      CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+  LARGE_INTEGER due;
+  due.QuadPart = -2500;  // 0.25 ms, in 100 ns units
+  if (timer && Event() && SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+    const HANDLE handles[2] = {Event(), timer};
+    const DWORD r = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+    woken = r == WAIT_OBJECT_0, ok = r == WAIT_OBJECT_0 || r == WAIT_OBJECT_0 + 1;
+  }
+#else
+  const timespec timeout{0, 250000};
+  const long r = syscall(SYS_futex, reinterpret_cast<uint32_t*>(&g_runs), FUTEX_WAIT_PRIVATE, before, &timeout,
+                         nullptr, 0);
+  woken = r == 0 || errno == EAGAIN, ok = r == 0 || errno == EAGAIN || errno == ETIMEDOUT || errno == EINTR;
+#endif
+  g_sleeping.store(false);
+#if defined(BF_DEV_TOOLS)
+  if (ok) ++(woken ? g_woken : g_timed_out);
+#endif
+  return ok;
+}
+#if defined(BF_DEV_TOOLS)
+std::string Stats() {
+  return fmt::format("the frame wait's sleeps: {} woken by a job, {} timed out, {} not made (a job had run)",
+                     g_woken.exchange(0), g_timed_out.exchange(0), g_skipped.exchange(0));
+}
+#endif
+}  // namespace jobwake
+
 REX_EXTERN(__imp__sub_82609000);
 REX_HOOK_RAW(sub_82609000) {
   const uint32_t caller = uint32_t(ctx.lr);
+  const bool frame_wait = caller == 0x823C24C8u;
+  const bool wake = REXCVAR_GET(bf_job_wait_wake) && REXCVAR_GET(bf_job_wait_sleep);
+  const uint32_t runs_before = wake && frame_wait ? jobwake::g_runs.load() : 0;
   __imp__sub_82609000(ctx, base);
-  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && caller == 0x823C24C8u;
+  const bool ran = ctx.r3.u32 & 0xFF;
+  if (wake && ran) jobwake::Ran();
+#if defined(BF_DEV_TOOLS)
+  if (jobwaits::On()) jobwaits::Poll(caller, ran);
+#endif
+  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && frame_wait;
   if (!sleep && !REXCVAR_GET(bf_job_wait_yield)) return;
-  thread_local uint32_t empty = 0;
-  if (ctx.r3.u32 & 0xFF) {
-    empty = 0;
+  // `empty` counts a thread's empty polls from any call site, as it always has: counting them per call site instead
+  // (reset when the site changed) made the waiting threads yield less, and on two cores the 1% low fell from 83 to
+  // 40 to 74 FPS (runs pr_nowake2c_*, 14 Nov 2026). The frame wait's own count is kept apart.
+  thread_local uint32_t empty = 0, frame_wait_polls = 0;
+  if (ran) {
+    empty = 0, frame_wait_polls = 0;
     return;
+  }
+  if (!frame_wait) frame_wait_polls = 0;
+  if (sleep && wake && jobwake::Processors() >= jobwake::kMinProcessors) {
+    // After the wait's first 64 polls: one poll per sleep, each until a job was run or 0.25 ms.
+    if (frame_wait_polls < 64) {
+      ++frame_wait_polls;
+      return;
+    }
+    if (jobwake::Sleep(runs_before)) return;
   }
   if (++empty < 64) return;
   empty = 0;
