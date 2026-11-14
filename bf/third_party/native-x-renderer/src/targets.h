@@ -31,6 +31,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -302,6 +303,7 @@ class ResolvedTextures {
   static std::pair<uint32_t, uint32_t> OnMemoryInvalidated(void* context, uint32_t start, uint32_t length,
                                                            bool exact_range);
   uint64_t HashGuest(const ResolvedTexture& texture) const;
+  ResolvedTexture* Newest(uint32_t address, uint32_t cube);
 
   Diligent::IRenderDevice* device_ = nullptr;
   RenderScale scale_, shadow_scale_;
@@ -314,6 +316,13 @@ class ResolvedTextures {
   };
   std::vector<Span> index_;
   uint64_t index_generation_ = 0;
+  struct NewestFound {
+    uint32_t address = 0;
+    uint32_t cube = 0;
+    uint64_t generation = 0;
+    ResolvedTexture* texture = nullptr;
+  };
+  std::array<NewestFound, 256> newest_{};
   uint64_t counter_ = 0;
   uint64_t generation_ = 1;
   uint64_t frame_ = 0;

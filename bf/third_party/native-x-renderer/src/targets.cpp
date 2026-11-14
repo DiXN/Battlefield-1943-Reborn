@@ -575,27 +575,24 @@ ResolvedTexture* ResolvedTextures::Find(uint32_t address, uint32_t guest_format,
   return it != textures_.end() && it->second.texture ? &it->second : nullptr;
 }
 
-ResolvedTexture* ResolvedTextures::FindNewest(uint32_t address) {
-  ApplyInvalidations();
-  ResolvedTexture* newest = nullptr;
-  for (auto it = textures_.lower_bound(Key{address, 0, 0, 0, 0, false, false});
-       it != textures_.end() && std::get<0>(it->first) == address; ++it) {
-    if (it->second.texture && (!newest || it->second.last_resolve > newest->last_resolve)) newest = &it->second;
-  }
-  return newest && !newest->invalidated ? newest : nullptr;
-}
+ResolvedTexture* ResolvedTextures::FindNewest(uint32_t address) { return Newest(address, 2); }
 
-ResolvedTexture* ResolvedTextures::FindNewest(uint32_t address, bool cube) {
+ResolvedTexture* ResolvedTextures::FindNewest(uint32_t address, bool cube) { return Newest(address, cube); }
+
+ResolvedTexture* ResolvedTextures::Newest(uint32_t address, uint32_t cube) {
   ApplyInvalidations();
+  NewestFound& found = newest_[((address >> 12) ^ cube) & 255];
+  if (found.generation == generation_ && found.address == address && found.cube == cube) return found.texture;
   ResolvedTexture* newest = nullptr;
   for (auto it = textures_.lower_bound(Key{address, 0, 0, 0, 0, false, false});
        it != textures_.end() && std::get<0>(it->first) == address; ++it) {
-    if (it->second.texture && it->second.cube == cube &&
+    if (it->second.texture && (cube == 2 || it->second.cube == bool(cube)) &&
         (!newest || it->second.last_resolve > newest->last_resolve)) {
       newest = &it->second;
     }
   }
-  return newest && !newest->invalidated ? newest : nullptr;
+  found = {address, cube, generation_, newest && !newest->invalidated ? newest : nullptr};
+  return found.texture;
 }
 
 uint64_t TextureBytes(const TextureDesc& desc) {
