@@ -301,6 +301,7 @@ void CommandProcessor::WorkerThreadMain() {
     assert_true(read_ptr_index_ != write_ptr_index);
 
     // Execute. Note that we handle wraparound transparently.
+    gate_tag_ = kick_tag_.load();
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
@@ -391,6 +392,7 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
 }
 
 void CommandProcessor::UpdateWritePointer(uint32_t value) {
+  if (auto kick_tag = kick_tag_fn_.load(std::memory_order_acquire)) kick_tag_.store(kick_tag(signal_gate_user_));
   write_ptr_index_ = value;
   write_ptr_index_event_->Set();
 }
@@ -1059,11 +1061,11 @@ void CommandProcessor::PassSignalGate(GateSite site) {
   auto gate = signal_gate_.load(std::memory_order_acquire);
   if (!gate) return;
   if (REXCVAR_GET(gpu_signal_gate_stats) <= 0) {
-    gate(signal_gate_user_);
+    gate(signal_gate_user_, gate_tag_);
     return;
   }
   auto start = std::chrono::steady_clock::now();
-  gate(signal_gate_user_);
+  gate(signal_gate_user_, gate_tag_);
   gate_stats_[site].passes.fetch_add(1, std::memory_order_relaxed);
   gate_stats_[site].waited_ns.fetch_add(
       uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()),

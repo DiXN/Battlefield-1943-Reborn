@@ -97,8 +97,9 @@ class CommandProcessor {
   // See system::IGraphicsSystem::SetHostRendering.
   void SetHostRendering(bool enabled) { host_rendering_.store(enabled, std::memory_order_relaxed); }
   // See system::IGraphicsSystem::SetSignalGate.
-  void SetSignalGate(system::GpuSignalGate gate, void* user) {
+  void SetSignalGate(system::GpuSignalGate gate, void* user, system::GpuKickTag kick_tag) {
     signal_gate_user_ = user;
+    kick_tag_fn_.store(kick_tag, std::memory_order_release);
     signal_gate_.store(gate, std::memory_order_release);
   }
   // See system::IGraphicsSystem::SetSwapObserver and GetSwapCounts.
@@ -320,6 +321,9 @@ class CommandProcessor {
   void LogGateStats(uint64_t swaps);
   std::atomic<system::GpuSignalGate> signal_gate_{nullptr};
   void* signal_gate_user_ = nullptr;
+  std::atomic<system::GpuKickTag> kick_tag_fn_{nullptr};
+  std::atomic<uint64_t> kick_tag_{UINT64_MAX};
+  uint64_t gate_tag_ = UINT64_MAX;
   // The guest's swaps executed (PM4_XE_SWAP), and who is told of each (SetSwapObserver).
   std::atomic<uint64_t> swaps_executed_{0};
   std::atomic<system::GpuSwapObserver> swap_observer_{nullptr};

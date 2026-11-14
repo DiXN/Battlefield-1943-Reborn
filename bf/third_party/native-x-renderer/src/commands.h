@@ -147,7 +147,8 @@ class CommandQueue {
   Command& Next();
   void Publish();
   // Returns once every command published before the call has run: the command processor's signal gate.
-  void WaitIdle();
+  void WaitIdle(uint64_t limit = UINT64_MAX);
+  uint64_t Produced() const { return produced_.load(std::memory_order_seq_cst); }
 
   // On the renderer's thread, while a command runs: the command `ahead` places after it, if the game's thread has
   // published it, else nullptr (D98). Published commands do not change until they have run. Threaded only.
