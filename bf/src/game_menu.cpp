@@ -3288,6 +3288,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       ApplyFrameRate();
     };
     rows.push_back(frame);
+    rows.push_back(Toggle("Frame rate", "Future frame rendering",
+                          "Renders a frame ahead for a higher frame rate, but adds input lag. Off gives the lowest "
+                          "input lag. Applies at once.",
+                          "bf_two_frames_in_flight"));
 
     // Camera: King Kong's rows; BF's camera and effects first need finding in the game's code.
     // Field of view (fov.cpp): horizontal at 16:9; the game's own is 86. Aiming down sights still narrows it.
