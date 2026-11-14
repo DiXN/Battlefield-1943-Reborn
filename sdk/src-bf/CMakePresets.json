@@ -37,8 +37,10 @@
             "cacheVariables": {
                 "CMAKE_C_COMPILER": "clang",
                 "CMAKE_CXX_COMPILER": "clang++",
-                "CMAKE_C_FLAGS": "-march=x86-64-v2",
-                "CMAKE_CXX_FLAGS": "-march=x86-64-v2",
+                "CMAKE_C_FLAGS": "-march=x86-64-v2 -fno-semantic-interposition -fno-plt",
+                "CMAKE_CXX_FLAGS": "-march=x86-64-v2 -fno-semantic-interposition -fno-plt",
+                "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld -Wl,-O2 -Wl,--icf=safe",
+                "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld -Wl,-O2 -Wl,--icf=safe",
                 "CMAKE_CXX_STANDARD": "23",
                 "CMAKE_CONFIGURATION_TYPES": "Debug;Release;RelWithDebInfo",
                 "CMAKE_CROSS_CONFIGS": "all",
