@@ -74,6 +74,12 @@
 
 #include <xxhash.h>
 
+#if defined(_M_X64)
+#include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(native_x_renderer_replay_recorded_targets, false, "NativeXRenderer",
                     "Draws replayed from recorded command buffers render into the targets the recording device had "
                     "bound (D129) instead of the running device's (D131); for diagnosis");
@@ -654,17 +660,34 @@ struct PhaseTimes {
   double draws = 0, clears = 0, effects = 0, resolves = 0, present = 0;
 } g_phase;
 
+#if defined(__x86_64__) || defined(_M_X64)
+uint64_t Ticks() { return __rdtsc(); }
+double TicksMs(uint64_t ticks) {
+  static const double ms_per_tick = [] {
+    const auto start = Pacing::Clock::now();
+    const uint64_t first = __rdtsc();
+    while (Pacing::Clock::now() - start < std::chrono::milliseconds(5)) {
+    }
+    return Pacing::Ms(Pacing::Clock::now() - start) / double(__rdtsc() - first);
+  }();
+  return double(ticks) * ms_per_tick;
+}
+#else
+uint64_t Ticks() { return uint64_t(Pacing::Clock::now().time_since_epoch().count()); }
+double TicksMs(uint64_t ticks) { return Pacing::Ms(Pacing::Clock::duration(ticks)); }
+#endif
+
 class RendererTime {
  public:
-  explicit RendererTime(double* phase = nullptr) : start_(Pacing::Clock::now()), phase_(phase) {}
+  explicit RendererTime(double* phase = nullptr) : start_(Ticks()), phase_(phase) {}
   ~RendererTime() {
-    const double ms = Pacing::Ms(Pacing::Clock::now() - start_);
+    const double ms = TicksMs(Ticks() - start_);
     g_pacing.renderer_ms += ms;
     if (phase_) *phase_ += ms;
   }
 
  private:
-  Pacing::Clock::time_point start_;
+  uint64_t start_;
   double* phase_;
 };
 

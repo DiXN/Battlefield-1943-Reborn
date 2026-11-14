@@ -367,8 +367,7 @@ uint64_t ResolvedTextures::HashGuest(const ResolvedTexture& texture) const {
   return data && texture.guest_bytes ? XXH3_64bits(data, texture.guest_bytes) : 0;
 }
 
-void ResolvedTextures::ApplyInvalidations() {
-  if (!has_pending_.load(std::memory_order_acquire)) return;
+void ResolvedTextures::ApplyPending() {
   {
     std::lock_guard lock(pending_mutex_);
     applying_.swap(pending_);

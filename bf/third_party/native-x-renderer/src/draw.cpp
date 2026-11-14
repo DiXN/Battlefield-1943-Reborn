@@ -35,6 +35,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
+#include <numeric>
 #include <set>
 #include <utility>
 #include <iterator>
@@ -1062,9 +1063,10 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   }
   // D101: a draw into an offscreen target waits for its translations (the workers finish them on their own); D128:
   // within the frame's budget when one is set.
-  const auto wait_start = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point wait_start{};
   bool waited = false;
   auto may_wait = [&] {
+    if (wait_start == std::chrono::steady_clock::time_point{}) wait_start = std::chrono::steady_clock::now();
     const auto elapsed = std::chrono::steady_clock::now() - wait_start;
     if (elapsed >= kPipelineWaitLimit) return false;
     return wait_budget_ms_ <= 0.0 ||
@@ -1481,7 +1483,9 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           if (sized_constant >= first_register && sized_constant < first_register + count) {
             std::memcpy(vertex_constants_.data() + kept + size_t(sized_constant - first_register) * 16, host_size, 16);
           }
-          for (uint32_t k = 0; k < count; ++k) vertex_registers_.push_back(uint8_t(first_register + k));
+          size_t registers = vertex_registers_.size();
+          vertex_registers_.resize(registers + count);
+          std::iota(vertex_registers_.begin() + registers, vertex_registers_.end(), uint8_t(first_register));
         }
         out += bytes;
       }
@@ -1586,11 +1590,8 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     // same registers hold vertex fetches.
     if (const int32_t forced = REXCVAR_GET(anisotropic_override); forced >= 2 && forced < 6) {
       auto* words = reinterpret_cast<uint32_t*>(map.data());
-      for (uint32_t mask = used_texture_mask; mask;) {
-        uint32_t index = 0;
-        while (!(mask & (1u << index))) ++index;
-        mask &= ~(1u << index);
-        uint32_t& word = words[index * 6 + 4];
+      for (uint32_t mask = used_texture_mask; mask; mask &= mask - 1) {
+        uint32_t& word = words[std::countr_zero(mask) * 6 + 4];
         if (word & (1u << 21)) word &= ~(0x3FFu << 12);  // the field's sign bit: a negative bias
       }
     }
@@ -2540,12 +2541,12 @@ void DrawPath::MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t
     }
   }
   if (n < 7) return;
-  std::array<uint8_t, 256 * 16> values;
-  for (uint32_t k = 0; k < n; ++k) std::memcpy(values.data() + k * 16, &regs[first + (uint32_t(numbers[k]) << 2)], 16);
-  uint32_t index = 0;
+  auto at = [&](uint32_t k) { return reinterpret_cast<const uint8_t*>(&regs[first + (uint32_t(numbers[k]) << 2)]); };
+  uint32_t index = 0, found = 0;
   bool transposed = false;
-  if (!CameraVote::FindMatrix(values.data(), numbers, n, index, transposed)) return;
-  const Mat4d a = CameraVote::MatrixAt(values.data(), index, transposed);
+  while (index + 4 <= n && !CameraVote::FindMatrix(at(index), numbers + index, 4, found, transposed)) ++index;
+  if (index + 4 > n) return;
+  const Mat4d a = CameraVote::MatrixAt(at(index), 0, transposed);
   GtaoProjection projection;
   if (!GtaoProjection::FromMatrix(a, projection) || !(projection.near_plane() > 0.0f) ||
       projection.near_plane() >= 0.5f) {
@@ -2586,7 +2587,7 @@ void DrawPath::MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t
     if (numbers[k + 2] != numbers[k] + 2) continue;
     if (k + 2 >= index && k <= index + 3) continue;
     float r[3][4];
-    for (int i = 0; i < 3; ++i) std::memcpy(r[i], values.data() + (k + i) * 16, 16);
+    for (int i = 0; i < 3; ++i) std::memcpy(r[i], at(k + i), 16);
     double len[3];
     bool rigid = true;
     for (int i = 0; i < 3 && rigid; ++i) {
