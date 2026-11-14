@@ -735,6 +735,9 @@ REX_HOOK_RAW(sub_8243BB70) {
       const auto now = std::chrono::steady_clock::now();
       if (!bf1943::g.seen_ready) {
         bf1943::g.seen_ready = true, bf1943::g.ready_at = now;
+        // The game's own Loading complete (its time from the loading screen is a level load's length; the driver's
+        // spawn follows later, after the loading screen's last update).
+        REXLOG_INFO("BF menu driver: Loading complete (the game's gameIsReady)");
       } else if (bf1943::g.stage == bf1943::Stage::kInGame && now - bf1943::g.ready_at > std::chrono::seconds(10)) {
         // A second Loading complete in the same match: the server changed the level (its map rotation). BF sends no
         // onStartLoading then, only playerRoleReady and, once the new level is in, gameIsReady (run rottrace1).

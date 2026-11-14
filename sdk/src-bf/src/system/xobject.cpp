@@ -197,9 +197,11 @@ void XObject::SetAttributes(uint32_t obj_attributes_ptr) {
 // with a 1 ms timeout and look again, about 800 times a second each, 14% of a core on an idle Linux server. A job
 // posted wakes them at once whatever the timeout, so on a server their timeouts are lengthened to this (0: as asked).
 // The game too since the same day's performance work (default 5): the client's four job threads woke about 15,000
-// times a second in a match. Measured on Windows (Wake Island's carrier, 90 FPS): on all sixteen threads 2.5% less
-// CPU, the same frame times and level load (7.1 s); held to two cores, 1% low 80 FPS and 2 frames over twice the
-// average in two runs, against 45 to 77 FPS and 2 to 17 without (runs pb_floor_*, pb_nofl_*, pb_tq_wake2c).
+// times a second in a match. Measured on Windows (Wake Island's carrier, 90 FPS): on all sixteen threads about 1%
+// less CPU (1.485 cores against 1.503) and the same frame times; held to two cores, 1% low 80 FPS and 2 frames over
+// twice the average in two runs, against 67 FPS and 6 without (runs pb_floor_wake16, pb_tq_wake16, pb_floor_wake2c,
+// pb_floor_wake2c2, pb_tq_wake2c). (The pb_nofl_* runs had a flag given twice and drew without NativeXRenderer:
+// not comparable.)
 
 namespace {
 std::chrono::milliseconds JobWaitFloor(std::chrono::milliseconds timeout) {
