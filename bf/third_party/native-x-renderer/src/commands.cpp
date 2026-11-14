@@ -116,9 +116,9 @@ const Command* CommandQueue::Peek(uint32_t ahead) const {
   return &slots_[index % kSlots];
 }
 
-void CommandQueue::WaitIdle() {
+void CommandQueue::WaitIdle(uint64_t limit) {
   if (!threaded_) return;
-  WaitConsumed(produced_.load(std::memory_order_seq_cst), gate_waits_, gate_wait_ns_);
+  WaitConsumed(std::min(limit, produced_.load(std::memory_order_seq_cst)), gate_waits_, gate_wait_ns_);
 }
 
 void CommandQueue::WaitConsumed(uint64_t target, std::atomic<uint64_t>& waits, std::atomic<uint64_t>& wait_ns) {

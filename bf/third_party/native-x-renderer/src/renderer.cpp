@@ -3300,12 +3300,12 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
     static bool raise_gate = false;
     raise_gate = raise;
     graphics->SetSignalGate(
-        [](void*) {
+        [](void*, uint64_t tag) {
           static thread_local bool raised = false;
           if (raise_gate && !raised) raised = true, RaiseCurrentThreadPriority();
-          g_queue.WaitIdle();
+          g_queue.WaitIdle(tag);
         },
-        nullptr);
+        nullptr, [](void*) { return g_queue.Produced(); });
     std::atexit([] { g_queue.Stop(); });
   }
   if (g_present_with_swaps) {
