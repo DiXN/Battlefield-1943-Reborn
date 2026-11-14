@@ -59,7 +59,8 @@ using GpuDrawObserver = void (*)(void* user, const GpuDrawInfo& info);
 using OcclusionQueryResolver = bool (*)(void* user, uint32_t sample_count_address, uint64_t* samples);
 
 // Passed by the command processor before it signals the guest (see IGraphicsSystem::SetSignalGate).
-using GpuSignalGate = void (*)(void* user);
+using GpuSignalGate = void (*)(void* user, uint64_t tag);
+using GpuKickTag = uint64_t (*)(void* user);
 
 // Called by the command processor after it executed one of the guest's swaps, with the number executed so far
 // (see IGraphicsSystem::SetSwapObserver).
@@ -154,9 +155,10 @@ class IGraphicsSystem {
   // there until it has consumed what the guest submitted so far: the guest then never sees the GPU further
   // along than that renderer, and does not reuse memory it still reads. nullptr turns it off. Returns false
   // if the system has no command processor.
-  virtual bool SetSignalGate(GpuSignalGate gate, void* user) {
+  virtual bool SetSignalGate(GpuSignalGate gate, void* user, GpuKickTag kick_tag = nullptr) {
     (void)gate;
     (void)user;
+    (void)kick_tag;
     return false;
   }
 

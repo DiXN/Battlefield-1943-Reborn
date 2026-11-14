@@ -88,8 +88,8 @@ Release packages: `powershell -File tools\make_packages.ps1 -Version <version> -
 The Linux build runs in WSL from the Windows checkout, after Windows steps 1 to 5: they unpack the game, generate
 the code and patch DiligentCore, and the Linux build uses all three.
 
-You need WSL with Ubuntu 24.04 (`wsl -d Ubuntu-24.04`), clang 20, CMake, Ninja, rsync, git, g++ and the ReXGlue SDK's
-Linux prerequisites (its [wiki](https://github.com/rexglue/rexglue-sdk/wiki)).
+You need WSL with Ubuntu 24.04 (`wsl -d Ubuntu-24.04`), clang 20, lld 20, CMake, Ninja, rsync, git, g++ and the ReXGlue
+SDK's Linux prerequisites (its [wiki](https://github.com/rexglue/rexglue-sdk/wiki)).
 
 ```bash
 export BF_LINUX_MAIN=/mnt/f/BF-1942-MP-Decomp   # your checkout as WSL sees it (this one is the default)

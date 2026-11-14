@@ -44,6 +44,8 @@ namespace rex::audio {
 
 namespace {
 constexpr std::chrono::milliseconds kWorkerShutdownTimeout{500};
+constexpr auto kFramePeriod = std::chrono::microseconds(256 * 1000000 / 48000);
+constexpr auto kMinCallbackSpacing = kFramePeriod * 3 / 4;
 }  // namespace
 
 AudioSystem::AudioSystem(runtime::FunctionDispatcher* function_dispatcher)
@@ -102,6 +104,7 @@ void AudioSystem::WorkerThreadMain() {
 
   // Main run loop.
   uint32_t diag_pump_count = 0;
+  std::chrono::steady_clock::time_point next_callback[kMaximumClientCount] = {};
   while (worker_running_) {
     // These handles signify the number of submitted samples. Once we reach
     // 64 samples, we wait until our audio backend releases a semaphore
@@ -144,6 +147,13 @@ void AudioSystem::WorkerThreadMain() {
           REXAPU_DEBUG("AudioWorker: dispatching callback {:08X} with arg {:08X} for client {}",
                        client_callback, client_callback_arg, index);
         }
+        auto now = std::chrono::steady_clock::now();
+        if (now < next_callback[index]) {
+          rex::thread::Sleep(
+              std::chrono::duration_cast<std::chrono::microseconds>(next_callback[index] - now));
+          now = next_callback[index];
+        }
+        next_callback[index] = now + kMinCallbackSpacing;
         SCOPE_profile_cpu_i("apu", "rex::audio::AudioSystem->client_callback");
         uint64_t args[] = {client_callback_arg};
         function_dispatcher_->Execute(worker_thread_->thread_state(), client_callback, args,

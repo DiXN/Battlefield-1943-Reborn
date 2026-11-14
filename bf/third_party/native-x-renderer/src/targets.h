@@ -31,6 +31,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <map>
@@ -251,7 +252,9 @@ class ResolvedTextures {
   void MarkUsed(ResolvedTexture* texture) { texture->last_used = frame_; }
   // Invalidates the textures the guest memory ranges queued by the watch overlap: always for a CPU write, else if the
   // guest's data there changed since the resolve (D74). The calls above apply them first; cheap when none is queued.
-  void ApplyInvalidations();
+  void ApplyInvalidations() {
+    if (has_pending_.load(std::memory_order_acquire)) ApplyPending();
+  }
   // Once a frame (EndFrame): the textures kept with their data unchanged are hashed again, then watched again or
   // invalidated.
   void RecheckKept();
@@ -300,6 +303,7 @@ class ResolvedTextures {
   static std::pair<uint32_t, uint32_t> OnMemoryInvalidated(void* context, uint32_t start, uint32_t length,
                                                            bool exact_range);
   uint64_t HashGuest(const ResolvedTexture& texture) const;
+  ResolvedTexture* Newest(uint32_t address, uint32_t cube);
 
   Diligent::IRenderDevice* device_ = nullptr;
   RenderScale scale_, shadow_scale_;
@@ -312,6 +316,13 @@ class ResolvedTextures {
   };
   std::vector<Span> index_;
   uint64_t index_generation_ = 0;
+  struct NewestFound {
+    uint32_t address = 0;
+    uint32_t cube = 0;
+    uint64_t generation = 0;
+    ResolvedTexture* texture = nullptr;
+  };
+  std::array<NewestFound, 256> newest_{};
   uint64_t counter_ = 0;
   uint64_t generation_ = 1;
   uint64_t frame_ = 0;
@@ -325,6 +336,7 @@ class ResolvedTextures {
   std::vector<Range> pending_;  // guarded by pending_mutex_
   std::vector<Range> applying_;
   std::atomic<bool> has_pending_{false};
+  void ApplyPending();
   bool recheck_pending_ = false;
   void Invalidate(ResolvedTexture& texture, bool cpu_write, uint32_t range_first, uint32_t range_last);
   uint32_t invalidated_ = 0, logged_invalidations_ = 0, kept_ = 0, logged_kept_ = 0;

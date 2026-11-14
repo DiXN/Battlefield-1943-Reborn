@@ -365,12 +365,12 @@ class GuestTextures::HostTexture final : public rg::TextureCache::Texture {
 };
 
 GuestTextures::GuestTextures(const rg::RegisterFile& registers, GuestMemory& memory, ResolvedTextures& resolved,
-                             IRenderDevice* device, IDeviceContext* context)
+                             IRenderDevice* device, Recorder* recorder)
     : TextureCache(registers, memory, 1, 1),
       memory_(memory),
       resolved_(resolved),
       device_(device),
-      context_(context) {}
+      recorder_(recorder) {}
 
 GuestTextures::~GuestTextures() { DestroyAllTextures(true); }
 
@@ -880,9 +880,10 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
     source_mips = make_source_view(key.mip_page << 12, host_texture.GetGuestMipsSize());
     if (!source_mips) return false;
   }
-  memory_.PrepareForRead(context_);
+  memory_.PrepareForRead();
+  IDeviceContext* const context = recorder_->context();
 
-  context_->SetPipelineState(pipeline.pso);
+  context->SetPipelineState(pipeline.pso);
   pipeline.dest->Set(scratch->GetDefaultView(BUFFER_VIEW_UNORDERED_ACCESS));
   LoadConstants constants{};
   constants.is_tiled_3d_endian_scale = uint32_t(key.tiled) | (uint32_t(is_3d) << 1) |
@@ -922,9 +923,9 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
     constants.host_pitch = load_shader_info.bytes_per_host_block * level_host_layout.x_pitch_blocks;
     for (uint32_t slice = 0; slice < array_size; ++slice) {
       pipeline.constants->SetInlineConstants(&constants, 0, sizeof(constants) / 4);
-      context_->CommitShaderResources(pipeline.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->CommitShaderResources(pipeline.srb, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
       DispatchComputeAttribs dispatch{group_count_x, group_count_y, constants.size_blocks[2]};
-      context_->DispatchCompute(dispatch);
+      context->DispatchCompute(dispatch);
       constants.guest_offset += level_guest_layout.array_slice_stride_bytes;
       constants.host_offset += uint32_t(level_host_layout.slice_size_bytes);
     }
@@ -962,7 +963,7 @@ bool GuestTextures::LoadFromMemory(HostTexture& host_texture, bool load_base, bo
         data.SrcOffset = offset + level_host_layout.slice_size_bytes * slice + depth_stride * z;
         data.Stride = row_pitch;
         data.DepthStride = depth_stride;
-        context_->UpdateTexture(host_texture.texture(), level, slice, box, data,
+        context->UpdateTexture(host_texture.texture(), level, slice, box, data,
                                 RESOURCE_STATE_TRANSITION_MODE_TRANSITION, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
       }
     }
@@ -1016,7 +1017,7 @@ void GuestTextures::Patch(HostTexture& host_texture, bool again) {
   TextureSubResData data;
   data.pData = rgba.data();
   data.Stride = uint64_t(w) * 4;
-  context_->UpdateTexture(host_texture.texture(), 0, 0, box, data, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
+  recorder_->context()->UpdateTexture(host_texture.texture(), 0, 0, box, data, RESOURCE_STATE_TRANSITION_MODE_TRANSITION,
                           RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
   REXLOG_INFO("[native_x_renderer] the game's pictures written over the {}x{} texture at {:08X} ({})", w, h,
               uint32_t(key.base_page) << 12, again ? "again, D160" : "D142");

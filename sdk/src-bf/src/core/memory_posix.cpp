@@ -25,6 +25,11 @@
 #include <mach/vm_region.h>
 #endif  // REX_PLATFORM_MAC
 
+#if REX_PLATFORM_LINUX
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#endif
+
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -173,6 +178,24 @@ static bool ParseProcMapsLine(const std::string& line, LinuxMapEntry& out) {
 // Find the mapping entry in /proc/self/maps that contains the given address
 static bool FindEntryForAddress(void* address, LinuxMapEntry& out_entry) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(address);
+#ifdef PROCMAP_QUERY
+  static thread_local int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+  if (maps_fd >= 0) {
+    procmap_query query{};
+    query.size = sizeof(query);
+    query.query_addr = addr;
+    if (ioctl(maps_fd, PROCMAP_QUERY, &query) == 0) {
+      out_entry.start = static_cast<uintptr_t>(query.vma_start);
+      out_entry.end = static_cast<uintptr_t>(query.vma_end);
+      out_entry.perms[0] = query.vma_flags & PROCMAP_QUERY_VMA_READABLE ? 'r' : '-';
+      out_entry.perms[1] = query.vma_flags & PROCMAP_QUERY_VMA_WRITABLE ? 'w' : '-';
+      out_entry.perms[2] = query.vma_flags & PROCMAP_QUERY_VMA_EXECUTABLE ? 'x' : '-';
+      out_entry.perms[3] = query.vma_flags & PROCMAP_QUERY_VMA_SHARED ? 's' : 'p';
+      return true;
+    }
+    if (errno == ENOENT) return false;
+  }
+#endif
   std::ifstream maps("/proc/self/maps");
   if (!maps.is_open())
     return false;

@@ -74,6 +74,12 @@
 
 #include <xxhash.h>
 
+#if defined(_M_X64)
+#include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(native_x_renderer_replay_recorded_targets, false, "NativeXRenderer",
                     "Draws replayed from recorded command buffers render into the targets the recording device had "
                     "bound (D129) instead of the running device's (D131); for diagnosis");
@@ -171,6 +177,9 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_thread, true, "NativeXRenderer",
                     "Run the renderer on a thread of its own (read at startup, D71): the game's render thread only "
                     "captures what each D3D call needs, and the renderer's thread draws, through DiligentCore and the "
                     "driver. Off: all of it on the game's render thread, inside its D3D calls");
+REXCVAR_DEFINE_BOOL(native_x_renderer_record_thread, true, "NativeXRenderer",
+                    "With native_x_renderer_thread: the draws' DiligentCore calls made on a second thread, the "
+                    "recorder's, while the renderer's thread prepares the next draws (read at startup)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_present_with_swaps, false, "NativeXRenderer",
                     "Show each frame when the command processor executes the game's swap for it, as the SDK's "
                     "presenters do, instead of when the game calls Present (read at startup, D86): the game's CPU "
@@ -654,17 +663,34 @@ struct PhaseTimes {
   double draws = 0, clears = 0, effects = 0, resolves = 0, present = 0;
 } g_phase;
 
+#if defined(__x86_64__) || defined(_M_X64)
+uint64_t Ticks() { return __rdtsc(); }
+double TicksMs(uint64_t ticks) {
+  static const double ms_per_tick = [] {
+    const auto start = Pacing::Clock::now();
+    const uint64_t first = __rdtsc();
+    while (Pacing::Clock::now() - start < std::chrono::milliseconds(5)) {
+    }
+    return Pacing::Ms(Pacing::Clock::now() - start) / double(__rdtsc() - first);
+  }();
+  return double(ticks) * ms_per_tick;
+}
+#else
+uint64_t Ticks() { return uint64_t(Pacing::Clock::now().time_since_epoch().count()); }
+double TicksMs(uint64_t ticks) { return Pacing::Ms(Pacing::Clock::duration(ticks)); }
+#endif
+
 class RendererTime {
  public:
-  explicit RendererTime(double* phase = nullptr) : start_(Pacing::Clock::now()), phase_(phase) {}
+  explicit RendererTime(double* phase = nullptr) : start_(Ticks()), phase_(phase) {}
   ~RendererTime() {
-    const double ms = Pacing::Ms(Pacing::Clock::now() - start_);
+    const double ms = TicksMs(Ticks() - start_);
     g_pacing.renderer_ms += ms;
     if (phase_) *phase_ += ms;
   }
 
  private:
-  Pacing::Clock::time_point start_;
+  uint64_t start_;
   double* phase_;
 };
 
@@ -3290,22 +3316,30 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
     }
   }
   CommandQueue::Poller poller = nullptr;
-  if (g_present_with_swaps) poller = [] { PresentPending(); };
+  if (g_present_with_swaps) poller = [] {
+    g_device->recorder().BeginInline();
+    PresentPending();
+    g_device->recorder().EndInline();
+  };
   const bool raise = REXCVAR_GET(native_x_renderer_raise_priority);
   g_queue.SetRaisePriority(raise);
+  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) g_device->recorder().Start();
   g_queue.Start(threaded, &Execute, poller);
   if (threaded) {
     // The gate is called on the command processor's thread: its priority raised there, the first time (D136).
     static bool raise_gate = false;
     raise_gate = raise;
     graphics->SetSignalGate(
-        [](void*) {
+        [](void*, uint64_t tag) {
           static thread_local bool raised = false;
           if (raise_gate && !raised) raised = true, RaiseCurrentThreadPriority();
-          g_queue.WaitIdle();
+          g_queue.WaitIdle(tag);
         },
-        nullptr);
-    std::atexit([] { g_queue.Stop(); });
+        nullptr, [](void*) { return g_queue.Produced(); });
+    std::atexit([] {
+      g_queue.Stop();
+      if (g_device) g_device->recorder().Stop();
+    });
   }
   if (g_present_with_swaps) {
     graphics->SetSwapObserver(
@@ -3801,7 +3835,22 @@ void ExecuteFrameEnd(const Command& c) {
   g_stats = {};
 }
 
+// A draw's context calls are recorded for the recorder's thread; any other command, and a draw that presents
+// first, makes its own at once, after the recorded ones. A command counts as run once this thread is past it: a
+// recorded call holds copies of what it uploads, and a draw changes nothing the game reads.
+void ExecuteCommand(Command& c);
+
 void Execute(Command& c) {
+  Recorder* recorder = g_device && g_device->recorder().threaded() ? &g_device->recorder() : nullptr;
+  if (!recorder) return ExecuteCommand(c);
+  const bool record = c.type == Command::Type::kDraw && !g_pending_count;
+  if (!record) recorder->BeginInline();
+  ExecuteCommand(c);
+  if (record) recorder->Publish();
+  else recorder->EndInline();
+}
+
+void ExecuteCommand(Command& c) {
   if (g_pending_count) PresentPending();
   // A command past the last uploads-ahead window (D98): its data is no longer known to be as the window found it.
   if (g_draw && g_queue.running_index() >= g_ahead_until) g_draw->EndAheadWindow();

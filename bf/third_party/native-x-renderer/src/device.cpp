@@ -212,6 +212,7 @@ bool Device::Create(void* native_window, bool half_precision) {
   }
   if (!device_) factory->CreateDeviceAndContextsVk(create_info, &device_, contexts);
   context_.Attach(contexts[0]);
+  recorder_.Initialize(context_);
   if (!device_ || !context_) {
     REXLOG_ERROR("[native_x_renderer] could not create the Vulkan device");
     return false;
@@ -249,6 +250,7 @@ bool Device::Create(void* native_window, bool half_precision) {
   window.pDisplay = host->display;
   window.pWaylandSurface = host->wayland_surface;
   window.WindowId = host->x11_window;
+  if (host->pixel_size) swap_chain_desc.Width = host->pixel_size(false), swap_chain_desc.Height = host->pixel_size(true);
 #endif
   factory->CreateSwapChainVk(device_, context_, swap_chain_desc, window, &swap_chain_);
   if (!swap_chain_) {

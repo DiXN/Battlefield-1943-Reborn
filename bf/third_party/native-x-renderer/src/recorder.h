@@ -1,0 +1,112 @@
+// NativeXRenderer - the recorder: the immediate context's calls of the draw path, made on a thread of their own in the
+// order they were recorded (internal).
+
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <new>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include "Buffer.h"
+#include "DeviceContext.h"
+
+namespace native_x_renderer {
+
+class Recorder {
+ public:
+  ~Recorder() { Stop(); }
+  void Initialize(Diligent::IDeviceContext* context);
+  void Start();
+  void Stop();
+  bool threaded() const { return thread_.joinable(); }
+
+  // The context for direct use: what was recorded is done first.
+  Diligent::IDeviceContext* context() {
+    if (threaded() && std::this_thread::get_id() != thread_id_) Drain();
+    return context_;
+  }
+
+  // Until EndInline, calls are made at once, on the calling thread, after what was recorded before.
+  void BeginInline() {
+    Drain();
+    inline_ = true;
+  }
+  void EndInline() { inline_ = false; }
+
+  // `f(context)`, after what was recorded before it. Its captures are destroyed after it ran.
+  template <typename F>
+  void Do(F&& f) {
+    if (inline_ || !threaded()) {
+      f(context_);
+      if (!threaded()) Consume();
+      return;
+    }
+    using T = std::decay_t<F>;
+    static_assert(alignof(T) <= kAlign);
+    new (Allocate(sizeof(T), [](void* p, Diligent::IDeviceContext* c) {
+      T* t = static_cast<T*>(p);
+      (*t)(c);
+      t->~T();
+    })) T(std::forward<F>(f));
+  }
+  // Memory for the data of the calls recorded next.
+  uint8_t* Bytes(size_t size) { return static_cast<uint8_t*>(Allocate(size, nullptr)); }
+  void UpdateBuffer(Diligent::IBuffer* buffer, uint64_t offset, uint64_t size, const void* data);
+
+  // Hands what was recorded to the thread.
+  void Publish();
+  // Publishes and waits until it is done.
+  void Drain();
+
+ private:
+  static constexpr size_t kAlign = 16;
+  static constexpr uint32_t kBlockSize = 4u << 20;
+  using RunFn = void (*)(void*, Diligent::IDeviceContext*);
+  struct Header {
+    RunFn run;
+    uint32_t size;
+  };
+  struct Block {
+    explicit Block(uint32_t capacity) : capacity(capacity), data(new (std::align_val_t(kAlign)) uint8_t[capacity]) {}
+    ~Block() { ::operator delete[](data, std::align_val_t(kAlign)); }
+    const uint32_t capacity;
+    uint8_t* const data;
+    std::atomic<uint32_t> published{0};
+    std::atomic<Block*> next{nullptr};
+  };
+
+  void* Allocate(size_t size, RunFn run);
+  Block* NewBlock(uint32_t size);
+  void Recycle(Block* block);
+  void Consume();
+  void Run();
+
+  Diligent::IDeviceContext* context_ = nullptr;
+  std::thread thread_;
+  std::thread::id thread_id_;
+  std::atomic<bool> stop_{false};
+  bool inline_ = false;
+
+  Block* write_block_ = nullptr;
+  uint32_t write_pos_ = 0;
+  uint64_t recorded_ = 0;
+  std::atomic<uint64_t> published_{0};
+
+  Block* read_block_ = nullptr;
+  Block* retired_ = nullptr;
+  uint32_t read_pos_ = 0;
+  uint64_t run_ = 0;
+  std::atomic<uint64_t> executed_{0};
+  std::atomic<bool> drain_waiting_{false};
+
+  std::mutex free_mutex_;
+  std::vector<Block*> free_;
+};
+
+}  // namespace native_x_renderer

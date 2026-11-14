@@ -460,7 +460,8 @@ REX_HOOK_RAW(sub_82609000) {
 #if defined(BF_DEV_TOOLS)
   if (jobwaits::On()) jobwaits::Poll(caller, ran);
 #endif
-  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && frame_wait;
+  // Only with a frame rate limit (DiXN, pull request 28): with none, the frame wait polls.
+  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && frame_wait && (!Unlocked() || REXCVAR_GET(bf_max_fps) > 0);
   if (!sleep && !REXCVAR_GET(bf_job_wait_yield)) return;
   // `empty` counts a thread's empty polls from any call site, as it always has: counting them per call site instead
   // (reset when the site changed) made the waiting threads yield less, and on two cores the 1% low fell from 83 to
