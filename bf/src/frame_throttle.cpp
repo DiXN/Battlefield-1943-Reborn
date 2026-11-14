@@ -3,7 +3,7 @@
 #include <rex/cvar.h>
 #include <rex/hook.h>
 
-REXCVAR_DEFINE_BOOL(bf_two_frames_in_flight, true, "BF1943/Performance",
+REXCVAR_DEFINE_BOOL(bf_two_frames_in_flight, false, "BF1943/Performance",
                     "Direct3D's frame throttle waits for the frame before the last presented one, so the game prepares "
                     "the next frame while the renderer draws the current one (one more frame of latency)");
 
