@@ -440,6 +440,15 @@ RecordedDraws& Recorded() {
   static RecordedDraws r;
   return r;
 }
+std::unique_lock<std::mutex> Lock(RecordedDraws& r) {
+  for (int i = 0; i < 256; ++i) {
+    if (r.mutex.try_lock()) return std::unique_lock<std::mutex>(r.mutex, std::adopt_lock);
+#if defined(__x86_64__)
+    __builtin_ia32_pause();
+#endif
+  }
+  return std::unique_lock<std::mutex>(r.mutex);
+}
 constexpr size_t kRecordedDraws = 1u << 16;
 }  // namespace
 
@@ -458,7 +467,7 @@ RecordedDrawsSize GetRecordedDrawsSize() {
 
 void NoteRecordedDraw(uint32_t begin, uint32_t end, const std::array<SurfaceSnapshot, 5>& surfaces) {
   RecordedDraws& r = Recorded();
-  std::lock_guard lock(r.mutex);
+  auto lock = Lock(r);
   // Older recordings the new one overlaps: the command buffer's memory holds other packets now.
   auto it = r.by_begin.lower_bound(begin);
   if (it != r.by_begin.begin()) {
@@ -478,7 +487,7 @@ void NoteRecordedDraw(uint32_t begin, uint32_t end, const std::array<SurfaceSnap
 
 bool FindRecordedDraw(uint32_t address, std::array<SurfaceSnapshot, 5>& surfaces) {
   RecordedDraws& r = Recorded();
-  std::lock_guard lock(r.mutex);
+  auto lock = Lock(r);
   auto it = r.by_begin.upper_bound(address);
   if (it == r.by_begin.begin()) return false;
   --it;
