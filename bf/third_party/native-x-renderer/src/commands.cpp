@@ -193,7 +193,7 @@ void CommandQueue::Run() {
     running_index_ = consumed;
     execute_(slots_[consumed % kSlots]);
     ++consumed;
-    if (!deferred_) Complete(consumed);
+    Complete(consumed);
   }
   std::lock_guard lock(mutex_);
   running_.store(false, std::memory_order_release);
