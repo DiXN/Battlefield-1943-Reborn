@@ -211,8 +211,9 @@ bool GameMenuRecently() {
 }
 
 bool NearHudMarker(double x, double y, double radius, double* marker_x) {
-  const auto now = std::chrono::steady_clock::now();
   std::lock_guard lock(g_hud_markers_mutex);
+  if (g_hud_markers.empty()) return false;
+  const auto now = std::chrono::steady_clock::now();
   double best = radius * radius;
   bool found = false;
   for (const HudMarker& m : g_hud_markers) {
