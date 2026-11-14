@@ -155,6 +155,10 @@ class CommandQueue {
   const Command* Peek(uint32_t ahead) const;
   // On the renderer's thread: the position of the command it runs, counted from the start.
   uint64_t running_index() const { return running_index_; }
+  // Deferred: a command counts as run when Complete says so (the recorder's thread made its calls), not when its
+  // executor returned.
+  void SetDeferredCompletion(bool on) { deferred_ = on; }
+  void Complete(uint64_t consumed);
 
   struct Waits {
     uint64_t count = 0;
@@ -176,6 +180,7 @@ class CommandQueue {
   Poller poll_ = nullptr;
   bool threaded_ = false;
   bool raise_priority_ = false;  // D136
+  bool deferred_ = false;
   // Each side writes its own position on a cache line of its own; the producer reads the consumer's only when its
   // last reading says the queue is full (D72).
   alignas(64) std::atomic<uint64_t> produced_{0};

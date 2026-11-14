@@ -24,6 +24,7 @@
 
 #include "Buffer.h"
 #include "DeviceContext.h"
+#include "recorder.h"
 #include "RefCntAutoPtr.hpp"
 #include "RenderDevice.h"
 
@@ -34,7 +35,7 @@ class GuestMemory;
 class Primitives final : public rex::graphics::PrimitiveProcessor {
  public:
   Primitives(const rex::graphics::RegisterFile& registers, rex::memory::Memory& memory, GuestMemory& guest_memory,
-             Diligent::IRenderDevice* device, Diligent::IDeviceContext* context);
+             Diligent::IRenderDevice* device, Recorder* recorder);
   ~Primitives() override;
 
   bool Initialize();
@@ -62,7 +63,7 @@ class Primitives final : public rex::graphics::PrimitiveProcessor {
   static constexpr uint32_t kConvertedBufferSize = 32 << 20;
 
   Diligent::IRenderDevice* device_;
-  Diligent::IDeviceContext* context_;
+  Recorder* recorder_;
   Diligent::RefCntAutoPtr<Diligent::IBuffer> builtin_;
   Diligent::RefCntAutoPtr<Diligent::IBuffer> converted_;
   std::unique_ptr<uint8_t[]> arena_;

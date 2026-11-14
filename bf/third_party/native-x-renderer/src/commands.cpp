@@ -156,6 +156,15 @@ void RaiseCurrentThreadPriority() {
 #endif
 }
 
+void CommandQueue::Complete(uint64_t consumed) {
+  consumed_.store(consumed, std::memory_order_seq_cst);
+  if (consumed >= wake_at_.load(std::memory_order_seq_cst)) {
+    std::lock_guard lock(mutex_);
+    wake_at_.store(UINT64_MAX, std::memory_order_seq_cst);
+    consumed_cv_.notify_all();
+  }
+}
+
 void CommandQueue::Run() {
   rex::thread::set_current_thread_name("NativeXRenderer");
   if (raise_priority_) RaiseCurrentThreadPriority();  // D136
@@ -184,12 +193,7 @@ void CommandQueue::Run() {
     running_index_ = consumed;
     execute_(slots_[consumed % kSlots]);
     ++consumed;
-    consumed_.store(consumed, std::memory_order_seq_cst);
-    if (consumed >= wake_at_.load(std::memory_order_seq_cst)) {
-      std::lock_guard lock(mutex_);
-      wake_at_.store(UINT64_MAX, std::memory_order_seq_cst);
-      consumed_cv_.notify_all();
-    }
+    if (!deferred_) Complete(consumed);
   }
   std::lock_guard lock(mutex_);
   running_.store(false, std::memory_order_release);

@@ -42,6 +42,7 @@
 #include "Buffer.h"
 #include "BufferView.h"
 #include "DeviceContext.h"
+#include "recorder.h"
 #include "RefCntAutoPtr.hpp"
 #include "RenderDevice.h"
 
@@ -49,7 +50,7 @@ namespace native_x_renderer {
 
 class GuestMemory final : public rex::graphics::SharedMemory {
  public:
-  GuestMemory(rex::memory::Memory& memory, Diligent::IRenderDevice* device, Diligent::IDeviceContext* context);
+  GuestMemory(rex::memory::Memory& memory, Diligent::IRenderDevice* device, Recorder* recorder);
   ~GuestMemory() override;
 
   bool Initialize();
@@ -101,11 +102,11 @@ class GuestMemory final : public rex::graphics::SharedMemory {
   // Writes `size` bytes at `address` into the mirror if guest memory no longer holds them: an inline draw's data
   // that the game reused since the draw was captured (D71). The pages are then invalidated, so that the next draw
   // reading them takes guest memory again. Returns whether it wrote.
-  bool WriteIfChanged(Diligent::IDeviceContext* context, uint32_t address, const uint8_t* data, uint32_t size);
+  bool WriteIfChanged(uint32_t address, const uint8_t* data, uint32_t size);
 
   // Before GPU work reads the mirror (draws, texture loads): after uploads, puts the buffer in one state
   // for every way it is read (storage buffer and index buffer), so binding it needs no further barrier.
-  void PrepareForRead(Diligent::IDeviceContext* context);
+  void PrepareForRead();
 
   // A hash of what the mirror holds for [start, start + length): of the hashes of its pages' last copies, 0 if a
   // page's is not known (never copied, or copied through the unwatched pages' copy). The texture cache tells by it
@@ -177,7 +178,7 @@ class GuestMemory final : public rex::graphics::SharedMemory {
   uint64_t unwatched_hashed_bytes_ = 0;
 
   Diligent::IRenderDevice* device_;
-  Diligent::IDeviceContext* context_;
+  Recorder* recorder_;
   Diligent::RefCntAutoPtr<Diligent::IBuffer> buffer_;
   Diligent::IBufferView* srv_ = nullptr;
   Diligent::IBufferView* uav_ = nullptr;

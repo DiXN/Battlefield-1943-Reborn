@@ -12,8 +12,8 @@ using namespace Diligent;
 namespace rg = rex::graphics;
 
 Primitives::Primitives(const rg::RegisterFile& registers, rex::memory::Memory& memory, GuestMemory& guest_memory,
-                       IRenderDevice* device, IDeviceContext* context)
-    : PrimitiveProcessor(registers, memory, guest_memory), device_(device), context_(context) {}
+                       IRenderDevice* device, Recorder* recorder)
+    : PrimitiveProcessor(registers, memory, guest_memory), device_(device), recorder_(recorder) {}
 
 Primitives::~Primitives() { ShutdownCommon(); }
 
@@ -67,8 +67,7 @@ void* Primitives::RequestHostConvertedIndexBufferForCurrentFrame(rg::xenos::Inde
 
 bool Primitives::UploadConverted() {
   if (arena_used_ <= arena_uploaded_) return false;
-  context_->UpdateBuffer(converted_, arena_uploaded_, arena_used_ - arena_uploaded_, arena_.get() + arena_uploaded_,
-                         RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  recorder_->UpdateBuffer(converted_, arena_uploaded_, arena_used_ - arena_uploaded_, arena_.get() + arena_uploaded_);
   arena_uploaded_ = arena_used_;
   return true;
 }

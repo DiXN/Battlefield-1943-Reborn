@@ -114,8 +114,8 @@ bool GuestMemory::TraceLine() {
   return lines.fetch_add(1) < 400;
 }
 
-GuestMemory::GuestMemory(rex::memory::Memory& memory, IRenderDevice* device, IDeviceContext* context)
-    : SharedMemory(memory), device_(device), context_(context) {
+GuestMemory::GuestMemory(rex::memory::Memory& memory, IRenderDevice* device, Recorder* recorder)
+    : SharedMemory(memory), device_(device), recorder_(recorder) {
   if (TracePage()) {
     trace_callback_ = memory.RegisterPhysicalMemoryInvalidationCallback(
         [](void* self, uint32_t start, uint32_t length, bool exact) -> std::pair<uint32_t, uint32_t> {
@@ -306,7 +306,7 @@ bool GuestMemory::UploadUnwatched(uint32_t page_first, uint32_t page_count) {
   if (const uint32_t trace = TracePage(); trace >= page_first && trace < page_first + page_count && TraceLine())
     REXLOG_INFO("[native_x_renderer] trace {:08X}: uploaded unwatched (pages {:X} count {})", trace << 12, page_first,
                 page_count);
-  context_->UpdateBuffer(buffer_, start, length, copy_ + start, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  recorder_->UpdateBuffer(buffer_, start, length, copy_ + start);
   for (uint32_t page = page_first; page < page_first + page_count; ++page) {
     copy_valid_[page] = true;
     // No hash of what the mirror holds now: once watched again, the page is copied at its first request.
@@ -424,10 +424,10 @@ void GuestMemory::EndFrame() {
   compare_unwatched_ = copy_ && REXCVAR_GET(native_x_renderer_compare_unwatched);
 }
 
-bool GuestMemory::WriteIfChanged(IDeviceContext* context, uint32_t address, const uint8_t* data, uint32_t size) {
+bool GuestMemory::WriteIfChanged(uint32_t address, const uint8_t* data, uint32_t size) {
   if (!size || address >= kBufferSize || size > kBufferSize - address) return false;
   if (!std::memcmp(memory().TranslatePhysical(address), data, size)) return false;
-  context->UpdateBuffer(buffer_, address, size, data, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  recorder_->UpdateBuffer(buffer_, address, size, data);
   uploaded_bytes_ += size;
   ++copies_;
   ++total_copies_;
@@ -462,7 +462,7 @@ void GuestMemory::Upload(uint32_t page_first, uint32_t page_count) {
     page_hashes_[page_first + i] = XXH3_64bits(snapshot_.data() + (size_t(i) << page_shift), page_size);
     copy_valid_[page_first + i] = false;  // the unwatched pages' copy no longer holds what the mirror does (D110)
   }
-  context_->UpdateBuffer(buffer_, start, length, snapshot_.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  recorder_->UpdateBuffer(buffer_, start, length, snapshot_.data());
   uploaded_bytes_ += length;
   ++copies_;
   ++total_copies_;
@@ -478,12 +478,12 @@ uint64_t GuestMemory::MirrorHash(uint32_t start, uint32_t length) const {
   return XXH3_64bits(page_hashes_.data() + first, size_t(last - first + 1) * sizeof(uint64_t));
 }
 
-void GuestMemory::PrepareForRead(IDeviceContext* context) {
+void GuestMemory::PrepareForRead() {
   if (in_read_state_) return;
   StateTransitionDesc barrier{buffer_, RESOURCE_STATE_UNKNOWN,
                               RESOURCE_STATE_SHADER_RESOURCE | RESOURCE_STATE_INDEX_BUFFER,
                               STATE_TRANSITION_FLAG_UPDATE_STATE};
-  context->TransitionResourceStates(1, &barrier);
+  recorder_->Do([barrier](IDeviceContext* context) mutable { context->TransitionResourceStates(1, &barrier); });
   in_read_state_ = true;
 }
 

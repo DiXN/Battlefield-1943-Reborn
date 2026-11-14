@@ -123,6 +123,7 @@ add_library(native_x_renderer STATIC
     src/state.cpp
     src/renderer.cpp
     src/commands.cpp
+    src/recorder.cpp
     src/device.cpp
     src/targets.cpp
     src/blit.cpp

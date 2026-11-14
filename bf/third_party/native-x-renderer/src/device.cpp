@@ -264,6 +264,7 @@ bool Device::Create(void* native_window, bool half_precision) {
   }
   if (!device_) factory->CreateDeviceAndContextsVk(create_info, &device_, contexts);
   context_.Attach(contexts[0]);
+  recorder_.Initialize(context_);
   if (!device_ || !context_) {
     REXLOG_ERROR("[native_x_renderer] could not create the Vulkan device");
     return false;
