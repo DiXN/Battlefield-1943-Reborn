@@ -17,8 +17,8 @@
 //     the screen tells the game (selectSpawnPoint, the point's own number) is the clicked one.
 // Where things are on the screen was measured from a screenshot of it (13 Nov, 1280 x 720 stage units). The map: a
 // least squares fit of Wake Island's five flags in that screenshot to their places in the world put every one within
-// a unit, and the carrier's marker too: 0.332 units a metre, turned 20 degrees, the world's origin at 920, 358. Other
-// levels are taken to be drawn the same way (not yet checked: bf_debug_spawn_mouse logs the clicks).
+// a unit, and the carrier's marker too. That old world transform is retained only for the explicit legacy option.
+// Direct selection reads the active movie's actual marker transforms on each map (flash_spawn.cpp).
 // The screen's script is reached at _root.contentMC.loader1 (probed 13 Nov: onKitLeft, onSpawnUp, setKitInfo,
 // gotoNextSpawnPoint and spawnmap.sp0 all resolve there).
 
@@ -46,6 +46,9 @@
 #include <rex/ui/imgui_drawer.h>
 
 #include "capture_points.h"
+#include "flash_spawn.h"
+
+REXCVAR_DECLARE(bool, bf_spawn_mouse_direct);
 
 REXCVAR_DEFINE_BOOL(bf_spawn_mouse, true, "BF1943/Controls",
                     "On the deploy screen the mouse is a free pointer: click a kit, the map and the buttons (false: the "
@@ -146,7 +149,9 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    SpawnSelectionFocus(!io.AppFocusLost);
     if (!g_active.load(std::memory_order_relaxed)) return;
+    if (io.AppFocusLost) return;
     if (io.DisplaySize.x < 16 || io.DisplaySize.y < 16) return;
     // The stage: 16:9 in the middle of the picture (the renderer keeps a menu there on wider and taller screens).
     const float s = std::min(io.DisplaySize.x / 1280.0f, io.DisplaySize.y / 720.0f);
@@ -163,6 +168,7 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
       if (!kKitCards[card].Has(mx, my)) continue;
       outline(kKitCards[card]);
       if (!click) break;
+      CancelSpawnSelection();
       const int want = kKitOfCard[card];
       if (g.kit < 0 || g.kit > 2) {
         // Not known yet (the screen has not told the game a kit): one step toward that side shows which it was.
@@ -191,18 +197,31 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
       dl->AddConvexPolyFilled(outline_points, n, IM_COL32(255, 236, 170, 46));
       dl->AddPolyline(outline_points, n, IM_COL32(255, 236, 170, 230), ImDrawFlags_Closed, 2.0f * s);
       if (click) {
+        CancelSpawnSelection();
         Queue({b.button});
         REXLOG_INFO("BF spawn mouse: {} clicked", b.name);
       }
     }
     if (kMap.Has(mx, my)) {
-      // The capture point nearest the pointer, where the map shows it.
+      // Use the movie's marker origins, including its parent transforms. The
+      // old Wake fit is not valid for Iwo Jima or Guadalcanal.
       const std::vector<CapturePoint> points = CapturePoints();
+      const bool direct = REXCVAR_GET(bf_spawn_mouse_direct);
+      const auto markers = direct ? SpawnMouseMarkers() : std::vector<SpawnMouseMarker>{};
       const CapturePoint* near_point = nullptr;
       float best = kPointReach * kPointReach;
       ImVec2 at{};
       for (const CapturePoint& p : points) {
-        const ImVec2 m = OnMap(p.x, p.z);
+        ImVec2 m;
+        if (direct) {
+          const auto marker = std::find_if(markers.begin(), markers.end(), [&](const SpawnMouseMarker& item) {
+            return item.entity == p.entity && item.name == p.name;
+          });
+          if (marker == markers.end()) continue;
+          m = ImVec2(marker->x, marker->y);
+        } else {
+          m = OnMap(p.x, p.z);
+        }
         const float d2 = (m.x - mx) * (m.x - mx) + (m.y - my) * (m.y - my);
         if (d2 < best && kMap.Has(m.x, m.y)) best = d2, near_point = &p, at = m;
       }
@@ -212,6 +231,17 @@ class SpawnMouseOverlay final : public rex::ui::ImGuiDialog {
         dl->AddCircle(c, 17.0f * s, IM_COL32(255, 236, 170, 235), 32, 2.5f * s);
       }
       if (click) {
+        if (REXCVAR_GET(bf_spawn_mouse_direct)) {
+          g.want = -1;
+          if (near_point) {
+            const bool queued = QueueSpawnSelection(near_point->name, near_point->entity);
+            REXLOG_INFO("BF spawn direct: map click {:.0f}, {:.0f}: {} ({})", mx, my, near_point->name,
+                        queued ? "queued" : "UI not ready");
+          } else {
+            CancelSpawnSelection();
+          }
+          return;
+        }
         if (near_point) {
           g.want = SpawnNumber(*near_point, points.size());
           g.want_steps = 0, g.want_toggles = 0, g.want_at = {}, g.want_from = -2;
@@ -275,6 +305,7 @@ void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world) {
     g.now = {}, g.now_until = {}, g.gap_until = {};
     g.icons_logged = 0;
     g.want = -1;
+    CancelSpawnSelection();
     REXLOG_INFO("BF spawn mouse: the pointer is {}", active ? "free (deploy screen)" : "the game's again");
     if (active && REXCVAR_GET(bf_debug_spawn_mouse)) {
       for (const CapturePoint& p : CapturePoints())
@@ -285,7 +316,7 @@ void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world) {
   if (!active) return;
   // A spawn point asked for by a click (see the top): one call of the screen's script at a time, each after the
   // screen has told the game where it is now.
-  if (g.want >= 0) {
+  if (!REXCVAR_GET(bf_spawn_mouse_direct) && g.want >= 0) {
     static const char* const kScreen = "_root.contentMC.loader1";
     if (g.spawn == g.want) {
       g.want = -1;
@@ -343,6 +374,10 @@ void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world) {
 // (never, now).
 bool SpawnMouseCommand(const char* name, const char* args) {
   if (!name) return false;
+  if (std::strcmp(name, "doSpawn") == 0 || std::strcmp(name, "selectTeam") == 0 ||
+      std::strcmp(name, "doExitLevel") == 0 || std::strcmp(name, "startQuickMatch") == 0 ||
+      (std::strcmp(name, "enterMenu") == 0 && args && args[0] == '0'))
+    CancelSpawnSelection();
   const bool kit = std::strcmp(name, "selectKit") == 0, spawn = std::strcmp(name, "selectSpawnPoint") == 0;
   const bool ours = kit || spawn || std::strcmp(name, "selectSquadSpawn") == 0 || std::strcmp(name, "doSpawn") == 0 ||
                     std::strcmp(name, "selectWeapon") == 0;

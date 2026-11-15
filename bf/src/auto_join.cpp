@@ -35,6 +35,7 @@
 
 #include "capture_points.h"
 #include "comms.h"
+#include "flash_spawn.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -71,6 +72,7 @@ bool TickBlendNearestTree(uint32_t parts, const float from[3], float out[3], dou
 // game_menu.cpp
 bool GameMenuOpen();
 void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world);  // flash_mouse.cpp: the deploy screen's pointer
+bool SpawnMouseActive();
 bool SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp: true, not to be passed on
 bool GameMenuEnabled();
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly);
@@ -1293,9 +1295,18 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  // Capture native navigation before the mouse helper adds any kit/button pulses.
+  const auto nav_axis = [&](int at) { return std::abs(int(int16_t(p[at] << 8 | p[at + 1]))) > 4915; };
+  const bool spawn_navigation = (uint16_t(p[4] << 8 | p[5]) & 0xB01F) != 0 ||
+                                nav_axis(8) || nav_axis(10) || nav_axis(12) || nav_axis(14);
   // The deploy screen's pointer (flash_mouse.cpp): a level is loaded and the player is in no seat and not on foot.
   bf1943::SpawnMousePad(p + 4, bf1943::LevelLoaded() && !menu && !hidden && !bf1943::g_walking,
                         !seated && !bf1943::LocalOnFoot());
+  uint32_t spawn_ui;
+  { std::lock_guard lock(bf1943::g.mutex); spawn_ui = bf1943::g.ui; }
+  bf1943::ProcessSpawnSelection(ctx, base, spawn_ui,
+                                bf1943::LevelLoaded() && !menu && !hidden && !bf1943::g_walking && bf1943::SpawnMouseActive(),
+                                spawn_navigation);
   if (press & 0x0C00) {  // the driver's left stick (BF_SPAWN_PRESSES lsr, lsl)
     const int v = press & 0x0400 ? 32767 : -32768;
     p[8] = uint8_t(uint16_t(v) >> 8), p[9] = uint8_t(v);
