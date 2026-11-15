@@ -25,6 +25,7 @@ endif()
 # Sources
 set(BF1943_SOURCES
     src/main.cpp
+    src/cpu_check.cpp
     src/fpe_guard.cpp
     src/live_layers.cpp
     src/online_services.cpp

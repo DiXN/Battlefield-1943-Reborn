@@ -11,6 +11,8 @@
 #include <immintrin.h>
 #endif
 
+#include "cpu_cores.h"
+
 namespace native_x_renderer {
 namespace {
 
@@ -107,7 +109,8 @@ void Recorder::Drain() {
   Publish();
   const uint64_t target = recorded_;
   if (executed_.load(std::memory_order_acquire) >= target) return;
-  for (uint32_t i = 0; i < 4096 && executed_.load(std::memory_order_acquire) < target; ++i) Pause();
+  const uint32_t spins = SpinWaitsAllowed() ? 4096 : 0;  // cpu_cores.h
+  for (uint32_t i = 0; i < spins && executed_.load(std::memory_order_acquire) < target; ++i) Pause();
   drain_waiting_.store(true, std::memory_order_seq_cst);
   for (uint64_t e; (e = executed_.load(std::memory_order_seq_cst)) < target;) executed_.wait(e, std::memory_order_acquire);
   drain_waiting_.store(false, std::memory_order_relaxed);
@@ -141,7 +144,8 @@ void Recorder::Run() {
     Consume();
     if (run_ < seen) continue;
     if (stop_.load(std::memory_order_acquire)) break;
-    for (uint32_t i = 0; i < 2048 && published_.load(std::memory_order_acquire) == seen; ++i) Pause();
+    const uint32_t spins = SpinWaitsAllowed() ? 2048 : 0;  // cpu_cores.h
+    for (uint32_t i = 0; i < spins && published_.load(std::memory_order_acquire) == seen; ++i) Pause();
     published_.wait(seen, std::memory_order_acquire);
   }
 }

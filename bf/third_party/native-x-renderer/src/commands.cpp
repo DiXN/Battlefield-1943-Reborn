@@ -21,6 +21,8 @@
 #include <immintrin.h>
 #endif
 
+#include "cpu_cores.h"
+
 namespace native_x_renderer {
 namespace {
 
@@ -124,8 +126,9 @@ void CommandQueue::WaitIdle(uint64_t limit) {
 void CommandQueue::WaitConsumed(uint64_t target, std::atomic<uint64_t>& waits, std::atomic<uint64_t>& wait_ns) {
   if (consumed_.load(std::memory_order_acquire) >= target || !running_.load(std::memory_order_acquire)) return;
   auto start = Clock::now();
-  // The thread is usually a few commands away: spin briefly before sleeping.
-  for (uint32_t i = 0; i < 4096 && consumed_.load(std::memory_order_acquire) < target; ++i) Pause();
+  // The thread is usually a few commands away: spin briefly before sleeping (with enough cores: cpu_cores.h).
+  const uint32_t spins = SpinWaitsAllowed() ? 4096 : 0;
+  for (uint32_t i = 0; i < spins && consumed_.load(std::memory_order_acquire) < target; ++i) Pause();
   if (consumed_.load(std::memory_order_acquire) < target) {
     std::unique_lock lock(mutex_);
     while (running_.load(std::memory_order_acquire)) {
@@ -171,8 +174,10 @@ void CommandQueue::Run() {
   uint64_t consumed = consumed_.load(std::memory_order_relaxed);
   while (!stop_.load(std::memory_order_acquire)) {
     if (produced_.load(std::memory_order_acquire) == consumed) {
-      // Empty: spin briefly (the game's thread is usually inside its next call), then sleep.
-      for (uint32_t i = 0; i < 1024 && produced_.load(std::memory_order_acquire) == consumed; ++i) Pause();
+      // Empty: spin briefly (the game's thread is usually inside its next call), then sleep (spin only with enough
+      // cores: cpu_cores.h).
+      const uint32_t spins = SpinWaitsAllowed() ? 1024 : 0;
+      for (uint32_t i = 0; i < spins && produced_.load(std::memory_order_acquire) == consumed; ++i) Pause();
       if (produced_.load(std::memory_order_acquire) == consumed) {
         std::unique_lock lock(mutex_);
         consumer_sleeping_.store(true, std::memory_order_seq_cst);

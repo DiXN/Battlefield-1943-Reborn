@@ -5358,3 +5358,34 @@ close to daylight, ngc1).
 
 **Tests:** BF_DEV_CAMERA_POINTS=x,y,z,tx,ty,tz;... (the game's look.cpp, dev builds): the camera at each stop looking at
 its point, with BF_DEV_CAMERA_TOUR's dwell; the view's row 2 is its back (BF_DEV_CAMERA_AT had the point behind).
+
+## D171 — Few cores: no recorder thread and no spinning waits; the temporal upscalers' libraries not asked (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** Battlefield 1943 Reborn's weak processor test (its client held to two cores of a Ryzen 7 7800X3D, one thread
+each, Wake Island at 90 FPS, 50 s) went from a 1% low of 82.5 FPS on 14 Nov to 34 to 37 FPS after pull request 28's
+recorder (the draws' DiligentCore calls on a thread of their own): on two cores that thread competes with the game's own
+threads. With every core free it gains nothing where the GPU is the limit, and helps where the renderer's thread is
+(the same PC at render scale 1: 1% low 196.9 FPS with it, 163.7 without; renderer CPU 2.21 against 2.82 ms a frame).
+
+**What:**
+- cpu_cores.cpp: `AvailableCores()`, the physical cores among the processors the process may run on (its affinity; a
+  dual core with Hyper-Threading is 2), read again at most once a second.
+- The recorder's thread starts only with at least `native_x_renderer_record_thread_cores` (4) cores
+  (`native_x_renderer_record_thread` still turns it off everywhere); the choice is logged.
+- The command queue's and the recorder's waits spin before they sleep only with at least `native_x_renderer_spin_cores`
+  (4) cores; on fewer the thread a spin waits for usually needs the very core the spin holds.
+- `native_x_renderer_check_temporal` (on): the start's question to AMD's FSR and Intel's XeSS libraries about what this
+  GPU runs (for a menu's upscaler choices) can be left out. Battlefield 1943 Reborn offers no temporal upscaler since
+  0.4.4, turns it off and no longer ships those libraries (161 MB).
+
+**Measured** (two cores, 90 FPS cap, 50 s each; others' load 0.7 to 1.0 core):
+
+| | 1% low | 0.1% low | frames over twice the average | client CPU |
+|---|---|---|---|---|
+| Recorder on, spins (before) | 34.0 to 36.7 FPS | 21.8 to 23.0 | 19 to 26 | 1.28 cores |
+| Recorder off, spins | 60.7 to 78.0 FPS (four runs) | 20.3 to 38.6 | 2 to 7 | 1.00 to 1.04 |
+| Recorder off, no spins (now) | 70.9 to 74.1 FPS (two runs; a third, 35.1, had a 240 ms stall) | 29.2 to 30.0 | 3 to 5 | 1.03 |
+
+Four cores at 90 FPS: 1% low 89.4 FPS with and without the recorder (it stays on). All sixteen threads, no cap:
+229.7 FPS, 1% low 193.9 (223.6 and 189.1 before; the GPU is the limit). Unlimited frame rate on two cores stays poor
+either way (47 to 71 FPS average, 1% low about 13): the processor is simply full.

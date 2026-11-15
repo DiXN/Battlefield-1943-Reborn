@@ -25,10 +25,12 @@ echo "== AppDir ($B)"
 rm -rf "$A"
 mkdir -p "$A/usr/bin" "$A/usr/lib"
 cp "$B/bf1943" "$A/usr/bin/"
-# Anything the build put beside the program (the runtime, the GPU plugin), then the SDK install's own copies,
-# which win (the build refreshes the ones beside the program only when it relinks).
-find "$B" -maxdepth 1 -name '*.so*' -exec cp -a {} "$A/usr/bin/" \;
-for lib in librexruntime.so librexgpu-bfnative.so libTracyClient.so; do
+# The two libraries the game loads: the runtime (linked) and our renderer's GPU plugin (bfnative, the only one a
+# release build opens), the build's own copies beside the program, then the SDK install's, which win (the build
+# refreshes the ones beside the program only when it relinks). Not everything beside the program (15 Nov 2026: a stale
+# librexgpu-xenos.so, a developer build's, rode along) and not libTracyClient.so (nothing links or opens it).
+for lib in librexruntime.so librexgpu-bfnative.so; do
+  [ -e "$B/$lib" ] && cp -aL "$B/$lib" "$A/usr/bin/"
   f="$(find "$SDK" -name "$lib" -print -quit)"
   [ -z "$f" ] || cp -aL "$f" "$A/usr/bin/"
 done

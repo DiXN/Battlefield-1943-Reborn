@@ -5551,6 +5551,11 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // (else MAILBOX, else FIFO). Not MAILBOX for off: NVIDIA's queues frames at the screen's rate (D107), and in
   // borderless fullscreen it held TekRantGaming's RTX 4070 Ti to 120 FPS on a 120 Hz screen with Unlimited and V-Sync off
   // (0.4.7-indev3: 8.34 ms a frame, 7 ms of it waiting for the GPU, 1 ms of work).
+  // No temporal upscaler is offered (kTemporalUpscalers): the renderer does not load AMD's and Intel's libraries at
+  // the start to ask whether this GPU runs them (15 Nov 2026: about 110 MB of DLLs loaded for nothing at each start,
+  // and a vendor library's start on a driver it was never tried with is a crash risk; the package no longer carries
+  // them, make_packages.ps1).
+  if (!kTemporalUpscalers) rex::cvar::SetFlagByName("native_x_renderer_check_temporal", "false");
   // No saved choice is Off, as the row shows it.
   {
     const auto it = settings.values.find("vsync");

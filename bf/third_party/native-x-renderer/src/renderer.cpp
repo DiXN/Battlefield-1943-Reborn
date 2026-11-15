@@ -17,6 +17,7 @@
 #include "renderer.h"
 
 #include "aa.h"
+#include "cpu_cores.h"
 #include "gtao.h"
 #include "grass.h"
 #include "night.h"
@@ -180,6 +181,10 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_thread, true, "NativeXRenderer",
 REXCVAR_DEFINE_BOOL(native_x_renderer_record_thread, true, "NativeXRenderer",
                     "With native_x_renderer_thread: the draws' DiligentCore calls made on a second thread, the "
                     "recorder's, while the renderer's thread prepares the next draws (read at startup)");
+REXCVAR_DEFINE_INT32(native_x_renderer_record_thread_cores, 4, "NativeXRenderer",
+                     "The recorder's thread (native_x_renderer_record_thread) only with at least this many processor "
+                     "cores (read at startup): on fewer it competes with the game's own threads (Battlefield 1943 "
+                     "Reborn, 15 Nov 2026, two cores at 90 FPS: 1% low 34 FPS with it, 78 without)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_present_with_swaps, false, "NativeXRenderer",
                     "Show each frame when the command processor executes the game's swap for it, as the SDK's "
                     "presenters do, instead of when the game calls Present (read at startup, D86): the game's CPU "
@@ -198,6 +203,10 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_upscaler_sharpness, 0.0, "NativeXRendere
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_resolution_scale, 0.0, "NativeXRenderer",
                       "Render scale, host pixels per guest pixel (read at startup). 0: from the screen, the largest "
                       "at which the game's image fits the monitor or the window (at least 1)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_check_temporal, true, "NativeXRenderer",
+                    "At the start, ask AMD's FSR and Intel's XeSS libraries whether this GPU runs them, for a menu's "
+                    "temporal upscaler choices (TemporalSupport). Off: neither library is loaded, and none is "
+                    "reported (a game that offers no temporal upscaler: D171)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_check_nis, false, "NativeXRenderer",
                     "Ask the GPU at startup whether NVIDIA Image Scaling runs on it when another scaling is chosen "
                     "(D158): the answer for the game's menus (NisSupport), which offer NIS only where it runs");
@@ -3147,8 +3156,11 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   }
   // Which temporal upscalers this GPU runs, for the game's menus (TemporalSupport): FSR as AMD's library lists it for
   // this GPU (FSR 4 on a Radeon RX 9000 only), XeSS as Intel's library answers for it, DLSS on an NVIDIA GeForce RTX
-  // (NGX runs on RTX cards only).
-  {
+  // (NGX runs on RTX cards only). Not asked when the game offers none (native_x_renderer_check_temporal, D171).
+  if (!REXCVAR_GET(native_x_renderer_check_temporal)) {
+    g_temporal_support = 0;
+    REXLOG_INFO("[native_x_renderer] temporal upscalers: not checked (native_x_renderer_check_temporal off)");
+  } else {
     bool fsr4 = false, fsr3 = false;
     Fsr probe;
     probe.Generations(device->device(), &fsr4, &fsr3);
@@ -3324,7 +3336,12 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   };
   const bool raise = REXCVAR_GET(native_x_renderer_raise_priority);
   g_queue.SetRaisePriority(raise);
-  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) g_device->recorder().Start();
+  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) {
+    const uint32_t cores = AvailableCores(), need = uint32_t(std::max(0, REXCVAR_GET(native_x_renderer_record_thread_cores)));
+    if (cores >= need) g_device->recorder().Start();
+    REXLOG_INFO("[native_x_renderer] recorder thread {} ({} cores, at least {} for it); waits {}",
+                cores >= need ? "on" : "off", cores, need, SpinWaitsAllowed() ? "spin, then sleep" : "sleep at once");
+  }
   g_queue.Start(threaded, &Execute, poller);
   if (threaded) {
     // The gate is called on the command processor's thread: its priority raised there, the first time (D136).
