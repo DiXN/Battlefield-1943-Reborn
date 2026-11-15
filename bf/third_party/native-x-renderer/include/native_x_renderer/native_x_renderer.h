@@ -346,6 +346,30 @@ struct NightLamp {
 // The level's lamps, copied (count 0: none). Lit only at night.
 void NightLamps(const NightLamp* lamps, uint32_t count);
 
+// The world's clock and weather as a match's server keeps them (14 Nov 2026: "cloud coverage, rate, weather
+// percentage, day/night adjustment and time scale settings ... for servers"): while `valid`, these are drawn
+// instead of the player's own sky settings, so every player of a match sees the same hour and the same clouds.
+// The renderer runs the clocks on by itself from the moment this is set; a server's game sets it again every few
+// seconds.
+struct WorldState {
+  bool valid = false;         // false: the player's own settings (no match, or its server keeps none)
+  bool day_night = false;     // the light, the shadows and the sky follow the hour
+  double hour = 16.0;         // the time of day now, 0 to 24
+  double day_minutes = 0.0;   // minutes a whole day takes; 0: the hour stands still
+  float cloud_cover = 0.35f;  // 0 to 1
+  float cloud_rate = 0.33f;   // how fast the clouds form and change, 1: Beachhead's full speed
+  float weather = 0.0f;       // 0 fair to 1 heavy overcast
+  float fog = 0.0f;           // the distance fog, 0 to 1
+  float ground_fog = 0.0f;    // the ground fog, 0 to 1
+  float wind = 0.3f;          // the wind, 0 calm to 1 a gale: how far the rain leans
+  float cloud_height = 450.0f;  // the cloud base over the sea, metres: low enough, the planes fly through the clouds
+  double cloud_seconds = 0.0; // the clouds' drift clock now, seconds
+  double cloud_evolve = 0.0;  // the clouds' forming clock now (seconds times the rate, summed)
+};
+void SetWorldState(const WorldState& state);
+// What is drawn now: the server's (run on to this moment) or the player's own settings.
+WorldState CurrentWorldState();
+
 // D163: lamps that move with a model (a jeep's headlights): a draw of the main view with this many indices (one of the
 // model's levels of detail) is that model; its lamps are in its own space (x right, y up, z forward), placed each frame
 // by its world matrix, three rigid rows (the position in their fourth floats) in its vertex shader's float constants
@@ -404,6 +428,9 @@ void SetWeaponLayerMove(const float* move, float fov_degrees);
 // its rifles and pistols hide it): HUD draws (no depth test) from the crosshair sheet (256 x 256, 8_8_8_8) are left
 // out. From the game's thread, each frame it applies.
 void HideCrosshair();
+// How far the player's aim down the sights is in, 0 to 1 (the game's own zoom blend), for the renderer's depth of field
+// (dof.h, native_x_renderer_ads_dof). From the game's thread, each frame a first person weapon is held.
+void SetAdsBlend(float blend);
 
 // The view's 3D drawing is done and its post-processing starts. For the main 3D view, DLAA runs here on its
 // color and depth, and the game's post-processing then reads the antialiased image.

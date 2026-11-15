@@ -203,7 +203,11 @@ def game_installed():
 
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
-            'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0}
+            'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0,
+            # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
+            # the player IDs who may change them in game.
+            'day_night': False, 'time': 16.0, 'day_minutes': 0, 'cloud_cover': 35, 'cloud_rate': 33, 'weather': 0,
+            'fog': 0, 'ground_fog': 0, 'wind': 30, 'cloud_height': 450, 'admins': ''}
 
 
 def clean_text(value, limit):
@@ -232,6 +236,18 @@ def clean_config(raw):
             entry['max_players'] = max(2, min(24, int(s.get('max_players') or 24)))
         entry['listed'] = s.get('listed') is not False
         entry['night'] = s.get('night') is True
+        entry['day_night'] = s.get('day_night') is True
+        with contextlib.suppress(TypeError, ValueError):
+            entry['time'] = max(0.0, min(23.75, float(s.get('time', 16.0))))
+        for key, top in (('day_minutes', 1440), ('cloud_cover', 100), ('cloud_rate', 100), ('weather', 100), ('fog', 100),
+                         ('ground_fog', 100), ('wind', 100)):
+            with contextlib.suppress(TypeError, ValueError):
+                entry[key] = max(0, min(top, int(s.get(key, entry[key]))))
+        with contextlib.suppress(TypeError, ValueError):
+            entry['cloud_height'] = max(200, min(1500, int(s.get('cloud_height', entry['cloud_height']))))
+        entry['admins'] = ','.join(a for a in (''.join(c for c in part if c in '0123456789abcdefABCDEF').upper()[:8]
+                                               for part in str(s.get('admins') or '').replace(';', ',').replace(' ', ',').split(','))
+                                   if a)[:400]
         entry['autostart'] = s.get('autostart') is not False
         # A rate of its own (13 Nov 2026, TekRantGaming: one 60 Hz test server beside the official 30 Hz ones); 0 takes
         # the manager's rate (Network's Tick rate).
@@ -616,6 +632,15 @@ class Manager:
             host.append('--unlisted')
         if s['night'] and self.flags['night_ops']:
             host.append('--night')
+        host += ['--time', str(s['time']), '--day-minutes', str(s['day_minutes']),
+                 '--cloud-cover', str(s['cloud_cover'] / 100), '--cloud-rate', str(s['cloud_rate'] / 100),
+                 '--weather', str(s['weather'] / 100), '--fog', str(s['fog'] / 100),
+                 '--ground-fog', str(s['ground_fog'] / 100), '--wind', str(s['wind'] / 100),
+                 '--cloud-height', str(s['cloud_height'])]
+        if s['day_night']:
+            host.append('--day-night')
+        if s['admins']:
+            host += ['--admins', s['admins']]
         if self.flags['official']:
             if not os.path.exists(self.official_key()):
                 raise RuntimeError('This is the official server package, and official.key is not in %s. Copy it in '

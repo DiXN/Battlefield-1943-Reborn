@@ -16,6 +16,7 @@ Layers, outermost first (see docs/02-dedicated-server-join.md):
 """
 import asyncio
 import json
+import math
 import os
 import random
 import socket
@@ -624,6 +625,102 @@ class ServerSide(asyncio.DatagramProtocol):
         asyncio.get_running_loop().call_soon(read_again, self.transport)
 
 
+class World:
+    """The match's world: its clock and weather, asked for by every player's game (bf/src/world_sync.cpp), which then
+    draws the same hour and the same sky; an admin's game may change them while the server runs. 14 Nov 2026: "cloud
+    coverage, rate, weather percentage, day/night adjustment and time scale settings ... for servers ... giving
+    player IDs admin panel access in-game". The same as gm_host.cpp's World (a match a player's game hosts).
+
+    Asked with BF43WRLD: version 1, flags (1: a change follows), the player's name and a key (a length byte and text
+    each); for a change: day and night (a byte) and eight floats: hour, a day's minutes, cloud cover, cloud rate,
+    weather, distance fog, ground fog, wind. Answered with BF43WRLR: version, flags (1 day and night, 2 the asker is
+    an admin), the same eight floats
+    as they are now, and the clouds' two clocks as doubles (drift seconds, forming). Big endian. Last in both
+    (15 Nov 2026; a game from before it sends and reads none): the cloud base's height, metres, a float."""
+
+    def __init__(self, host):
+        self.host = host
+        self.day_night, self.hour, self.day_minutes = False, 16.0, 0.0
+        self.cover, self.rate, self.weather = 0.35, 0.33, 0.0
+        self.fog = self.ground_fog = 0.0
+        self.wind = 0.3
+        self.cloud_height = 450.0
+        self.seconds = self.evolve = 0.0
+        self.at = time.monotonic()
+        self.admins, self.key = set(), ''
+
+    def configure(self, args):
+        clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
+        self.day_night = bool(args.day_night)
+        self.hour = clamp(args.time, 0, 24) % 24
+        self.day_minutes = clamp(args.day_minutes, 0, 1440)
+        self.cover, self.rate = clamp(args.cloud_cover, 0, 1), clamp(args.cloud_rate, 0, 1)
+        self.weather = clamp(args.weather, 0, 1)
+        self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
+        self.wind = clamp(args.wind, 0, 1)
+        self.cloud_height = clamp(args.cloud_height, 200, 1500)
+        # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
+        self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
+                       if a.strip()}
+        self.key = args.admin_key
+        self.host.note('world: %s' % self.said())
+
+    def said(self):
+        return ('day and night %s, %.1f h, a day in %.0f min, clouds %.0f%% at rate %.0f%%, weather %.0f%%, fog %.0f%%, '
+                'ground fog %.0f%%, wind %.0f%%, cloud height %.0f m') % (
+            'on' if self.day_night else 'off', self.hour, self.day_minutes, self.cover * 100, self.rate * 100,
+            self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
+
+    def advance(self):
+        now = time.monotonic()
+        dt, self.at = now - self.at, now
+        if self.day_night and self.day_minutes > 0:
+            self.hour = (self.hour + dt / (self.day_minutes * 60) * 24) % 24
+        self.seconds += dt
+        self.evolve += dt * self.rate
+
+    def admin(self, name, key, addr):
+        if self.key and key == self.key:
+            return True
+        return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0] and
+                   '%08X' % (p.player.xuid & 0xFFFFFFFF) in self.admins for p in self.host.peers.values())
+
+    def receive(self, data, addr):
+        try:
+            version, flags = data[0], data[1]
+            n = data[2]
+            name = data[3:3 + n].decode('utf-8', 'replace')
+            at = 3 + n
+            k = data[at]
+            key = data[at + 1:at + 1 + k].decode('utf-8', 'replace')
+            at += 1 + k
+            if version != 1 or at > len(data):
+                return
+            self.advance()
+            admin = self.admin(name, key, addr)
+            if flags & 1 and admin and len(data) >= at + 33:
+                day_night = data[at] != 0
+                values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
+                before = self.said()
+                self.day_night = day_night
+                self.hour = max(0.0, values[0]) % 24
+                self.day_minutes = max(0.0, min(1440.0, values[1]))
+                (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                 self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
+                if len(data) >= at + 37:
+                    height = struct.unpack_from('>f', data, at + 33)[0]
+                    if math.isfinite(height):
+                        self.cloud_height = max(200.0, min(1500.0, height))
+                if self.said() != before:
+                    self.host.note('world: %s set %s' % (name or 'an admin', self.said()))
+            reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0)]) + struct.pack(
+                '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
+            self.host.transport.sendto(reply, addr)
+        except (IndexError, struct.error):
+            pass
+
+
 class GameHost(asyncio.DatagramProtocol):
     """The host side of one listed game: listens where the backend's EGEG points joiners (I, P)."""
 
@@ -637,6 +734,7 @@ class GameHost(asyncio.DatagramProtocol):
         self.players = {}  # ticket -> Player, from the backend's EGAM
         self.peers = {}
         self.comms = Comms(self)
+        self.world = World(self)
         self.transport = None
         self.error_noted = 0  # monotonic time of the last socket error written to the log
 
@@ -671,6 +769,10 @@ class GameHost(asyncio.DatagramProtocol):
         # at once, never a game packet (those start with a flag byte, 0 or 1).
         if data[:8] in (PING, PROBE):
             self.transport.sendto(PONG + data[8:40], addr)
+            return
+        # The match's clock and weather (World): asked for from a socket of the game's own.
+        if data[:8] == b'BF43WRLD' and len(data) > 12:
+            self.world.receive(data[8:], addr)
             return
         # Voice and text chat: from a client's comms socket, never the game's tunnel address.
         if data[:8] == COMMS and addr not in self.peers and len(data) > 8:
@@ -778,6 +880,7 @@ async def serve(args):
         host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
                            public, sock)
         host.comms.broadcast_file = args.broadcast_file
+        host.world.configure(args)
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
@@ -885,6 +988,23 @@ def main():
     ap.add_argument('--broadcast-file', default='',
                     help='a JSON file the server manager writes to send a message to every player on the server: '
                          '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
+    # The server's world (World): its clock and weather, the same for every player; admins change it in game (F9).
+    ap.add_argument('--day-night', action='store_true', help='day and night: the light follows the server\'s clock')
+    ap.add_argument('--time', type=float, default=16.0, help='the time of day the server starts at, 0 to 24')
+    ap.add_argument('--day-minutes', type=float, default=0.0,
+                    help='minutes a whole day and night take; 0: the time stands still')
+    ap.add_argument('--cloud-cover', type=float, default=0.35, help='the cloud cover, 0 to 1')
+    ap.add_argument('--cloud-rate', type=float, default=0.33, help='how fast the clouds form and change, 0 to 1')
+    ap.add_argument('--weather', type=float, default=0.0,
+                    help='the weather, 0 fair to 1 a storm (overcast, mist, far rain shafts, lightning)')
+    ap.add_argument('--fog', type=float, default=0.0, help='the distance fog, 0 to 1')
+    ap.add_argument('--ground-fog', type=float, default=0.0, help='the ground fog, 0 to 1')
+    ap.add_argument('--wind', type=float, default=0.3, help='the wind, 0 calm to 1 a gale: how far the rain leans')
+    ap.add_argument('--cloud-height', type=float, default=450.0,
+                    help='the cloud base over the sea, metres (200 to 1500): low, the planes fly through the clouds')
+    ap.add_argument('--admins', default='',
+                    help="player IDs (as the game shows them, separated by commas) who may change the world in game")
+    ap.add_argument('--admin-key', default='', help='a key that makes the game showing it an admin; empty: none')
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
