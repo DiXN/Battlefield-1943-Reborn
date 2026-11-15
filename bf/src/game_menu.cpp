@@ -5547,15 +5547,19 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   // VSync, as King Kong's row: off lets frames show at once (tearing allowed, Vulkan's immediate or mailbox
   // present), on waits for the screen's refresh. Our renderer takes it from native_x_renderer_present_mode, before
   // its swap chain is made (TekRantGaming, 15 Nov 2026: "on equals vsync on, off equals vsync off"; until then On
-  // set only the SDK's own presenters' options and NativeXRenderer went on with MAILBOX): on is FIFO, off its
-  // default, MAILBOX (no wait for the screen), else IMMEDIATE.
-  if (auto it = settings.values.find("vsync"); it != settings.values.end()) {
-    const bool on = it->second == "on";
+  // set only the SDK's own presenters' options and NativeXRenderer went on with MAILBOX): on is FIFO, off IMMEDIATE
+  // (else MAILBOX, else FIFO). Not MAILBOX for off: NVIDIA's queues frames at the screen's rate (D107), and in
+  // borderless fullscreen it held TekRantGaming's RTX 4070 Ti to 120 FPS on a 120 Hz screen with Unlimited and V-Sync off
+  // (0.4.7-indev3: 8.34 ms a frame, 7 ms of it waiting for the GPU, 1 ms of work).
+  // No saved choice is Off, as the row shows it.
+  {
+    const auto it = settings.values.find("vsync");
+    const bool on = it != settings.values.end() && it->second == "on";
     const char* tear = on ? "false" : "true";
     rex::cvar::SetFlagByName("d3d12_allow_variable_refresh_rate_and_tearing", tear);
     rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", tear);
     rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", tear);
-    rex::cvar::SetFlagByName("native_x_renderer_present_mode", on ? "vsync" : "");
+    rex::cvar::SetFlagByName("native_x_renderer_present_mode", on ? "vsync" : "immediate");
   }
 }
 
