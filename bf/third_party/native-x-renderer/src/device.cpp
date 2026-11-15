@@ -47,6 +47,11 @@
 #include <unistd.h>
 #endif
 
+// D172: DiligentCore's dynamic heap, host-visible system memory held for the whole run (resident: it is mapped and
+// written every frame). Battlefield 1943 Reborn in play needs under 16 MB of it; a level's load between 32 and 64 MB.
+REXCVAR_DEFINE_INT32(native_x_renderer_dynamic_heap_mb, 64, "NativeXRenderer",
+                     "Size of DiligentCore's dynamic heap in MB (D172): system memory for the draws' constants and "
+                     "uploads, held for the whole run; when it is short, DiligentCore waits for the GPU");
 REXCVAR_DEFINE_INT32(native_x_renderer_compile_threads, 0, "NativeXRenderer",
                      "Threads compiling pipelines (D135): 0 = the hardware's threads less two, from 4 to 16, below "
                      "normal priority so the game's own threads come first");
@@ -244,7 +249,7 @@ bool Device::Create(void* native_window, bool half_precision) {
   REXLOG_INFO("[native_x_renderer] pipelines compile on {} threads (D135)", compile_threads);
   // Every draw maps its constant buffers from the dynamic heap (system, bool/loop and fetch constants:
   // 1.4 KB, plus the float constants its shaders use), with several frames in flight.
-  create_info.DynamicHeapSize = 256 << 20;
+  create_info.DynamicHeapSize = uint32_t(std::clamp(REXCVAR_GET(native_x_renderer_dynamic_heap_mb), 8, 1024)) << 20;
   create_info.DynamicHeapPageSize = 1 << 20;
   IDeviceContext* contexts[1] = {};
   // Intel XeSS as the antialiasing (xess_*): the device made with the extensions it needs (xess.h); made without

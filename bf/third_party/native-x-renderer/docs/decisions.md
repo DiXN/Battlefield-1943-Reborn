@@ -5389,3 +5389,18 @@ threads. With every core free it gains nothing where the GPU is the limit, and h
 Four cores at 90 FPS: 1% low 89.4 FPS with and without the recorder (it stays on). All sixteen threads, no cap:
 229.7 FPS, 1% low 193.9 (223.6 and 189.1 before; the GPU is the limit). Unlimited frame rate on two cores stays poor
 either way (47 to 71 FPS average, 1% low about 13): the processor is simply full.
+
+## D172 — The dynamic heap at 64 MB, not 256 (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** DiligentCore's dynamic heap (the draws' constant buffers and the uploads, `EngineVkCreateInfo::DynamicHeapSize`)
+is one host-visible, host-coherent buffer made at the start and kept: on a discrete card that is pinned system memory,
+on integrated graphics memory shared with the system. At 256 MB it was the third largest block in Battlefield 1943
+Reborn's process (all of it resident), for a game that also wants to run on 8 GB PCs. Measured on a Ryzen 7 7800X3D
+and RTX 4070 Ti (DiligentCore warns "Space in dynamic heap is almost exhausted" whenever it must wait for the GPU to free
+space): 16 MB, 314 such waits, all during the level's load; 32 MB, 91, all during the load; 64 MB, none on any of the
+four maps, nor with the HD texture pack, nor over two 14 spot camera tours at the Ultra settings with the pack, and the
+load took as long (7.3 s on Wake Island). Play itself never needed 16 MB.
+
+**What:** `native_x_renderer_dynamic_heap_mb` (64; 8 to 1024) sets the size. The working set in a match went from
+2.9 GB to 2.7 GB (private memory 4.58 to 4.39 GB), the frame rate the same. If a game needs more, DiligentCore only
+waits for the GPU (and says so in the log), it does not fail.
