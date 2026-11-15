@@ -5,7 +5,7 @@
 ### Battlefield 1943 on PC, running natively, with its online multiplayer back on servers anyone can run.
 
 **Alpha playtest.** The 2009 Xbox 360 game by DICE, for Windows and Linux: all four maps, 24 players a server,
-Project-Official Servers and community servers, and the options of a modern PC release.
+Reborn servers and community servers, and the options of a modern PC release.
 
 [<img src="https://img.shields.io/badge/Download-Windows%20x64-c49a45?style=for-the-badge&logo=windows&logoColor=white&labelColor=1d2016" alt="Download for Windows" height="44">](https://github.com/TekRantGaming/Battlefield-1943-Reborn/releases/latest)
 &nbsp;
@@ -42,7 +42,7 @@ Project-Official Servers and community servers, and the options of a modern PC r
 
 | | | |
 | :--- | :--- | :--- |
-| 🌴 **All four maps**: Wake Island, Guadalcanal, Iwo Jima and Coral Sea | 🌐 **Online play is back**, with Project-Official Servers and anyone's own | ⏱️ **60 Hz servers**, twice the console's tick rate |
+| 🌴 **All four maps**: Wake Island, Guadalcanal, Iwo Jima and Coral Sea | 🌐 **Online play is back**, with Reborn servers and anyone's own | ⏱️ **60 Hz servers**, twice the console's tick rate |
 | 🖥️ **Your screen's resolution and refresh rate**, ultrawide too | 🎞️ **Any frame rate**: a limit from 30 to 240, or none | 🎨 **Ambient occlusion, global illumination** and grass to the horizon |
 | 🖱️ **Keyboard and mouse** in every seat, planes flown with the mouse | 🎮 **Any controller**, with Xbox, PlayStation or Steam Deck prompts | 🎚️ **Graphics presets** from Potato to Ultra |
 | 🎙️ **Proximity voice chat** and text chat, with a profanity filter | 🔒 **Custom Match**: your own match, online or LAN, with a password | 🔎 **Server browser** with regions, tick rates and Direct connect |
@@ -71,11 +71,11 @@ player logs in to and which lists every server.
 
 <table>
 <tr>
-<td width="55%"><img src="docs/images/readme/server-browser.jpg" alt="The server browser's Project-Official Servers"></td>
+<td width="55%"><img src="docs/images/readme/server-browser.jpg" alt="The server browser's Reborn servers"></td>
 <td valign="middle">
 
 ### Server browser
-- **Official** (the Project-Official Servers) and **Community** servers, **Favourites**, **LAN** and **Direct connect**
+- Tabs: **Reborn**, **Community**, **Favorites**, **LAN** and **Direct Connect**
 - Each server's **map**, **players**, **region** with its flag, **tick rate** and **ping**
 - **Search**, a **region filter**, Has players, Not full, and sorting
 - **Quick Play** on Home joins the busiest server with room
@@ -85,8 +85,8 @@ player logs in to and which lists every server.
 <tr>
 <td valign="middle">
 
-### Project-Official Servers and community servers
-- **Project-Official Servers** are run by TekRantGaming at 60 Hz: in **EU Central**, All Maps with Wake Island, Guadalcanal and
+### Reborn servers and community servers
+- **Reborn servers** are run by TekRantGaming at 60 Hz: in **EU Central**, All Maps with Wake Island, Guadalcanal and
   Iwo Jima in turn, and **Air Superiority** on Coral Sea; in **US Central**, a server testing a new server build
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, managed
   from a page in the browser, each with its own name, description, maps, players, region and tick rate. See
@@ -235,7 +235,7 @@ This is an alpha. The main ones:
 
 - The first person weapon and hands move with the game's own updates, not every frame, at high frame rates (the view
   itself turns on every frame).
-- Stats, awards and leaderboards are kept only while the official backend runs: they reset when it restarts.
+- Stats, awards and leaderboards are kept only while the Reborn backend runs: they reset when it restarts.
 - No HDR. On 16:10 and 4:3 screens Fill screen crops the picture's sides: Settings > Display > Aspect ratio >
   Letterbox 16:9 shows all of it.
 - Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once; the
