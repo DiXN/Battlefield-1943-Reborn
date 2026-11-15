@@ -166,8 +166,29 @@ uint64_t TakeLimitWaitedUs() { return g_limit_waited_us.exchange(0); }
 // When the game last presented a frame (LastGuestPresentMs): before the game starts the launcher's pages are drawn by
 // the window's own loop and pace themselves (game_menu.cpp, PaceLauncher), while the game's frames pace them after.
 std::atomic<int64_t> g_last_present_ms{-1000000};
+
+// While the game's window is minimised nothing is shown, so nothing holds the frame rate (VSync waits only for frames
+// it shows): measured 15 Nov 2026, Wake Island minimised, Unlimited: 251 FPS, 3.3 cores and the graphics card 99.8%
+// busy at about 290 W, all for frames nobody sees. bf_minimized_fps holds it there instead. On Windows the window's
+// own state is read each frame (IsIconic: any thread, about a microsecond), so a restore by any route (the taskbar,
+// Alt+Tab, back to maximised) ends it at once; elsewhere the window's minimise and restore events, and a focused
+// window counts as not minimised.
+REXCVAR_DEFINE_DOUBLE(bf_minimized_fps, 30.0, "BF1943",
+                      "Frame rate limit while the game's window is minimised (nothing shown; 0: no limit of its own)");
+std::atomic<void*> g_pacing_window{nullptr};
+std::atomic<bool> g_window_minimized{false};
+bool WindowMinimized() {
+#if defined(_WIN32)
+  HWND window = static_cast<HWND>(g_pacing_window.load(std::memory_order_relaxed));
+  return window && IsIconic(window);
+#else
+  return g_window_minimized.load(std::memory_order_relaxed);
+#endif
+}
 namespace bf1943 {
 int64_t LastGuestPresentMs() { return g_last_present_ms.load(std::memory_order_relaxed); }
+void SetPacingWindow(void* native_window) { g_pacing_window.store(native_window, std::memory_order_relaxed); }
+void NoteWindowMinimized(bool minimized) { g_window_minimized.store(minimized, std::memory_order_relaxed); }
 }  // namespace bf1943
 void LimitFrame() {
   g_last_present_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -200,6 +221,20 @@ void LimitFrame() {
   if (no_limit) return;
 #endif
   double fps = REXCVAR_GET(bf_max_fps);
+  {
+    const double hidden = REXCVAR_GET(bf_minimized_fps);
+    const bool minimized = hidden > 0 && WindowMinimized();
+    static bool was_minimized = false;
+    if (minimized != was_minimized) {
+      was_minimized = minimized;
+      if (minimized) {
+        REXLOG_INFO("BF window minimised: {:.0f} frames a second until it is shown again", hidden);
+      } else {
+        REXLOG_INFO("BF window shown again: the chosen frame rate");
+      }
+    }
+    if (minimized && (fps <= 0 || fps > hidden)) fps = hidden;
+  }
   using Clock = std::chrono::steady_clock;
   static Clock::time_point next{};
 #if defined(BF_DEV_TOOLS)

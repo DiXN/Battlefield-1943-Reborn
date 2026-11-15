@@ -33,6 +33,8 @@
 namespace bf1943 {
 void InstallFpeGuard();  // fpe_guard.cpp
 void RaiseTimerResolution();  // frame_rate.cpp
+void SetPacingWindow(void* native_window);  // frame_rate.cpp: the frame limit while minimised
+void NoteWindowMinimized(bool minimized);   // frame_rate.cpp (not Windows: from the window's events)
 void ExtractGameArt(const std::filesystem::path& game, const std::filesystem::path& out_dir);  // shader_prep.cpp
 void SetLevelGameRoot(const std::filesystem::path& game);  // shader_prep.cpp: the level's water height for the grass
 void HdExport(const std::filesystem::path& game);          // shader_prep.cpp: developer, the HD pack's source
@@ -161,6 +163,7 @@ class Bf1943App : public rex::ReXApp {
   void OnPostSetup() override {
     // The window's title (TekRantGaming, 10 Nov 2026): the game's name, not the SDK's "bf1943" and its build stamp.
     if (window()) window()->SetTitle("Battlefield 1943 Reborn");
+    if (window()) bf1943::SetPacingWindow(window()->GetNativeWindowHandle());
     bf1943::InstallFpeGuard();  // after the runtime's own signal handlers
     bf1943::HideServerWindows();  // a dedicated server shows no window (server_mode.cpp)
     // NativeXRenderer (native_x_renderer_bf1943.cpp), before the guest starts. Off unless its settings are on
@@ -180,6 +183,14 @@ class Bf1943App : public rex::ReXApp {
   // Just before the game starts: the backend's answer to the player's name (game_menu.cpp, a number added when another
   // player online has it), so the game only ever sees one name.
   void OnPreLaunchModule() override { bf1943::FinishNameCheck(); }
+
+  // The frame limit while minimised (frame_rate.cpp; Windows reads the window's own state instead).
+  void OnWindowMinimized() override { bf1943::NoteWindowMinimized(true); }
+  void OnWindowRestored() override { bf1943::NoteWindowMinimized(false); }
+  void OnWindowFocusChanged(bool focused) override {
+    if (focused) bf1943::NoteWindowMinimized(false);
+    rex::ReXApp::OnWindowFocusChanged(focused);
+  }
 
   // The game's module is launched: the time, for a game that ends while it is still starting (OnShutdown).
   void OnPostLaunchModule(rex::system::XThread* thread) override {
