@@ -4,8 +4,8 @@
 
 ### Battlefield 1943 on PC, running natively, with its online multiplayer back on servers anyone can run.
 
-**Alpha playtest.** The 2009 Xbox 360 game by DICE, for Windows and Linux: all four maps, 24 players a server, officially ran
-project servers and community servers, and the options of a modern PC release.
+**Alpha playtest.** The 2009 Xbox 360 game by DICE, for Windows and Linux: all four maps, 24 players a server,
+Project-Official Servers and community servers, and the options of a modern PC release.
 
 [<img src="https://img.shields.io/badge/Download-Windows%20x64-c49a45?style=for-the-badge&logo=windows&logoColor=white&labelColor=1d2016" alt="Download for Windows" height="44">](https://github.com/TekRantGaming/Battlefield-1943-Reborn/releases/latest)
 &nbsp;
@@ -42,7 +42,7 @@ project servers and community servers, and the options of a modern PC release.
 
 | | | |
 | :--- | :--- | :--- |
-| 🌴 **All four maps**: Wake Island, Guadalcanal, Iwo Jima and Coral Sea | 🌐 **Online play is back**, with officially ran project servers and anyone's own | ⏱️ **60 Hz servers**, twice the console's tick rate |
+| 🌴 **All four maps**: Wake Island, Guadalcanal, Iwo Jima and Coral Sea | 🌐 **Online play is back**, with Project-Official Servers and anyone's own | ⏱️ **60 Hz servers**, twice the console's tick rate |
 | 🖥️ **Your screen's resolution and refresh rate**, ultrawide too | 🎞️ **Any frame rate**: a limit from 30 to 240, or none | 🎨 **Ambient occlusion, global illumination** and grass to the horizon |
 | 🖱️ **Keyboard and mouse** in every seat, planes flown with the mouse | 🎮 **Any controller**, with Xbox, PlayStation or Steam Deck prompts | 🎚️ **Graphics presets** from Potato to Ultra |
 | 🎙️ **Proximity voice chat** and text chat, with a profanity filter | 🔒 **Custom Match**: your own match, online or LAN, with a password | 🔎 **Server browser** with regions, tick rates and Direct connect |
@@ -71,7 +71,7 @@ player logs in to and which lists every server.
 
 <table>
 <tr>
-<td width="55%"><img src="docs/images/readme/server-browser.jpg" alt="The server browser's officially ran project servers"></td>
+<td width="55%"><img src="docs/images/readme/server-browser.jpg" alt="The server browser's Project-Official Servers"></td>
 <td valign="middle">
 
 ### Server browser
@@ -85,8 +85,8 @@ player logs in to and which lists every server.
 <tr>
 <td valign="middle">
 
-### Officially ran project servers and community servers
-- **Officially ran project servers** are run by TekRantGaming at 60 Hz: in **EU Central**, All Maps with Wake Island, Guadalcanal and
+### Project-Official Servers and community servers
+- **Project-Official Servers** are run by TekRantGaming at 60 Hz: in **EU Central**, All Maps with Wake Island, Guadalcanal and
   Iwo Jima in turn, and **Air Superiority** on Coral Sea; in **US Central**, a server testing a new server build
 - **Community servers**: anyone can host dedicated servers with `BF1943-Reborn-Server-<version>-windows.zip`, managed
   from a page in the browser, each with its own name, description, maps, players, region and tick rate. See
