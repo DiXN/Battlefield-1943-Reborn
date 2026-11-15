@@ -65,11 +65,39 @@ no restart and no crash; memory steady at 360 MB; 14% of a core at the end. Its 
 
 Two servers on the VPS now take about a quarter of a core between them while empty, against 60% before.
 
+## The guest clock on Linux (15 Nov 2026)
+
+The runtime made the game's time (its time base, performance counter and millisecond clock) from `CLOCK_MONOTONIC_RAW`
+on Linux. On some virtual machines that clock does not keep real time: under WSL 2 it ran at 0.923 of real time for
+long stretches, and at other times jumped ahead (0.45 s in 5 s). The game's frame timer follows absolute deadlines in
+its own time and starts again from "now" when it finds itself far behind, so a 60 Hz dedicated server ran **55.4
+ticks a second** (exactly 60 x 0.923) while its players ran 60: its simulation fell behind theirs all the time. On the
+US VPS (KVM) the two clocks agree to 1 ppm, so it ticked 60.0 there.
+
+The fix (SDK `src/core/clock_posix.cpp`): `CLOCK_MONOTONIC`, continuous and at real time, the clock every wait in the
+runtime already uses (Windows reads QPC). Same WSL machine, same raw clock at 0.923 throughout, 2 runs each of 130 s:
+0.4.6.3's runtime 55.4 ticks a second in every 30 s report, the fixed one 60.0 in every report.
+
+## Long ticks: the tick probe
+
+`BF_TICK_PROBE=<ms>` (Linux, any build, off unless set; `bf/src/server_tick_probe.cpp`): when a server tick has run
+that long, a watchdog thread records the main thread's scheduler state, its system call and its stack (again at 2, 4
+and 8 times the threshold), and the same for a wait between ticks that lasts a tick plus the threshold. Each frame is
+module+offset for addr2line on the build's own binary; recompiled guest functions name their guest address. On a
+server started by the manager: `BF_TICK_PROBE=25 ./bf1943-server run` (the variable reaches the game).
+
 ## Crash checks
 
 - The abort handler, tested on the VPS (SIGABRT sent to a private server): the stack in `game.out`, the manager
   started the server again within 2 s, systemd-coredump kept the whole core (66 MB compressed).
 - Logs flush on every info line (the SDK's flush level), so the last lines before a crash are on disk.
+- The null page (15 Nov 2026): the US Central abort of 14 Nov 19:58 CET (its core read with gdb) was a tick walking
+  a plane's part tree (sub_822A8F80) into a part already freed but still listed: the call through its method table
+  went to a heap address (0x1F680744). 0.4.6.5 skips such calls on servers (guest_invalid_call_skip), but the walk
+  then reads guest 0xAE through the dead part's zeroed table pointer. Windows has given zeros there since 13 Nov (the
+  null page guard); Linux had no guard, and a private server replaying the sequence (BF_DEV_DEAD_PART_AT, dev builds)
+  looped on "Unhandled guest access violation" with no ticks until killed. Now the page is read only on Linux (reads
+  give zeros, writes still crash): the same replay logs the skipped call, reads 00 and ticks on at 60.0 a second.
 
 ## Not changed, and why
 

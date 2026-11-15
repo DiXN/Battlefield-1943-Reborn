@@ -245,6 +245,8 @@ namespace bf1943 {
 void ModernModeTick(uint8_t* base);  // modern_mode.cpp: the movement and aiming values for this server's mode
 void GmHostStart();  // gm_host.cpp: our GameManager host, once (bf_gm_backend)
 void InstallNullPageGuardOnce();  // crash_report.cpp: a server draws no frame, so the guard comes with its first tick
+void TickProbeBegin();  // server_tick_probe.cpp: a long tick's stack (Linux, BF_TICK_PROBE)
+void TickProbeEnd();
 #if defined(BF_DEV_TOOLS)
 void RunGameFixTest(PPCContext& ctx, uint8_t* base);  // game_fixes.cpp: the empty slot guard, tested once
 #endif
@@ -514,8 +516,10 @@ REX_HOOK_RAW(sub_824123F0) {
   const auto tick_start = Clock::now();
   const bool is_server = REXCVAR_GET(server);
   const ThreadCost cost_before = is_server ? ThreadCostNow() : ThreadCost{};
+  if (is_server) bf1943::TickProbeBegin();
   __imp__sub_824123F0(ctx, base);
   if (!is_server) return;
+  bf1943::TickProbeEnd();
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_SERVER_SLOW=<ms> (tests): each server tick takes that much longer, as on a slow machine.
   static const double slow_ms = [] {

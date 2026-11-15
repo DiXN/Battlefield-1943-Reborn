@@ -101,6 +101,7 @@ set(BF1943_SOURCES
     src/recoil.cpp
     src/game_install.cpp
     src/server_rotation.cpp
+    src/server_tick_probe.cpp
     src/gm_host.cpp
     src/private_match.cpp
     src/dev_watch.cpp
