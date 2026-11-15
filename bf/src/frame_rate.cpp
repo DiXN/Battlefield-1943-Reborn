@@ -154,7 +154,6 @@ void RaiseTimerResolution() {
 }  // namespace bf1943
 
 namespace bf1943 {
-void NoteFrameInterval(double ms, bool held, double our_fps);  // frame_cap.cpp
 // The time our limit waited (microseconds) since the last call, for the FPS log line (frame_stats.cpp): the frame
 // time less this is what the frames took, so a capped run still shows how much room there was.
 std::atomic<uint64_t> g_limit_waited_us{0};
@@ -193,22 +192,8 @@ void LimitFrame() {
 #endif
   const double fps = REXCVAR_GET(bf_max_fps);
   using Clock = std::chrono::steady_clock;
-  static Clock::time_point next{}, last{};
-  static bool held = false;  // our limit waited before the last frame
+  static Clock::time_point next{};
 #if defined(BF_DEV_TOOLS)
-  // BF_DEV_OUTSIDE_CAP=<fps> (tests of frame_cap.cpp): a limiter outside ours, as a driver's would pace the frames.
-  static const double outside = [] {
-    const char* v = std::getenv("BF_DEV_OUTSIDE_CAP");
-    return v ? std::atof(v) : 0.0;
-  }();
-  if (outside > 0) {
-    static Clock::time_point outside_next{};
-    const auto step = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / outside));
-    const auto at = Clock::now();
-    if (outside_next.time_since_epoch().count() == 0 || at > outside_next + step) outside_next = at;
-    while (Clock::now() < outside_next) std::this_thread::yield();
-    outside_next += step;
-  }
   // BF_DEV_SLOW_FRAMES=<min ms>,<max ms> (tests: a slow computer): each frame at least a random time in that range after
   // the last, whatever the chosen frame rate (our own limit is then left out).
   static const std::pair<double, double> slow = [] {
@@ -230,18 +215,12 @@ void LimitFrame() {
   }
 #endif
   const auto now = Clock::now();
-  // A limit outside the game (frame_cap.cpp): the frames' intervals that ours did not make.
-  if (last.time_since_epoch().count())
-    bf1943::NoteFrameInterval(std::chrono::duration<double, std::milli>(now - last).count(), held, fps);
-  last = now;
-  held = false;
   if (fps <= 0) {
     next = now;
     return;
   }
   const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / fps));
   if (next.time_since_epoch().count() == 0 || now > next + period) next = now;
-  held = now < next;
   if (now < next) {
     const auto sleep = next - now - std::chrono::microseconds(500);
     if (sleep > std::chrono::microseconds(200)) {

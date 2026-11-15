@@ -122,8 +122,6 @@ REXCVAR_DECLARE(bool, native_x_renderer_fill_screen);  // NativeXRenderer: ultra
 void SetFrameRate(double fps);  // frame_rate.cpp
 
 namespace bf1943 {
-int SystemFrameCap();      // frame_cap.cpp: a frame limit set outside the game (0: none known)
-void StartFrameCapRead();  // frame_cap.cpp
 
 // The real Steam and Discord marks on the launcher's cards (TekRantGaming, 11 Nov 2026; King Kong's, Simple Icons, CC0).
 namespace {
@@ -671,7 +669,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       settings_.values["cvar.native_x_renderer_antialiasing"] = "fxaa";
     settings_.values.erase("cvar.native_x_renderer_frame_generation");
     NoteStartValues();
-    StartFrameCapRead();
     ApplyFrameRate();
     open_ = true;  // the launcher is the main menu: shown from the first frame
     // The SDK plugin's storage only runs on the Xenos path (under NativeXRenderer it never finishes); NativeXRenderer
@@ -897,8 +894,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
 #endif
     if (!open_) PauseTest();
-    // A frame limit outside the game found since (the driver's read, or measured): the rate offered at most.
-    if (SystemFrameCap() != applied_cap_) ApplyFrameRate();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
@@ -2745,8 +2740,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
   // The frame rates offered (TekRantGaming, 9 Nov 2026): the game updates its world 30 times a second, so rates that divide
-  // into 30 keep motion even; up to the screen's refresh rate and a frame limit set outside the game
-  // (frame_cap.cpp: NVIDIA's Max Frame Rate, or one measured). Unlimited only without such a limit.
+  // into 30 keep motion even. Every rate and Unlimited, whatever the screen's refresh rate or a limit set outside the
+  // game (TekRantGaming, 15 Nov 2026: "unlimited frame rate truly is unlimited frame rate"; from 9 Nov they were held
+  // to the screen's rate and to NVIDIA's Max Frame Rate or one measured, frame_cap.cpp, now gone).
   int ScreenRefresh() {
     rex::ui::Window* window = window_ ? window_() : nullptr;
     if (settings_.Get("fullscreen", "off") == "on")
@@ -2756,13 +2752,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return desktop.refresh > 0 ? int(std::lround(desktop.refresh)) : 0;
   }
   std::vector<std::string> OfferedRates() {
-    const int refresh = ScreenRefresh(), cap = SystemFrameCap();
-    int most = refresh > 0 ? refresh + 1 : 1000;  // 59.94 Hz offers 60
-    if (cap > 0) most = std::min(most, cap);
     std::vector<std::string> rates;
-    for (int r = 30; r <= 240; r += 30)
-      if (r <= 60 || r <= most) rates.push_back(std::to_string(r));
-    if (cap <= 0) rates.push_back("unlimited");
+    for (int r = 30; r <= 240; r += 30) rates.push_back(std::to_string(r));
+    rates.push_back("unlimited");
     return rates;
   }
   // The saved choice as it applies now: the highest offered rate at or below it (110 or 144 saved: 90 or 120).
@@ -2778,12 +2770,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   void ApplyFrameRate() {
     const std::string fps = EffectiveFrameRate();
-    applied_cap_ = SystemFrameCap();
     SetFrameRate(fps == "unlimited" ? 0.0 : std::atof(fps.c_str()));
     if (fps != applied_rate_) {
-      REXLOG_INFO("BF frame rate: {} (chosen {}; screen {} Hz; a limit outside the game: {})", fps,
-                  settings_.Get("frame_rate", DefaultFrameRate()), ScreenRefresh(),
-                  applied_cap_ ? std::to_string(applied_cap_) : std::string("none"));
+      REXLOG_INFO("BF frame rate: {} (chosen {}; screen {} Hz)", fps, settings_.Get("frame_rate", DefaultFrameRate()),
+                  ScreenRefresh());
       applied_rate_ = fps;
     }
   }
@@ -3287,9 +3277,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     std::string help =
         "The most frames the game draws a second. The game updates its world 30 times a second, so these rates keep "
         "motion even. The Xbox 360 ran it at 30. Applies at once.";
-    if (const int cap = SystemFrameCap(); cap > 0)
-      help += " A frame limit of " + std::to_string(cap) + " is set outside the game (your graphics driver or a "
-              "tool), so the most offered is " + rates.back() + ".";
     SettingRow frame{"Frame rate", "Frame rate", help, rate_names,
                      int(std::find(rates.begin(), rates.end(), fps) - rates.begin())};
     if (frame.index >= int(rates.size())) frame.index = std::min(1, int(rates.size()) - 1);
@@ -5213,7 +5200,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   int name_key_ = 10;
   bool typed_logged_ = false;
   bool accept_from_key_ = false;
-  int applied_cap_ = -1;            // the outside frame limit ApplyFrameRate last saw
   std::string applied_rate_;        // the frame rate it last applied  // this frame's accept was the keyboard's Enter (MergeInput)
   bool name_caps_ = true;
   Page name_from_ = Page::kHome;
@@ -5559,12 +5545,17 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   if (auto it = settings.values.find("letterbox"); it != settings.values.end())
     rex::cvar::SetFlagByName("present_letterbox", it->second == "on" ? "true" : "false");
   // VSync, as King Kong's row: off lets frames show at once (tearing allowed, Vulkan's immediate or mailbox
-  // present), on waits for the screen's refresh.
+  // present), on waits for the screen's refresh. Our renderer takes it from native_x_renderer_present_mode, before
+  // its swap chain is made (TekRantGaming, 15 Nov 2026: "on equals vsync on, off equals vsync off"; until then On
+  // set only the SDK's own presenters' options and NativeXRenderer went on with MAILBOX): on is FIFO, off its
+  // default, MAILBOX (no wait for the screen), else IMMEDIATE.
   if (auto it = settings.values.find("vsync"); it != settings.values.end()) {
-    const char* tear = it->second == "on" ? "false" : "true";
+    const bool on = it->second == "on";
+    const char* tear = on ? "false" : "true";
     rex::cvar::SetFlagByName("d3d12_allow_variable_refresh_rate_and_tearing", tear);
     rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", tear);
     rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", tear);
+    rex::cvar::SetFlagByName("native_x_renderer_present_mode", on ? "vsync" : "");
   }
 }
 

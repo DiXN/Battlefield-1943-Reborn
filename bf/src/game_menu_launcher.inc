@@ -254,16 +254,19 @@
       if (std::string(p.name) == kTierPresets[std::clamp(tier, 0, 2)]) s.insert(s.end(), p.settings.begin(), p.settings.end());
     return s;
   }
-  // A tier's settings applied, its frame rate too: the highest offered that divides into 30 (the screen's and a limit
-  // outside the game allowing), 60 at most below the fast tier (a rate it cannot keep comes unevenly).
+  // A tier's settings applied, its frame rate too: the highest that divides into 30 up to the screen's refresh rate
+  // (a starting choice, not a limit: every rate and Unlimited stay offered), 60 at most below the fast tier (a rate
+  // it cannot keep comes unevenly).
   void ApplyTier(int tier, double slowness, const char* when) {
     rex::ui::Window* window = window_ ? window_() : nullptr;
     const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
     const DisplayMode desktop = DesktopDisplayMode(monitor, window);
     const int refresh = int(std::lround(desktop.refresh));
     std::string fps = "60";
+    const int most = refresh > 0 ? refresh + 1 : 61;  // 59.94 Hz gives 60
     for (const std::string& r : OfferedRates())
-      if (r != "unlimited" && std::atoi(r.c_str()) > std::atoi(fps.c_str()) && (tier == 2 || std::atoi(r.c_str()) <= 60))
+      if (r != "unlimited" && std::atoi(r.c_str()) > std::atoi(fps.c_str()) && std::atoi(r.c_str()) <= most &&
+          (tier == 2 || std::atoi(r.c_str()) <= 60))
         fps = r;
     settings_.values["frame_rate"] = fps;
     settings_.values["vsync"] = "off";

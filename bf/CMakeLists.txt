@@ -35,7 +35,6 @@ set(BF1943_SOURCES
     src/shader_prep.cpp
     src/frame_stats.cpp
     src/frame_rate.cpp
-    src/frame_cap.cpp
     src/frame_throttle.cpp
     src/native_x_renderer_bf1943.cpp
     src/native_x_renderer_engine.cpp
