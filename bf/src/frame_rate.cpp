@@ -509,6 +509,48 @@ REX_HOOK_RAW(sub_82609000) {
   std::this_thread::yield();
 }
 
+// The game's Direct3D frame throttle (sub_821659B0: wait until the GPU has finished an earlier frame) polls
+// sub_8216B640 in a loop (from 82165A6C), and that function is itself a delay loop (bdnz, then a time check): the
+// game's render thread (JobManager3) spun 12.5% of its time there while it waited for our renderer (profile
+// o15_prof_low, 15 Nov 2026), and on a processor with few cores that spin holds a core the renderer needs to catch
+// up. bf_d3d_throttle_wait, from the 32nd poll of one wait on: 0 the game's own spin, 1 give the core to another
+// thread that is ready (SwitchToThread; none ready: back at once), 2 sleep (asked for 0.1 ms; on Windows a whole
+// millisecond of the 1 ms timer), -1 (the default) sleep with fewer than 4 processors, yield with more.
+// Measured with no frame limit (Wake Island, 50 s a run, runs o15_thr*): two cores 131 FPS spinning (1% low 28, 252
+// frames over twice the average), 191 yielding (61, 81), 198 to 204 sleeping (90 to 104, 11 to 42); four cores 228
+// spinning or yielding (1% low 135), 219 sleeping (1% low 78, a 135 ms frame); all 16 threads 228 spinning (1% low
+// 155), 226 to 230 yielding (154 to 172), 223 to 230 sleeping (142 to 145). Two cores at 90 FPS: 1% low 73.5 spinning,
+// 84 yielding or sleeping.
+REXCVAR_DEFINE_INT32(bf_d3d_throttle_wait, -1, "BF1943",
+                     "Direct3D's frame throttle while it waits for the GPU: 0 spins (the game's own), 1 yields its core "
+                     "after 32 polls, 2 sleeps between polls, -1 sleeps with fewer than 4 processors and yields with "
+                     "more");
+REX_EXTERN(__imp__sub_8216B640);
+REX_HOOK_RAW(sub_8216B640) {
+  if (uint32_t(ctx.lr) == 0x82165A70u) {
+    using Clock = std::chrono::steady_clock;
+    thread_local uint32_t polls = 0;
+    thread_local Clock::time_point last{};
+    const auto now = Clock::now();
+    if (now - last > std::chrono::milliseconds(2)) polls = 0;  // a new wait
+    last = now;
+    int mode = REXCVAR_GET(bf_d3d_throttle_wait);
+    if (mode < 0) mode = jobwake::Processors() < 4 ? 2 : 1;
+    if (mode > 0 && ++polls > 32) {
+      if (mode == 1) {
+#if defined(_WIN32)
+        SwitchToThread();
+#else
+        sched_yield();
+#endif
+      } else {
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+      }
+    }
+  }
+  __imp__sub_8216B640(ctx, base);
+}
+
 REX_EXTERN(__imp__sub_821F3248);
 REX_HOOK_RAW(sub_821F3248) {
   const std::string name = GuestString(base, ctx.r4.u32);
