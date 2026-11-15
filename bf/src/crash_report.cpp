@@ -2,7 +2,8 @@
 // section 4), kept small: <user>\crashes\crash-<time>.dmp and .txt for a crash, hang-<time>.dmp and .txt when no
 // game frame came for 20 s. The text has the exception, the faulting module and offset, up to 16 callers as module +
 // offset (decoded with the build's bf1943.map), then the stack's third party modules and the overlays hooked into the
-// game (overlay_hooks.inc; also logged at the start). Module paths and user names are never written. Windows only.
+// game (overlay_hooks.inc; also logged at the start). Module paths and user names are never written. Windows only;
+// on Linux only the null page guard (at the end).
 
 #if defined(_WIN32)
 
@@ -442,11 +443,78 @@ void NoteGuestFrame() {
 
 #else
 
+#include <sys/mman.h>
+
+#include <cerrno>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
+
+#include <rex/cvar.h>
+#include <rex/logging.h>
+#include <rex/ppc/context.h>
+#include <rex/ppc/func.h>
+#include <rex/system/flags.h>
+#include <rex/system/thread_state.h>
+#include <rex/system/xmemory.h>
+
+REXCVAR_DEFINE_BOOL(bf_null_page_guard, true, "BF1943",
+                    "Reads of the game's null page give zeros instead of a crash (on Windows each one is logged)");
+
 namespace bf1943 {
 void InstallCrashReports(const std::filesystem::path&) {}
 void NoteGuestFrame() {}
-void InstallNullPageGuardOnce() {}
+
+// The guest's null page on Linux (15 Nov 2026): a dedicated server's abort of 14 Nov was a server tick
+// walking a plane's part tree (sub_822A8F80) into a part already freed (its method table pointer was a heap address;
+// near it the part's "Health" and "propeller" data). guest_invalid_call_skip skips that call, but the walk's next
+// instruction reads guest 0xAE through the dead part's zeroed table pointer: on Windows the guard above gives zeros
+// and the walk ends; on Linux the page had no access, so the server would still have died there. Here the page is
+// made read only: reads give zeros (the page is committed and nothing can write it), writes still crash. The reads
+// are not logged one by one as on Windows (that needs a single step per read in a signal handler).
+void InstallNullPageGuardOnce() {
+  static const bool guard = [] {
+    if (!REXCVAR_GET(bf_null_page_guard) || !REXCVAR_GET(protect_zero)) return true;
+    auto* ts = rex::runtime::ThreadState::Get();
+    if (!ts || !ts->memory()) return true;
+    if (mprotect(ts->memory()->virtual_membase(), 0x10000, PROT_READ) != 0) {
+      REXLOG_WARN("BF null page: could not make it readable ({})", std::strerror(errno));
+    } else {
+      REXLOG_INFO("BF null page: reads of the game's null page give zeros instead of a crash; writes still crash");
+    }
+    return true;
+  }();
+  (void)guard;
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_DEAD_PART_AT=<s> (a test of the above): that long after the first tick, once, the 14 Nov sequence on the
+  // server's main thread: a call through the dead part's method table (guest 0x1F680744), then the read of guest 0xAE
+  // that followed it. With guest_invalid_call_skip and this guard the server logs both and goes on.
+  static const double dead_at = [] {
+    const char* v = std::getenv("BF_DEV_DEAD_PART_AT");
+    return v && *v ? std::atof(v) : -1.0;
+  }();
+  static const auto first = std::chrono::steady_clock::now();
+  static bool dead_done = false;
+  if (dead_at >= 0 && !dead_done &&
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count() > dead_at) {
+    dead_done = true;
+    auto* ts = rex::runtime::ThreadState::Get();
+    if (ts && ts->memory()) {
+      PPCContext& ctx = *ts->context();
+      uint8_t* base = ts->memory()->virtual_membase();
+      const PPCContext saved = ctx;
+      ctx.lr = 0x822A8FA8;  // the walk's return address after its call
+      ctx.last_indirect_target = 0x1F680744;
+      REXLOG_INFO("BF dev dead part: calling guest 0x1F680744 as sub_822A8F80 did on 14 Nov");
+      rex::runtime::ResolveIndirectFunction(0x1F680744)(ctx, base);
+      const uint8_t v = *reinterpret_cast<volatile const uint8_t*>(base + 0xAE);
+      REXLOG_INFO("BF dev dead part: the call returned; guest 0xAE read as {:02X}; the server goes on", v);
+      ctx = saved;
+    }
+  }
+#endif
+}
 }  // namespace bf1943
 
 #endif
