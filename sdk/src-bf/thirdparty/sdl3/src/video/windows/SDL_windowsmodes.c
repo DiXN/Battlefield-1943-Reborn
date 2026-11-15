@@ -211,7 +211,20 @@ static SDL_DisplayOrientation WIN_GetDisplayOrientation(DEVMODEW *mode)
     }
 }
 
-static void WIN_GetRefreshRate(void *dxgi_output, DEVMODEW *mode, int *numerator, int *denominator)
+// Battlefield 1943 Reborn (TekRantGaming, 15 Nov 2026): the output's mode list, read once for all of a display's modes.
+// IDXGIOutput::FindClosestMatchingMode reads the whole list again at each call: on a 4K 120 Hz screen with 1,031
+// modes the first SDL_GetFullscreenDisplayModes took 1.04 s (40 ms of it EnumDisplaySettings), at every start.
+typedef struct WIN_DXGIModeList
+{
+#ifdef HAVE_DXGI_H
+    DXGI_MODE_DESC *modes;
+#else
+    void *modes;
+#endif
+    UINT count;
+} WIN_DXGIModeList;
+
+static void WIN_GetRefreshRate(void *dxgi_output, const WIN_DXGIModeList *list, DEVMODEW *mode, int *numerator, int *denominator)
 {
     // We're not currently using DXGI to query display modes, so fake NTSC timings
     switch (mode->dmDisplayFrequency) {
@@ -228,6 +241,29 @@ static void WIN_GetRefreshRate(void *dxgi_output, DEVMODEW *mode, int *numerator
     }
 
 #ifdef HAVE_DXGI_H
+    if (list && list->modes) {
+        // As FindClosestMatchingMode: of the listed modes of this size, the refresh rate closest to the one asked.
+        const double wanted = (double)*numerator / (double)*denominator;
+        double best = -1.0;
+        UINT i;
+        for (i = 0; i < list->count; ++i) {
+            const DXGI_MODE_DESC *m = &list->modes[i];
+            double rate, distance;
+            if (m->Width != mode->dmPelsWidth || m->Height != mode->dmPelsHeight || m->RefreshRate.Denominator == 0) {
+                continue;
+            }
+            rate = (double)m->RefreshRate.Numerator / (double)m->RefreshRate.Denominator;
+            distance = rate > wanted ? rate - wanted : wanted - rate;
+            if (best < 0.0 || distance < best) {
+                best = distance;
+                *numerator = (int)m->RefreshRate.Numerator;
+                *denominator = (int)m->RefreshRate.Denominator;
+            }
+        }
+        if (best >= 0.0) {
+            return;
+        }
+    }
     if (dxgi_output) {
         IDXGIOutput *pDXGIOutput = (IDXGIOutput *)dxgi_output;
         DXGI_MODE_DESC modeToMatch;
@@ -274,7 +310,7 @@ static float WIN_GetContentScale(SDL_VideoDevice *_this, HMONITOR hMonitor)
     return dpi / (float)USER_DEFAULT_SCREEN_DPI;
 }
 
-static bool WIN_GetDisplayMode(SDL_VideoDevice *_this, void *dxgi_output, HMONITOR hMonitor, LPCWSTR deviceName, DWORD index, SDL_DisplayMode *mode, SDL_DisplayOrientation *natural_orientation, SDL_DisplayOrientation *current_orientation)
+static bool WIN_GetDisplayMode(SDL_VideoDevice *_this, void *dxgi_output, const WIN_DXGIModeList *dxgi_modes, HMONITOR hMonitor, LPCWSTR deviceName, DWORD index, SDL_DisplayMode *mode, SDL_DisplayOrientation *natural_orientation, SDL_DisplayOrientation *current_orientation)
 {
     SDL_DisplayModeData *data;
     DEVMODEW devmode;
@@ -297,7 +333,7 @@ static bool WIN_GetDisplayMode(SDL_VideoDevice *_this, void *dxgi_output, HMONIT
     mode->format = SDL_PIXELFORMAT_UNKNOWN;
     mode->w = data->DeviceMode.dmPelsWidth;
     mode->h = data->DeviceMode.dmPelsHeight;
-    WIN_GetRefreshRate(dxgi_output, &data->DeviceMode, &mode->refresh_rate_numerator, &mode->refresh_rate_denominator);
+    WIN_GetRefreshRate(dxgi_output, dxgi_modes, &data->DeviceMode, &mode->refresh_rate_numerator, &mode->refresh_rate_denominator);
 
     // Fill in the mode information
     WIN_UpdateDisplayMode(_this, deviceName, index, mode);
@@ -568,7 +604,7 @@ static void WIN_AddDisplay(SDL_VideoDevice *_this, HMONITOR hMonitor, const MONI
 #endif
 
     dxgi_output = WIN_GetDXGIOutput(_this, info->szDevice);
-    bool found = WIN_GetDisplayMode(_this, dxgi_output, hMonitor, info->szDevice, ENUM_CURRENT_SETTINGS, &mode, &natural_orientation, &current_orientation);
+    bool found = WIN_GetDisplayMode(_this, dxgi_output, NULL, hMonitor, info->szDevice, ENUM_CURRENT_SETTINGS, &mode, &natural_orientation, &current_orientation);
     WIN_ReleaseDXGIOutput(dxgi_output);
     if (!found) {
         return;
@@ -788,11 +824,29 @@ bool WIN_GetDisplayModes(SDL_VideoDevice *_this, SDL_VideoDisplay *display)
     DWORD i;
     SDL_DisplayMode mode;
 
+    WIN_DXGIModeList dxgi_modes;
+
     dxgi_output = WIN_GetDXGIOutput(_this, data->DeviceName);
+    SDL_zero(dxgi_modes);
+#ifdef HAVE_DXGI_H
+    if (dxgi_output) {
+        IDXGIOutput *pDXGIOutput = (IDXGIOutput *)dxgi_output;
+        UINT count = 0;
+        if (SUCCEEDED(IDXGIOutput_GetDisplayModeList(pDXGIOutput, DXGI_FORMAT_R8G8B8A8_UNORM, 0, &count, NULL)) && count > 0) {
+            dxgi_modes.modes = (DXGI_MODE_DESC *)SDL_malloc(count * sizeof(DXGI_MODE_DESC));
+            if (dxgi_modes.modes && SUCCEEDED(IDXGIOutput_GetDisplayModeList(pDXGIOutput, DXGI_FORMAT_R8G8B8A8_UNORM, 0, &count, dxgi_modes.modes))) {
+                dxgi_modes.count = count;
+            } else {
+                SDL_free(dxgi_modes.modes);
+                dxgi_modes.modes = NULL;
+            }
+        }
+    }
+#endif
 
     // Make sure we add the current mode to the list in case it's a custom mode that doesn't enumerate
     for (i = ENUM_CURRENT_SETTINGS; ; ++i) {
-        if (!WIN_GetDisplayMode(_this, dxgi_output, data->MonitorHandle, data->DeviceName, i, &mode, NULL, NULL)) {
+        if (!WIN_GetDisplayMode(_this, dxgi_output, &dxgi_modes, data->MonitorHandle, data->DeviceName, i, &mode, NULL, NULL)) {
             break;
         }
         if (SDL_ISPIXELFORMAT_INDEXED(mode.format)) {
@@ -809,6 +863,7 @@ bool WIN_GetDisplayModes(SDL_VideoDevice *_this, SDL_VideoDisplay *display)
         }
     }
 
+    SDL_free(dxgi_modes.modes);
     WIN_ReleaseDXGIOutput(dxgi_output);
 
     return true;
