@@ -361,6 +361,8 @@ void Poll(uint32_t caller, bool ran) {
 // nearly all those polls. Every wait still starts with 64 polls, so a short one never sleeps.
 REXCVAR_DEFINE_BOOL(bf_job_wait_wake, true, "BF1943",
                     "The game's main thread sleeps in its frame wait until another thread has run a job");
+REXCVAR_DEFINE_INT32(bf_job_wait_wake_processors, 4, "BF1943",
+                     "bf_job_wait_wake only with at least this many processors (fewer: the frame wait polls)");
 namespace jobwake {
 std::atomic<uint32_t> g_runs{0};       // jobs run by any thread's poll (the futex word on Linux)
 std::atomic<bool> g_sleeping{false};  // the main thread sleeps in its frame wait
@@ -382,9 +384,10 @@ void Ran() {
   syscall(SYS_futex, reinterpret_cast<uint32_t*>(&g_runs), FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
 #endif
 }
-// With fewer processors the main thread's polls in this wait are the ones that pick up the frame's jobs first, while
-// the JobManager threads wait for a core: there, the wait polls as before (see bf_job_wait_wake's measurements).
-constexpr uint32_t kMinProcessors = 4;
+// With fewer processors (bf_job_wait_wake_processors) the main thread's polls in this wait are the ones that pick up
+// the frame's jobs first, while the JobManager threads wait for a core: there, the wait polls as before. Waking it
+// when a job is posted as well (the job manager's wake of its workers, sub_826070B8, about 19,000 a second) did not
+// help: on two cores still 13 to 22 frames over twice the average against 1 to 6 polling (runs pr_post2c_*).
 // The processors this process may run on (its affinity), read again at most once a second.
 uint32_t Processors() {
   using Clock = std::chrono::steady_clock;
@@ -472,7 +475,7 @@ REX_HOOK_RAW(sub_82609000) {
     return;
   }
   if (!frame_wait) frame_wait_polls = 0;
-  if (sleep && wake && jobwake::Processors() >= jobwake::kMinProcessors) {
+  if (sleep && wake && jobwake::Processors() >= uint32_t(std::max(1, REXCVAR_GET(bf_job_wait_wake_processors)))) {
     // After the wait's first 64 polls: one poll per sleep, each until a job was run or 0.25 ms.
     if (frame_wait_polls < 64) {
       ++frame_wait_polls;
