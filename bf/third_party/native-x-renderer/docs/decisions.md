@@ -5404,3 +5404,16 @@ load took as long (7.3 s on Wake Island). Play itself never needed 16 MB.
 **What:** `native_x_renderer_dynamic_heap_mb` (64; 8 to 1024) sets the size. The working set in a match went from
 2.9 GB to 2.7 GB (private memory 4.58 to 4.39 GB), the frame rate the same. If a game needs more, DiligentCore only
 waits for the GPU (and says so in the log), it does not fail.
+
+## D173 — The pipeline cache let go once the stored pipelines are compiled (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** DiligentCore's pipeline cache (D42, D45) holds the driver's binaries of every pipeline compiled with it:
+80 MB for Battlefield 1943 Reborn's 2,200 stored pipelines, in system memory for the whole run, while a match uses a
+few hundred. The drivers keep caches of their own on disk: on an RTX 4070 Ti, a start with no pipeline cache at all
+compiled the 2,200 in 594 ms, with it 640 ms.
+
+**What:** once the stored pipelines are compiled and nothing is left unsaved (a first start saves the cache first,
+D135), the renderer lets go of the cache (`native_x_renderer_keep_pipeline_cache`, false, keeps it); compilations in
+flight hold their own reference. The file is still read at the next start, for a driver without a cache of its own;
+pipelines new in play are compiled without it and not added to the file (their records are, D42). Measured, a start
+with the cache file there: the heap 608 to 527 MB resident, the working set 2.62 to 2.54 GB, the same frame rate.

@@ -56,6 +56,10 @@ REXCVAR_DEFINE_STRING(native_x_renderer_alpha_to_coverage, "auto", "NativeXRende
                       "where the alpha is at least 0.5: close to the game's MSAA) or dither (the shader's 2x2 pattern, "
                       "as on the console without MSAA)");
 
+REXCVAR_DEFINE_BOOL(native_x_renderer_keep_pipeline_cache, false, "NativeXRenderer",
+                    "Keep DiligentCore's pipeline cache for the whole run (D173). Off: it is let go once the stored "
+                    "pipelines are compiled and the cache is saved (the driver's binaries of every stored pipeline, "
+                    "tens of MB of system memory); the pipelines new in play are then compiled without it");
 REXCVAR_DEFINE_BOOL(native_x_renderer_tick_interpolation, false, "NativeXRenderer",
                     "Objects that move in the game's 30 Hz tick drawn between their last two ticks' positions, by the "
                     "time since the last one (D138): in a vehicle, where the camera moves only in the tick, the vehicle "
@@ -2910,6 +2914,18 @@ void DrawPath::EndFrame() {
       stored_compiling_.empty()) {
     SavePipelineCache();
     frames_since_saved_ = 0;
+  }
+  // D173: DiligentCore's pipeline cache let go once the stored pipelines are compiled and nothing is left unsaved: it
+  // holds the driver's binaries of every stored pipeline (80 MB for Battlefield 1943's 2,200) for the whole run, while
+  // the drivers keep caches of their own on disk (a start with no cache at all: the same 0.6 s). It is still read at
+  // the next start, for a driver without one. Compilations in flight hold their own reference to it.
+  if (pipeline_cache_ && !REXCVAR_GET(native_x_renderer_keep_pipeline_cache) && stored_.empty() &&
+      stored_compiling_.empty() && !pipelines_unsaved_ && !saving_) {
+    if (save_thread_.joinable()) save_thread_.join();
+    pipelines_->SetCache(nullptr);
+    pipeline_cache_.Release();
+    REXLOG_INFO("[native_x_renderer] pipeline cache: let go after the stored pipelines (D173); the pipelines new in "
+                "play compile without it");
   }
   if (primitives_) primitives_->EndFrame();
   if (memory_) memory_->EndFrame();
