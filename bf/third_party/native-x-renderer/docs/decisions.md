@@ -5417,3 +5417,27 @@ D135), the renderer lets go of the cache (`native_x_renderer_keep_pipeline_cache
 flight hold their own reference. The file is still read at the next start, for a driver without a cache of its own;
 pipelines new in play are compiled without it and not added to the file (their records are, D42). Measured, a start
 with the cache file there: the heap 608 to 527 MB resident, the working set 2.62 to 2.54 GB, the same frame rate.
+
+## D174 — The guest memory mirror as a sparse buffer (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** the mirror of the guest's 512 MB of physical memory (D35, the SDK's SharedMemory design) was an ordinary
+buffer: 512 MB of graphics memory on every card, a quarter of a 2 GB one, though only what the draws read is ever
+copied in. Battlefield 1943 Reborn wrote 116 to 124 MB of it in 64 KB blocks (228 MB in 4 MB blocks) over 14 spot
+camera tours of Guadalcanal and Wake Island. The SDK's Xenos path binds its own shared memory sparsely for the same
+reason (tested here with that off: +504 MB).
+
+**What:** where the device has sparse buffers, timeline semaphores and a queue that binds sparse memory
+(`SparseResources` and `NativeFence` are now asked for, optional), the mirror is a `USAGE_SPARSE` buffer and
+`GuestMemory::EnsureMirror` binds 1 MB of a sparse `IDeviceMemory` to each 1 MB block before anything first writes
+there: the three copies into the mirror (`Upload`, `UploadUnwatched`, `WriteIfChanged`) and the two compute passes that
+write resolves into it (D140, D155; a span rounded up to 32 rows of 16 bytes a texel). The bind is recorded in order
+with the copies (the recorder's `Do`): DiligentCore flushes the context, binds, signals the fence, and the context's
+next submission waits for it on the GPU. Blocks are never unbound. Without the support, or with
+`native_x_renderer_sparse_guest_memory` false, the full buffer as before; the log says which and why. A draw reads only
+ranges requested first, which are copied (so bound) before; an unbound block reads as zeros.
+
+**Measured** (RTX 4070 Ti, Wake Island): the game's dedicated graphics memory 2,085 MB to 1,745 MB, 162 MB of the
+mirror bound after a minute of play (164 MB on a Guadalcanal tour with the HD texture pack); every draw drawn (836
+of 836); screenshots of the same camera spots the same; no errors. Frame rates in interleaved runs, sparse against full:
+all cores 225.2 and 228.4 FPS against 218.2 and 229.3; two cores 170.7 and 175.0 against 172.6 and 171.1 (the same
+within noise).

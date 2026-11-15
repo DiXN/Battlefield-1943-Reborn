@@ -1382,6 +1382,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
             write.address = l.address, write.width = l.width, write.height = l.height, write.pitch = l.pitch;
             write.guest_format = l.guest_format, write.tiled = l.tiled, write.endian = l.endian;
             write.scale_x = l.scale_x, write.scale_y = l.scale_y, write.slice = l.slice;
+            memory_->EnsureMirror(write.address, uint32_t(std::min<uint64_t>(uint64_t((write.pitch + 31) & ~31u) * ((write.height + 31) & ~31u) * 16, 0x20000000u)));  // D174
             if (blit_->WriteToMirror(device_->context(), t->ArrayView(), memory_->buffer(), memory_->uav(), write)) {
               TargetsChanged();  // the compute pass bound its own
               REXLOG_INFO("[native_x_renderer] D155: the resolve at {:#x} written to the mirror before its first draw",

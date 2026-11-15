@@ -42,6 +42,8 @@
 #include "Buffer.h"
 #include "BufferView.h"
 #include "DeviceContext.h"
+#include "DeviceMemory.h"
+#include "Fence.h"
 #include "recorder.h"
 #include "RefCntAutoPtr.hpp"
 #include "RenderDevice.h"
@@ -61,6 +63,11 @@ class GuestMemory final : public rex::graphics::SharedMemory {
   using rex::graphics::SharedMemory::memory;
 
   Diligent::IBuffer* buffer() const { return buffer_; }
+  // D174: with a sparse mirror, the 1 MB blocks [start, start + length) falls in get memory before anything writes
+  // there (every copy into the mirror and every compute pass writing it calls it first). A full mirror: nothing to do.
+  void EnsureMirror(uint32_t start, uint32_t length);
+  bool sparse() const { return sparse_; }
+  uint32_t mirror_bound_mb() const { return blocks_bound_ << kBlockLog2 >> 20; }
   // The views the shaders bind: read-only (no memexport) and read-write.
   Diligent::IBufferView* view() const { return srv_; }
   Diligent::IBufferView* uav() const { return uav_; }
@@ -182,6 +189,15 @@ class GuestMemory final : public rex::graphics::SharedMemory {
   Diligent::RefCntAutoPtr<Diligent::IBuffer> buffer_;
   Diligent::IBufferView* srv_ = nullptr;
   Diligent::IBufferView* uav_ = nullptr;
+  // D174: the sparse mirror's memory (1 MB pages, one per block bound, in the order bound), the fence its binds
+  // signal (the context's next submission waits on it), and per 1 MB block of the mirror whether it has memory.
+  static constexpr uint32_t kBlockLog2 = 20;
+  bool sparse_ = false;
+  Diligent::RefCntAutoPtr<Diligent::IDeviceMemory> sparse_memory_;
+  Diligent::RefCntAutoPtr<Diligent::IFence> sparse_fence_;
+  uint64_t sparse_fence_value_ = 0;
+  std::vector<uint8_t> block_bound_;
+  uint32_t blocks_bound_ = 0, bound_logged_mb_ = 0;
   // Per page: the hash of the data last copied into the mirror, 0 if none.
   std::vector<uint64_t> page_hashes_;
   std::vector<uint8_t> snapshot_;

@@ -2015,6 +2015,7 @@ void ExecuteResolve(const Command& c) {
     write.scale_x = target->scale.x, write.scale_y = target->scale.y;
     write.slice = slice;
     GuestMemory* memory = g_resolved.memory();
+    memory->EnsureMirror(write.address, uint32_t(std::min<uint64_t>(uint64_t((write.pitch + 31) & ~31u) * ((write.height + 31) & ~31u) * 16, 0x20000000u)));  // D174
     if (g_blit.WriteToMirror(g_device->context(), target->ArrayView(), memory->buffer(), memory->uav(), write)) {
       ++g_stats.mirror_writes;
       static const bool log = std::getenv("NXR_D140_LOG") != nullptr;  // a diagnosis aid: each one

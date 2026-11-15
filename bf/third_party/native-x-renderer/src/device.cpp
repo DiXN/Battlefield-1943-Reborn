@@ -227,6 +227,9 @@ bool Device::Create(void* native_window, bool half_precision) {
   create_info.Features.OcclusionQueries = DEVICE_FEATURE_STATE_OPTIONAL;
   create_info.QueryPoolSizes[QUERY_TYPE_OCCLUSION] = OcclusionQueries::kPoolSize;  // the guest's (D62)
   create_info.Features.DurationQueries = DEVICE_FEATURE_STATE_OPTIONAL;  // GPU time per frame, for the log
+  // D174: the guest memory mirror as a sparse buffer, its binds signalling a timeline semaphore.
+  create_info.Features.SparseResources = DEVICE_FEATURE_STATE_OPTIONAL;
+  create_info.Features.NativeFence = DEVICE_FEATURE_STATE_OPTIONAL;
   // Pipelines compile in DiligentCore's thread pool (D28). A few threads: new pipelines come in bursts
   // (a level, a new effect), and the game's own threads need the CPU.
   create_info.Features.AsyncShaderCompilation = DEVICE_FEATURE_STATE_OPTIONAL;
