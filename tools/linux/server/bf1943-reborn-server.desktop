@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Battlefield 1943 Reborn Server
+Comment=Run your own Battlefield 1943 Reborn servers
+Exec=bf1943-server
+Icon=bf1943-reborn-server
+Categories=Game;
+Terminal=true

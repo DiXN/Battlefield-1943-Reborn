@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -463,6 +464,11 @@ bool ImageFileUv(const std::filesystem::path& file, ImVec2& uv0, ImVec2& uv1, in
 
 bool DrawImageFile(ImDrawList* d, const std::filesystem::path& file, ImVec2 a, ImVec2 b, bool stretch, bool fit,
                    int max_width, ImU32 tint) {
+  if (NoGameArt()) {
+    // The pictures taken from the player's game files (the maps', the startup cards') live in cache\extracted.
+    const std::string p = file.generic_string();
+    if (p.find("/cache/extracted/") != std::string::npos) return false;
+  }
   FileImage* gp = LoadImageFile(file, max_width);
   if (!gp) return false;
   FileImage& g = *gp;
@@ -655,7 +661,19 @@ namespace {
 fs::path g_menu_art_dir;
 }  // namespace
 
-void SetMenuArtDir(const fs::path& dir) { g_menu_art_dir = dir; }
+bool NoGameArt() {
+#if defined(BF_DEV_TOOLS)
+  static const bool on = [] {
+    const char* v = std::getenv("BF_DEV_NO_GAME_ART");
+    return v && *v == '1';
+  }();
+  return on;
+#else
+  return false;
+#endif
+}
+
+void SetMenuArtDir(const fs::path& dir) { g_menu_art_dir = NoGameArt() ? fs::path() : dir; }
 const fs::path& MenuArtDir() { return g_menu_art_dir; }
 
 bool Art(ImDrawList* d, const char* name, ImVec2 a, ImVec2 b, bool stretch, ImU32 tint) {

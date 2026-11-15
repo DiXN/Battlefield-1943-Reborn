@@ -125,6 +125,10 @@ bool ImageFileUv(const std::filesystem::path& file, ImVec2& uv0, ImVec2& uv1, in
 // insignia, portraits, brush strokes and fonts; shader_prep.cpp ExtractMenuArt cuts them into user\cache\extracted\menu
 // after the game is installed, bf_font.cpp reads the fonts). Never shipped; until they are there, the launcher
 // draws with its own fonts and colours.
+// BF_DEV_NO_GAME_ART=1 (dev builds, README screenshots, 15 Nov 2026): the menus as before the game is installed: no
+// art, pictures or fonts from the player's game files (SetMenuArtDir keeps none, DrawImageFile refuses
+// cache\extracted), our own and the system's stand ins instead. Always false in a release build.
+bool NoGameArt();
 void SetMenuArtDir(const std::filesystem::path& dir);  // user\cache\extracted\menu (the user folder is three up)
 const std::filesystem::path& MenuArtDir();
 // A piece of the menu art by its name (logo, backdrop, brush_bar, portrait_us_rifleman, rank_07, glyph_a, flag_us,

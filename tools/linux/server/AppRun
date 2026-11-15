@@ -1,0 +1,23 @@
+#!/bin/sh
+# Battlefield 1943 Reborn server AppImage: the server manager (tree/bf1943-server) with the package's own Python.
+# Its data (server.json, game, logs) goes in the folder bf1943-server beside the AppImage file.
+HERE="$(dirname "$(readlink -f "$0")")"
+# Run from a copy outside the AppImage's mount, as the game's AppRun does and for the same reason: the mount's helper
+# ends at the first signal, and a service manager signals every process at once when it stops the servers.
+# BF_APPIMAGE_COPY=0 runs from the mount (or from --appimage-extract-and-run's folder on a host without FUSE).
+if [ -n "$APPIMAGE" ] && [ "${BF_APPIMAGE_COPY:-1}" != 0 ]; then
+  ID="$(stat -c '%s-%Y' "$APPIMAGE" 2>/dev/null)"
+  BASE="${XDG_CACHE_HOME:-$HOME/.cache}/bf1943-reborn-server/appimage"
+  if [ -n "$ID" ] && [ ! -f "$BASE/$ID/.complete" ]; then
+    for old in "$BASE"/*; do [ "$old" = "$BASE/$ID" ] || rm -rf "$old"; done
+    PART="$BASE/.part-$$"
+    rm -rf "$BASE/$ID"
+    if mkdir -p "$PART" && cp -a "$HERE/." "$PART/" && touch "$PART/.complete"; then
+      mv -T "$PART" "$BASE/$ID" 2>/dev/null || rm -rf "$PART"
+    else
+      rm -rf "$PART"
+    fi
+  fi
+  [ -n "$ID" ] && [ -f "$BASE/$ID/.complete" ] && HERE="$BASE/$ID"
+fi
+exec "$HERE/tree/bf1943-server" "$@"

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Battlefield 1943 Reborn server for Linux: starts the server manager (server/manager.py: its page in a browser, the
+# servers kept running). The same file starts it from the plain archive and inside the AppImage.
+#
+#   bf1943-server                      the manager; open http://127.0.0.1:18280/ (it opens a browser where there is one)
+#   bf1943-server run --no-browser     for a machine without a desktop (a service, an SSH session)
+#   bf1943-server status | start | stop | broadcast ... | install <your game package> | quit | where
+#
+# Needs python3 (3.9 or newer) unless the package carries its own (the AppImage does).
+HERE="$(dirname "$(readlink -f "$0")")"
+LIBS="$HERE/bin"
+# The X11 and Wayland client libraries the program is linked with: a server without a desktop has none, and the
+# program would not load. Nothing connects with them (SDL's offscreen driver). The system's own copies win.
+if [ -d "$HERE/lib/desktop" ]; then
+  if ! ldconfig -p 2>/dev/null | grep -q 'libX11\.so\.6 .*x86-64' || ! ldconfig -p 2>/dev/null | grep -q 'libwayland-client\.so\.0 .*x86-64'; then
+    LIBS="$LIBS:$HERE/lib/desktop"
+  fi
+fi
+# The bundled C++ runtime only when the system's is older than the program needs.
+if [ -f "$HERE/lib/libstdc++.so.6" ]; then
+  SYS_CXX="$(ldconfig -p 2>/dev/null | awk '/libstdc\+\+\.so\.6 .*x86-64/ {print $NF; exit}')"
+  if [ -z "$SYS_CXX" ] || ! grep -q GLIBCXX_3.4.32 "$SYS_CXX" 2>/dev/null; then LIBS="$LIBS:$HERE/lib"; fi
+fi
+export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -x "$HERE/python/bin/python3" ]; then
+  PYTHON="$HERE/python/bin/python3"  # the package's own (it finds its library beside itself)
+  export LD_LIBRARY_PATH="$HERE/python/lib:$LD_LIBRARY_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1
+else
+  PYTHON="$(command -v python3)" || { echo "bf1943-server: python3 is not installed (any Python 3.9 or newer)" >&2; exit 1; }
+fi
+exec "$PYTHON" "$HERE/server/manager.py" "$@"
