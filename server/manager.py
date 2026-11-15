@@ -565,8 +565,12 @@ class Manager:
                 if not os.path.exists(self.official_key()):
                     raise RuntimeError('This is the official server package, and official.key is not in %s. Copy it in '
                                        'from your own copy (it is never in a download).' % DATA)
+                # The players' accounts (Protect your name) and the leaderboard: kept in this package's data folder, so
+                # a restart of the backend loses neither.
                 args += ['--theater-host', public or (lan_addresses() or ['127.0.0.1'])[0],
-                         '--official-key-file', self.official_key()]
+                         '--official-key-file', self.official_key(),
+                         '--accounts', os.path.join(DATA, 'accounts.json'),
+                         '--leaderboard', os.path.join(DATA, 'leaderboard.json')]
                 if self.cfg['required_version']:
                     args += ['--required-version', self.cfg['required_version']]
                 elif self.cfg['version_gate']:

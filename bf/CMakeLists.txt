@@ -40,6 +40,7 @@ set(BF1943_SOURCES
     src/native_x_renderer_bf1943.cpp
     src/native_x_renderer_engine.cpp
     src/game_menu.cpp
+    src/account_key.cpp
     src/launcher_kit.cpp
     src/steam_shortcut.cpp
     src/projects_art.cpp

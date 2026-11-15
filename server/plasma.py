@@ -43,6 +43,26 @@ LEADERBOARD = {}  # a name, lower case -> {'name', 'score', 'seconds', 'captures
 MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'}}: the scoreboard, from the players' games
 LEADERBOARD_FILE = None  # where it is kept (--leaderboard), loaded at the start
 
+# ---- Protect your name (TekRantGaming, 15 Nov 2026: "a secure your username option ... prevents anyone else from
+# taking that name ... store long term progression tracking for the user", with no email and no setup from players).
+# An account is an Ed25519 public key (the game makes the key from the player's recovery code, bf/src/account_key.cpp)
+# with a name and the player's progress. Every account request is signed over a one time challenge from here
+# ({"op": "challenge"}), so a request seen on the network cannot be used again and the code never leaves the player's
+# PC. A protected name is the account's alone: a name check or a login under it from anyone who did not sign in for
+# it gets a number (Name2), and stats for it are only taken signed. A name unused for NAME_UNUSED_DAYS is free again.
+ACCOUNTS = {}       # public key (hex) -> {'key', 'name', 'created', 'seen', 'progress': {'stats', 'seconds',
+                    #                      'score', 'captures', 'achievements'}}
+ACCOUNT_NAMES = {}  # a protected name, lower case -> its account's key
+ACCOUNTS_FILE = None  # --accounts: kept here (written within --accounts-save-every seconds of a change)
+ACCOUNTS_DIRTY = [False]
+CHALLENGES = {}     # nonce -> time given (a minute and a half to use it, once)
+CHALLENGES_BY_IP = {}  # address -> [times]: at most 120 a minute
+VERIFIED = {}       # key -> (player id, address, until): who signed in for the account's name, and from where
+CLAIMS = {}         # address -> [times]: new and renamed names, at most CLAIMS_AN_HOUR
+CLAIMS_AN_HOUR = 5
+NAME_UNUSED_DAYS = 180
+VERIFIED_FOR = 12 * 3600  # a sign in holds the name for the game's FESL login for this long (same id and address)
+
 # ---- The version players need (TekRantGaming, 13 Nov 2026: "server version check for latest version and only to allow
 # latest version on and reject and prompt outdated clicnt connections give them a popup advising and a button to update
 # now or close"). The newest release, from the same feed the game's own updater reads (--version-feed, asked every few
@@ -185,6 +205,11 @@ def leaderboard_put(m, test_progression=False):
     if len(LEADERBOARD) >= 5000 and name.lower() not in LEADERBOARD:
         return False
     LEADERBOARD[name.lower()] = entry
+    save_leaderboard()
+    return True
+
+
+def save_leaderboard():
     if LEADERBOARD_FILE:
         try:
             with open(LEADERBOARD_FILE + '.tmp', 'w', encoding='utf-8') as f:
@@ -192,7 +217,6 @@ def leaderboard_put(m, test_progression=False):
             os.replace(LEADERBOARD_FILE + '.tmp', LEADERBOARD_FILE)
         except OSError:
             pass
-    return True
 
 
 def leaderboard_top(count=50):
@@ -223,21 +247,201 @@ def name_holder(name):
     return None
 
 
-def free_name(name, pid):
+def free_name(name, pid, address=None):
     """The player's name, or it with the smallest number nobody else holds: TekRantGaming, TekRantGaming2, TekRantGaming3 (TekRantGaming, 7 Nov 2026:
     two players with the same name in a server). Names are 15 characters at most, as gamertags; a name differing only
-    in case counts as the same one."""
+    in case counts as the same one. A protected name (an account's) is free only to the player who signed in for it
+    from this address."""
     name = name[:15]
-    holder = name_holder(name)
-    if holder is None or holder == pid:
+    if name_free_for(name, pid, address):
         return name
     for n in range(2, 1000):
         suffix = str(n)
         candidate = name[:15 - len(suffix)] + suffix
-        holder = name_holder(candidate)
-        if holder is None or holder == pid:
+        if name_free_for(candidate, pid, address):
             return candidate
     return name[:9] + str(random.randint(100000, 999999))
+
+
+# ---- accounts (Protect your name, above)
+def account_active(acct, now=None):
+    return (now or time.time()) - acct.get('seen', 0) < NAME_UNUSED_DAYS * 86400
+
+
+def protected_by(name):
+    """The account whose protected name this is, or None (none, or unused for NAME_UNUSED_DAYS)."""
+    acct = ACCOUNTS.get(ACCOUNT_NAMES.get(name.lower(), ''))
+    if acct and acct.get('name', '').lower() == name.lower() and account_active(acct):
+        return acct
+    return None
+
+
+def signed_in_for(acct, pid, address):
+    v = VERIFIED.get(acct['key'])
+    return bool(v) and v[0] == pid and v[1] == address and v[2] > time.time()
+
+
+def name_free_for(name, pid, address=None):
+    acct = protected_by(name)
+    if acct and not signed_in_for(acct, pid, address):
+        return False
+    holder = name_holder(name)
+    if acct and holder not in (None, pid):
+        # The owner signed in (from another PC, say): a 10 minute hold from an earlier name check gives way; a player
+        # online under the name now does not (two players with one name break joining, Client.handle).
+        return NAMES[name.lower()][1] is not None
+    return holder is None or holder == pid
+
+
+def valid_name(name):
+    """A name the game's name page allows: 3 to 15 letters, digits and underscores."""
+    return isinstance(name, str) and 3 <= len(name) <= 15 and all(c.isascii() and (c.isalnum() or c == '_')
+                                                                   for c in name)
+
+
+def accounts_changed():
+    ACCOUNTS_DIRTY[0] = True
+
+
+def save_accounts():
+    if not ACCOUNTS_FILE or not ACCOUNTS_DIRTY[0]:
+        return
+    ACCOUNTS_DIRTY[0] = False
+    try:
+        with open(ACCOUNTS_FILE + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump({'version': 1, 'accounts': list(ACCOUNTS.values())}, f)
+        os.replace(ACCOUNTS_FILE + '.tmp', ACCOUNTS_FILE)
+    except OSError:
+        ACCOUNTS_DIRTY[0] = True
+
+
+def load_accounts(path):
+    try:
+        data = json.load(open(path, encoding='utf-8'))
+    except (OSError, ValueError):
+        return 0
+    for a in data.get('accounts', []) if isinstance(data, dict) else []:
+        try:
+            key = str(a['key'])
+            if len(key) != 64:
+                continue
+            int(key, 16)
+        except (KeyError, TypeError, ValueError):
+            continue
+        ACCOUNTS[key] = a
+        if a.get('name'):
+            other = ACCOUNTS.get(ACCOUNT_NAMES.get(a['name'].lower(), ''))
+            if not other or other.get('seen', 0) < a.get('seen', 0):
+                ACCOUNT_NAMES[a['name'].lower()] = key
+    return len(ACCOUNTS)
+
+
+async def keep_accounts_saved(every):
+    while True:
+        await asyncio.sleep(every)
+        save_accounts()
+
+
+def challenge(address):
+    """A one time nonce for a signed request; at most 120 a minute for one address."""
+    now = time.time()
+    times = [t for t in CHALLENGES_BY_IP.get(address, []) if now - t < 60]
+    if len(times) >= 120:
+        CHALLENGES_BY_IP[address] = times
+        return ''
+    times.append(now)
+    CHALLENGES_BY_IP[address] = times
+    if len(CHALLENGES) > 5000:
+        for n in [n for n, t in CHALLENGES.items() if now - t > 90]:
+            del CHALLENGES[n]
+        for a in [a for a, ts in CHALLENGES_BY_IP.items() if not ts or now - ts[-1] > 60]:
+            del CHALLENGES_BY_IP[a]
+    nonce = os.urandom(16).hex()
+    CHALLENGES[nonce] = now
+    return nonce
+
+
+def check_signed(m, op):
+    """The signed request's key and fields after "op|nonce|", or None: a signature by that key over the text, on a
+    challenge this backend gave in the last 90 seconds and never used before."""
+    import ed25519
+    key, sig, text = m.get('key'), m.get('sig'), m.get('signed')
+    if not (isinstance(key, str) and isinstance(sig, str) and isinstance(text, str)) or len(text) > 8192:
+        return None
+    parts = text.split('|')
+    if len(parts) < 2 or parts[0] != op:
+        return None
+    given = CHALLENGES.pop(parts[1], None)
+    if given is None or time.time() - given > 90:
+        return None
+    try:
+        public, signature = bytes.fromhex(key), bytes.fromhex(sig)
+    except ValueError:
+        return None
+    if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
+        return None
+    return key.lower(), parts[2:]
+
+
+def parse_progress(fields):
+    """A signed stats_put's fields: name, score, seconds, captures, stats ("Label=events,points;..."), achievements
+    ("1,7,..."). None when any is not as the game sends it."""
+    if len(fields) != 6:
+        return None
+    name, score, seconds, captures, stats_text, ach_text = fields
+    try:
+        score, seconds, captures = int(score), int(seconds), int(captures)
+    except ValueError:
+        return None
+    if not (0 <= seconds < 10 ** 10 and 0 <= captures < 10 ** 9 and abs(score) < 10 ** 12):
+        return None
+    stats = {}
+    for item in stats_text.split(';') if stats_text else []:
+        label, _, value = item.partition('=')
+        events, _, points = value.partition(',')
+        if (not 1 <= len(label) <= 48 or not all(c.isascii() and (c.isalnum() or c == '_') for c in label)
+                or not events.isdigit() or len(events) > 9 or not points.lstrip('-').isdigit() or len(points) > 13):
+            return None
+        stats[label] = '%d,%d' % (int(events), int(points))
+    if len(stats) > 128:
+        return None
+    achievements = []
+    for item in ach_text.split(',') if ach_text else []:
+        if not item.isdigit() or not 0 < int(item) <= 0xFFFFFFFF:
+            return None
+        achievements.append(int(item))
+    if len(achievements) > 256:
+        return None
+    return {'name': name, 'score': score, 'seconds': seconds, 'captures': captures, 'stats': stats,
+            'achievements': sorted(set(achievements))}
+
+
+def progress_text(p):
+    """The account's progress for the game, as one line it reads easily: score|seconds|captures|stats|achievements,
+    the stats and awards as in a signed stats_put."""
+    return '%d|%d|%d|%s|%s' % (int(p.get('score', 0)), int(p.get('seconds', 0)), int(p.get('captures', 0)),
+                               ';'.join('%s=%s' % kv for kv in sorted(p.get('stats', {}).items())),
+                               ','.join(str(a) for a in p.get('achievements', [])))
+
+
+def merge_progress(acct, got):
+    """The account's progress and the totals a game sent: the larger of each (totals only grow; a new PC that has not
+    yet taken the account's progress back must not lower it), the awards together."""
+    p = acct.setdefault('progress', {})
+    p['seconds'] = max(int(p.get('seconds', 0)), got['seconds'])
+    p['captures'] = max(int(p.get('captures', 0)), got['captures'])
+    p['score'] = max(int(p.get('score', 0)), got['score'])
+    stats = p.setdefault('stats', {})
+    for label, value in got['stats'].items():
+        n, pts = (int(x) for x in value.split(','))
+        if label in stats:
+            on, opts = (int(x) for x in stats[label].split(','))
+            n, pts = max(n, on), max(pts, opts)
+        elif len(stats) >= 256:
+            continue
+        stats[label] = '%d,%d' % (n, pts)
+    p['achievements'] = sorted(set(p.get('achievements', [])) | set(got['achievements']))
+    return p
 
 
 GAMES = {}  # GID -> game fields: --game (a dedicated server started with --server), later Theater CGAM
@@ -407,8 +611,10 @@ class Client:
                 pid = 0
             if not pid:
                 pid = 0x80000000 | self.user_id
-            if name_holder(self.persona) not in (None, pid):
-                renamed = free_name(self.persona, pid)
+            # A protected name (an account's) logs in only from the player id and address that signed in for it.
+            address = self.writer.get_extra_info('peername')[0]
+            if not name_free_for(self.persona, pid, address):
+                renamed = free_name(self.persona, pid, address)
                 if renamed == self.persona:
                     renamed = '%s%d' % (self.persona[:12], self.user_id)
                 self.note('the name %s is in use: this player is renamed %s' % (self.persona, renamed))
@@ -662,7 +868,20 @@ class Registry:
                a v0.4.0 or newer game says its "version" and "platform" ("windows", "linux") in list, find and reserve
       player:  {"op": "name", "name", "id"} -> {"op": "name", "name"}  before logging in: the player's name, or it
                with a number when another player has it (free_name); held for that player id for 10 minutes, and
-               while they are online
+               while they are online. "protected_by_other": true when the name is another player's protected name
+    Protect your name (accounts, above): "key" (the account's public key, hex), "signed" (the text signed: the op, a
+    nonce from "challenge", then the fields, joined by "|") and "sig" (its Ed25519 signature, hex):
+      player:  {"op": "challenge"} -> {"op": "challenge", "nonce"}   one use, within 90 seconds
+      player:  {"op": "claim", signed "claim|nonce|name|player id"} -> {"op": "claim", "ok", "name"|"why"}  protect
+               a name (or move the account to a new one): why "taken" (another account's), "in_use" (another player
+               plays under it now), "too_many" (5 new names an hour from one address), "bad"
+      player:  {"op": "name", signed "name|nonce|name|player id"} -> {"op": "name", "name", "protected": true,
+               "progress"}  the name check of a player with an account: their name, held for them
+      player:  {"op": "recover", signed "recover|nonce"} -> {"op": "recover", "ok", "name", "progress"}  a recovery
+               code typed on a new PC: the account's name and progress
+      player:  {"op": "stats_put", signed "stats_put|nonce|name|score|seconds|captures|Label=events,points;...|1,7"}
+               -> {"op": "stats_put", "ok"}  totals for the leaderboard and the account (unsigned stats for a protected
+               name are refused)
     """
     ids = itertools.count(1)
 
@@ -745,9 +964,116 @@ class Registry:
         self.log.write(line + '\n')
         self.log.flush()
 
+    # ---- Protect your name (accounts, above)
+    def name_reply(self, asked, pid, address, extra=None):
+        """The name check: the name, or it with a number (free_name), held for this player for 10 minutes."""
+        name = free_name(asked, pid, address)
+        if name_holder(name) != pid or NAMES[name.lower()][1] is not None:
+            NAMES[name.lower()] = (pid, time.time() + 600)
+        reply = {'op': 'name', 'name': name}
+        if name.lower() != asked.lower() and protected_by(asked):
+            reply['protected_by_other'] = True
+        reply.update(extra or {})
+        self.note('%s asked for the name %s: %s%s' % (address, asked, name, ' (protected)' if
+                                                      reply.get('protected') else ''))
+        return reply
+
+    def signed_name(self, m, address):
+        got = check_signed(m, 'name')
+        if not got or len(got[1]) != 2:
+            return {'op': 'name', 'name': '', 'why': 'bad'}
+        key, (asked, pid_text) = got
+        try:
+            pid = int(pid_text, 16) & 0xFFFFFFFF
+        except ValueError:
+            return {'op': 'name', 'name': '', 'why': 'bad'}
+        acct = ACCOUNTS.get(key)
+        now = time.time()
+        if acct and not acct.get('name') and valid_name(asked) and protected_by(asked) is None \
+                and name_holder(asked) in (None, pid):
+            acct['name'] = asked  # its name was freed after a long time unused: protected again if still free
+            ACCOUNT_NAMES[asked.lower()] = key
+        if acct and acct.get('name', '').lower() == asked.lower() and protected_by(acct['name']) in (None, acct):
+            acct['seen'] = int(now)
+            ACCOUNT_NAMES[acct['name'].lower()] = key
+            accounts_changed()
+            VERIFIED[key] = (pid, address, now + VERIFIED_FOR)
+            return self.name_reply(acct['name'], pid, address,
+                                   {'protected': True, 'progress': acct.get('progress', {}),
+                                    'progress_text': progress_text(acct.get('progress', {}))})
+        if pid:
+            return self.name_reply(''.join(c for c in asked if c.isalnum() or c in ' _')[:15].strip() or 'Soldier',
+                                   pid, address, {'protected': False})
+        return {'op': 'name', 'name': asked}
+
+    def claim(self, m, address):
+        got = check_signed(m, 'claim')
+        if not got or len(got[1]) != 2 or not valid_name(got[1][0]):
+            return {'op': 'claim', 'ok': False, 'why': 'bad'}
+        key, (name, pid_text) = got
+        try:
+            pid = int(pid_text, 16) & 0xFFFFFFFF
+        except ValueError:
+            return {'op': 'claim', 'ok': False, 'why': 'bad'}
+        now = time.time()
+        acct = ACCOUNTS.get(key)
+        owner = protected_by(name)
+        if owner and owner is not acct:
+            return {'op': 'claim', 'ok': False, 'why': 'taken'}
+        if not (acct and acct.get('name', '').lower() == name.lower()):
+            if name_holder(name) not in (None, pid):
+                return {'op': 'claim', 'ok': False, 'why': 'in_use'}
+            times = [t for t in CLAIMS.get(address, []) if now - t < 3600]
+            if len(times) >= CLAIMS_AN_HOUR:
+                CLAIMS[address] = times
+                return {'op': 'claim', 'ok': False, 'why': 'too_many'}
+            CLAIMS[address] = times + [now]
+            if len(ACCOUNTS) >= 200000 and not acct:
+                return {'op': 'claim', 'ok': False, 'why': 'too_many'}
+            old = ACCOUNT_NAMES.get(name.lower())
+            if old and old != key and old in ACCOUNTS:
+                ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
+            if acct:
+                if acct.get('name') and ACCOUNT_NAMES.get(acct['name'].lower()) == key:
+                    del ACCOUNT_NAMES[acct['name'].lower()]
+                held = NAMES.get(acct.get('name', '').lower())
+                if held and held[1] is not None:  # the old name's hold from its name checks: free at once
+                    del NAMES[acct['name'].lower()]
+                row = LEADERBOARD.pop(acct.get('name', '').lower(), None)  # the leaderboard row moves with it
+                if row:
+                    row['name'] = name
+                    LEADERBOARD[name.lower()] = row
+                    save_leaderboard()
+                self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
+            else:
+                acct = ACCOUNTS[key] = {'key': key, 'name': '', 'created': int(now), 'seen': int(now), 'progress': {}}
+                self.note('%s protected the name %s' % (address, name))
+            acct['name'] = name
+        acct['seen'] = int(now)
+        ACCOUNT_NAMES[name.lower()] = key
+        VERIFIED[key] = (pid, address, now + VERIFIED_FOR)
+        NAMES[name.lower()] = (pid, now + 600)
+        accounts_changed()
+        return {'op': 'claim', 'ok': True, 'name': acct['name']}
+
+    def signed_stats(self, m):
+        got = check_signed(m, 'stats_put')
+        progress = parse_progress(got[1]) if got else None
+        acct = ACCOUNTS.get(got[0]) if got else None
+        if not progress or not acct or acct.get('name', '').lower() != progress['name'].lower() \
+                or protected_by(acct['name']) is not acct:
+            return {'op': 'stats_put', 'ok': False, 'why': 'bad' if not progress else 'not_yours'}
+        p = merge_progress(acct, progress)
+        acct['seen'] = int(time.time())
+        accounts_changed()
+        ok = leaderboard_put({'name': acct['name'], 'score': p['score'], 'seconds': p['seconds'],
+                              'captures': p['captures']})
+        return {'op': 'stats_put', 'ok': ok}
+
     async def client(self, reader, writer):
         gid = None
         peer = '%s:%d' % writer.get_extra_info('peername')[:2]
+        address = writer.get_extra_info('peername')[0]
         try:
             while True:
                 line = await reader.readline()
@@ -852,11 +1178,42 @@ class Registry:
                             rows.append({'name': n, 'score': 0, 'at': 0})
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
                     writer.write((json.dumps({'op': 'scoreboard', 'rows': rows[:64]}) + '\n').encode())
+                elif op == 'stats_put' and 'signed' in m:
+                    reply = self.signed_stats(m)
+                    writer.write((json.dumps(reply) + '\n').encode())
                 elif op == 'stats_put':
                     local_test = (self.test_progression and
                                   writer.get_extra_info('peername')[0].startswith('127.'))
-                    ok = leaderboard_put(m, test_progression=local_test)
-                    writer.write((json.dumps({'op': 'stats_put', 'ok': ok}) + '\n').encode())
+                    name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
+                    if name and protected_by(name):  # a protected name's stats come signed by its account only
+                        writer.write((json.dumps({'op': 'stats_put', 'ok': False, 'why': 'protected'}) + '\n').encode())
+                    else:
+                        ok = leaderboard_put(m, test_progression=local_test)
+                        writer.write((json.dumps({'op': 'stats_put', 'ok': ok}) + '\n').encode())
+                elif op == 'challenge':
+                    nonce = challenge(address)
+                    writer.write((json.dumps({'op': 'challenge', 'nonce': nonce} if nonce else
+                                             {'op': 'challenge', 'why': 'too_many'}) + '\n').encode())
+                elif op == 'claim':
+                    reply = self.claim(m, address)
+                    writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'recover':
+                    got = check_signed(m, 'recover')
+                    acct = ACCOUNTS.get(got[0]) if got else None
+                    if acct:
+                        acct['seen'] = int(time.time())
+                        if acct.get('name') and protected_by(acct['name']) is not acct:
+                            acct['name'] = ''  # unused too long, and another player has it now
+                        accounts_changed()
+                        writer.write((json.dumps({'op': 'recover', 'ok': True, 'name': acct.get('name', ''),
+                                                  'progress': acct.get('progress', {}),
+                                                  'progress_text': progress_text(acct.get('progress', {}))}) +
+                                      '\n').encode())
+                        self.note('%s recovered the account of %s' % (peer, acct.get('name') or '(no name)'))
+                    else:
+                        writer.write((json.dumps({'op': 'recover', 'ok': False}) + '\n').encode())
+                elif op == 'name' and 'signed' in m:
+                    writer.write((json.dumps(self.signed_name(m, address)) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
                     writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
@@ -882,11 +1239,7 @@ class Registry:
                     if not asked or not pid:
                         writer.write((json.dumps({'op': 'name', 'name': asked}) + '\n').encode())
                     else:
-                        name = free_name(asked, pid)
-                        if name_holder(name) != pid or NAMES[name.lower()][1] is not None:
-                            NAMES[name.lower()] = (pid, time.time() + 600)
-                        writer.write((json.dumps({'op': 'name', 'name': name}) + '\n').encode())
-                        self.note('%s asked for the name %s: %s' % (peer, asked, name))
+                        writer.write((json.dumps(self.name_reply(asked, pid, address)) + '\n').encode())
                 elif op == 'find':
                     want = (str(m.get('address', '')), int(m.get('port', 18300) or 18300))
                     games = [for_player(g, writer, self.args) for g in GAMES.values() if g.get('TYPE') == 'G']
@@ -1047,6 +1400,10 @@ async def main():
                     help='the version gate: players need this version (in place of --version-feed)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
+    ap.add_argument('--accounts', default='',
+                    help="a file keeping the players' accounts (Protect your name: protected names and progress)")
+    ap.add_argument('--accounts-save-every', type=float, default=30.0,
+                    help='seconds between two writes of the accounts file (only when something changed)')
     ap.add_argument('--test-progression', action='store_true',
                     help='store rank and achievement IDs submitted by local test clients')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0: run until stopped)')
@@ -1063,6 +1420,10 @@ async def main():
                 LEADERBOARD[str(e['name']).lower()] = e
         except (OSError, ValueError, KeyError, TypeError):
             pass
+    global ACCOUNTS_FILE
+    ACCOUNTS_FILE = args.accounts or None
+    if ACCOUNTS_FILE and os.path.exists(ACCOUNTS_FILE):
+        load_accounts(ACCOUNTS_FILE)
     for n, address in enumerate(args.game, 1):
         host, port = address.rsplit(':', 1)
         GAMES[str(n)] = {'GID': str(n), 'LID': '1', 'I': host, 'P': int(port), 'HU': n, 'HN': 'bf1943-server-%d' % n,
@@ -1102,6 +1463,9 @@ async def main():
             log.write('%s %s\n' % (time.strftime('%H:%M:%S'), text))
             log.flush()
         feed_task = None
+        accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
+        log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
+                                             ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
         if args.required_version:
             VERSION_GATE.update(required=args.required_version.lstrip('vV'), platforms=None, source='--required-version')
             gate_note('version gate: players need v%s (--required-version)' % VERSION_GATE['required'])
@@ -1117,6 +1481,8 @@ async def main():
             await asyncio.gather(*(srv.serve_forever() for srv in servers))
         if feed_task:
             feed_task.cancel()
+        accounts_task.cancel()
+        save_accounts()
 
 
 if __name__ == '__main__':

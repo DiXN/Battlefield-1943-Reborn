@@ -46,6 +46,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 
+#include "account_key.h"
 #include "capture_points.h"
 #include "display_modes.h"
 #include "game_install.h"
@@ -453,6 +454,16 @@ bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up a
 
 void NameChosen(const std::string& name);  // below: the name the player chose on the first start, in use at once
 bool PollNameCheck(bool abandon);           // below: the backend's answer to a chosen name, applied once it is in
+// Protect your name (account_key.h): what the latest name check said, for the menu.
+struct AccountNews {
+  bool any = false, protected_name = false, other_owner = false;
+  std::string progress;  // the account's progress (score|seconds|captures|stats|achievements), to take back
+};
+void SetAccount(const std::string& code, const std::string& name);  // below: the recovery code and its name
+AccountNews TakeAccountNews();                                       // below: once each, from the name check
+bool SignedRegistryRequest(const std::string& code, const std::string& op, const std::string& fields,
+                           std::string& reply);                      // below
+uint32_t OnlinePlayerId();                                           // live_layers.cpp
 bool ShadersAfterUpdate();                  // below: the shaders are prepared again after an update
 bool ShadersPreparedAtStart();              // below: this version's shaders were prepared before: no shader page
 const char* BfVersion();                    // pipeline_upload.cpp
@@ -5091,6 +5102,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool late = ImGui::GetTime() - name_ready_at_ > 3.0;
       if (PollNameCheck(late) || late) name_ready_at_ = 0;
     }
+    // Protect your name: the name check's answer (signed in for the protected name, with the account's progress to take
+    // back; or the name is another player's), and a claim or recovery done on the name page.
+    if (const AccountNews news = TakeAccountNews(); news.any) {
+      acct_online_ = news.protected_name ? 1 : news.other_owner ? 2 : 0;
+      if (!news.progress.empty()) TakeBackProgress(news.progress, "the name check");
+    }
+    ApplyAccountResult();
     const bool named = settings_.Get("player_name_chosen", "") == "1";
     // With the launcher before the game, the game started from it (Play, or a server picked on Home) boots hidden
     // behind our pages and signs in by itself (TekRantGaming, 10 Nov 2026: our startup videos in place of the game's own
@@ -5199,6 +5217,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::string applied_rate_;        // the frame rate it last applied  // this frame's accept was the keyboard's Enter (MergeInput)
   bool name_caps_ = true;
   Page name_from_ = Page::kHome;
+  // Protect your name (the name page; game_menu_launcher.inc): a claim or a recovery on a worker, its outcome applied
+  // here; the code field (the name field holds a recovery code while code_mode_).
+  struct AccountResult {
+    bool ready = false, recover = false, answered = false, ok = false;
+    std::string why, name, code, progress;
+  };
+  std::mutex acct_mutex_;
+  AccountResult acct_result_;
+  std::atomic<bool> acct_busy_{false};
+  std::string acct_message_;
+  bool acct_message_bad_ = false, acct_show_code_ = false, code_mode_ = false;
+  int acct_online_ = 0;  // from this start's name check: 1 signed in for the protected name, 2 another player's name
 
   Settings settings_;
   std::function<void(bool)> fullscreen_;
@@ -5593,6 +5623,7 @@ void ApplyPlayerIdentity(const fs::path& user_dir) {
     else REXLOG_INFO("BF name: bf_player_name is not allowed (profanity): not used");
   }
   SetPlayerIdentity(name, id);
+  SetAccount(settings.Get("account_code", ""), settings.Get("account_name", ""));
   StartNameCheck(name, id);
 }
 
@@ -5614,6 +5645,52 @@ std::shared_ptr<NameCheck> g_name_check;
 }  // namespace
 uint32_t OnlinePlayerId();          // live_layers.cpp
 const std::string& PlayerName();   // live_layers.cpp
+
+// ---- Protect your name (account_key.h; the backend's accounts, server/plasma.py). The player's recovery code and the
+// name it protects (settings account_code, account_name), for the name check and the stats, which run off the menu.
+namespace {
+std::mutex g_account_mutex;
+std::string g_account_code, g_account_name;
+AccountNews g_account_news;
+bool SameName(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i)
+    if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+  return true;
+}
+}  // namespace
+void SetAccount(const std::string& code, const std::string& name) {
+  std::lock_guard lock(g_account_mutex);
+  g_account_code = code, g_account_name = name;
+}
+// The code, when it protects this name (any case): else empty.
+std::string AccountCodeFor(const std::string& name) {
+  std::lock_guard lock(g_account_mutex);
+  return !g_account_code.empty() && SameName(g_account_name, name) ? g_account_code : std::string();
+}
+AccountNews TakeAccountNews() {
+  std::lock_guard lock(g_account_mutex);
+  AccountNews news = g_account_news;
+  g_account_news = {};
+  return news;
+}
+// One signed request: a challenge first, then the op with the account's key, the text signed ("op|nonce|fields") and
+// its signature. False when the backend gave no challenge (a LAN backend, or one from before accounts) or no answer.
+bool SignedRegistryRequest(const std::string& code, const std::string& op, const std::string& fields, std::string& reply) {
+  std::string first;
+  if (!RegistryRequest("{\"op\": \"challenge\"}", first)) return false;
+  const std::string nonce = JsonField(first, "nonce");
+  if (nonce.size() != 32) {
+    reply = first;  // its "why": "lan" (a LAN backend keeps no accounts), "too_many"
+    return false;
+  }
+  const account::Key key = account::KeyFromCode(code);
+  const std::string text = op + "|" + nonce + (fields.empty() ? "" : "|" + fields);
+  const std::string request = "{\"op\": \"" + op + "\", \"key\": \"" + account::PublicHex(key) + "\", \"signed\": \"" +
+                              text + "\", \"sig\": \"" + account::Sign(key, text) + "\"}";
+  return RegistryRequest(request, reply);
+}
+
 void StartNameCheck(const std::string& name, uint32_t player_id) {
   if (REXCVAR_GET(server) || REXCVAR_GET(bf_online_host).empty() || name.empty()) return;
   auto check = std::make_shared<NameCheck>();
@@ -5622,13 +5699,32 @@ void StartNameCheck(const std::string& name, uint32_t player_id) {
   char id[9];
   std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
   const std::string request = "{\"op\": \"name\", \"name\": \"" + name + "\", \"id\": \"" + id + "\"}";
-  std::thread([check, request] {
+  // A protected name signs in for it (the backend holds it for this player then, and gives the account's progress).
+  const std::string code = AccountCodeFor(name), signed_fields = name + "|" + id;
+  std::thread([check, request, code, signed_fields] {
 #if defined(_WIN32)
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
     std::string reply, answer;
-    if (RegistryRequest(request, reply)) answer = JsonField(reply, "name");
+    bool asked = false;
+    if (!code.empty()) {
+      asked = SignedRegistryRequest(code, "name", signed_fields, reply) && !JsonField(reply, "name").empty();
+      if (!asked) REXLOG_WARN("BF account: the backend took no signed name check (an older backend?): asked plainly");
+    }
+    if (!asked) reply.clear(), asked = RegistryRequest(request, reply);
+    if (asked) {
+      answer = JsonField(reply, "name");
+      AccountNews news;
+      news.any = true;
+      news.protected_name = JsonField(reply, "protected") == "true";
+      news.other_owner = JsonField(reply, "protected_by_other") == "true";
+      news.progress = JsonField(reply, "progress_text");
+      if (news.protected_name) REXLOG_INFO("BF account: signed in for the protected name {}", answer);
+      if (news.other_owner) REXLOG_INFO("BF account: the name asked for is another player's protected name");
+      std::lock_guard lock(g_account_mutex);
+      g_account_news = news;
+    }
     std::lock_guard lock(check->mutex);
     check->answer = answer;
     check->done = true;

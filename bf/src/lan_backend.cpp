@@ -511,6 +511,10 @@ void ServeRegistry(SOCKET s) {
         reply = "{\"op\": \"leaderboard\", \"rows\": [], \"total\": 0}\n";
       } else if (op == "match_score" || op == "stats_put") {
         reply = "{\"op\": " + JsonQ(op) + ", \"ok\": false}\n";
+      } else if (op == "challenge" || op == "claim" || op == "recover") {
+        // Protect your name: accounts are kept by the main backend only (server/plasma.py). Answered at once, so a
+        // game with a protected name waits for nothing here.
+        reply = "{\"op\": " + JsonQ(op) + ", \"ok\": false, \"why\": \"lan\"}\n";
       }
       if (!reply.empty()) {
         std::lock_guard lock(g_registry_write);

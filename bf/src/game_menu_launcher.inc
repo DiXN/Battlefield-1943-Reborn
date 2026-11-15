@@ -920,6 +920,8 @@
     // With a controller in hand the keys start open (TekRantGaming, 9 Nov: the controller could not reach them).
     name_key_ = 10, name_keys_ = device_ == Device::kPad, name_caps_ = name_text_.empty();  // on Q
     name_error_.clear();
+    code_mode_ = false, acct_show_code_ = false;
+    if (!acct_busy_.load()) acct_message_.clear();
     if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
     if (page_ != Page::kName) name_from_ = page_;
     page_ = Page::kName, open_ = true;
@@ -937,6 +939,7 @@
   }
   static bool NameChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
   void NameType(char c) {
+    if (code_mode_) return CodeType(c);
     if (int(name_text_.size()) >= kNameMax || !NameChar(c)) return;
     if (std::isalpha(static_cast<unsigned char>(c)))
       c = name_caps_ ? char(std::toupper(static_cast<unsigned char>(c))) : char(std::tolower(static_cast<unsigned char>(c)));
@@ -957,17 +960,18 @@
     name_text_ = std::string(kFirst[r() % 16]) + kSecond[r() % 16] + std::to_string(10 + r() % 90);
     name_error_.clear(), name_caps_ = false;
   }
-  void NameSave() {
+  // The name in the field saved (false, with the error line saying why, when it cannot be).
+  bool NameCommit() {
     const std::string name = name_text_;
     if (name.size() < 3) {
       name_error_ = "A name needs 3 to 15 letters, numbers or underscores.";
-      return;
+      return false;
     }
     // Our profanity filter (text_filter.h): such a name is never saved; the player chooses another.
     if (!text_filter::NameAllowed(name)) {
       name_error_ = "That name is not allowed. Choose another one.";
       REXLOG_INFO("BF name: a name with profanity was refused on the name page");
-      return;
+      return false;
     }
     const bool changed = name != settings_.Get("player_name", "") || settings_.Get("player_name_chosen", "") != "1";
     settings_.values["player_name"] = name;
@@ -975,12 +979,269 @@
     settings_.values.erase("player_name_refused");
     name_required_ = false;
     settings_.Save();
-    REXLOG_INFO("BF name: the player chose {}", name);
+    if (changed) REXLOG_INFO("BF name: the player chose {}", name);
     // Before BF signs in (the setup on a first start) the name is used at once; after, from the next start.
-    if (!signed_in_once_) NameChosen(name), name_ready_at_ = ImGui::GetTime();
-    else if (changed) name_saved_ = name;
+    if (!signed_in_once_) {
+      if (changed || name_ready_at_ == 0) NameChosen(name), name_ready_at_ = ImGui::GetTime();
+    } else if (changed) {
+      name_saved_ = name;
+    }
+    return true;
+  }
+  void NameSave() {
+    if (code_mode_) {  // the field holds a recovery code: Save uses it
+      RecoverAccount();
+      return;
+    }
+    if (!NameCommit()) return;
     if (name_setup_) SetupNext();
     else page_ = name_from_;
+  }
+
+  // ---- Protect your name (account_key.h; server/plasma.py accounts). The name page protects the saved name: the
+  // game makes the account's recovery code (or uses the one it has: a protected name moves to the new one), the backend
+  // keeps the key's public half with the name. The code is shown once and saved to a text file in the user folder; on
+  // a new PC "Recovery code" on this page takes the name and the progress back.
+  bool AccountOnline() const { return !std::string(REXCVAR_GET(bf_online_host)).empty(); }
+  bool NameProtected() const {
+    const std::string acct = settings_.Get("account_name", ""), name = settings_.Get("player_name", "");
+    if (settings_.Get("account_code", "").empty() || acct.size() != name.size() || acct.empty()) return false;
+    for (size_t i = 0; i < acct.size(); ++i)
+      if (std::tolower(static_cast<unsigned char>(acct[i])) != std::tolower(static_cast<unsigned char>(name[i]))) return false;
+    return true;
+  }
+  fs::path RecoveryFile() const { return settings_.path.parent_path() / "BF1943 Reborn recovery code.txt"; }
+  void SaveRecoveryFile(const std::string& name, const std::string& code) {
+    std::ofstream out(RecoveryFile(), std::ios::binary | std::ios::trunc);
+    out << "Battlefield 1943 Reborn: the recovery code of your protected soldier name\r\n\r\n"
+        << "Name: " << name << "\r\nRecovery code: " << account::FormatCode(code) << "\r\n\r\n"
+        << "Keep this code somewhere safe. On a new PC or after a reinstall, open the soldier name page\r\n"
+        << "(Settings, or EDIT on Home), choose Recovery code and type it in: your name and your progress come back.\r\n"
+        << "Anyone with this code can use your name, so do not share it.\r\n";
+    REXLOG_INFO("BF account: the recovery code saved to {}", out ? RecoveryFile().string() : std::string("(not saved)"));
+  }
+  void AccountMessage(std::string text, bool bad) { acct_message_ = std::move(text), acct_message_bad_ = bad; }
+  void ProtectName() {
+    if (acct_busy_.load()) return;
+    if (!AccountOnline()) return AccountMessage("Protecting a name needs the online service.", true);
+    if (!NameCommit()) return;  // the name line says why
+    std::string code = settings_.Get("account_code", "");
+    if (account::NormalizeCode(code).empty()) code = account::NewCode();
+    if (code.empty()) return AccountMessage("This PC gave no random numbers for a code. Try again.", true);
+    char id[9];
+    std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
+    const std::string name = settings_.Get("player_name", ""), fields = name + "|" + id;
+    acct_busy_ = true;
+    AccountMessage("Protecting " + name + "...", false);
+    REXLOG_INFO("BF account: protecting the name {}", name);
+    std::thread([this, code, name, fields] {
+      std::string reply;
+      AccountResult r;
+      r.code = code, r.name = name;
+      r.answered = SignedRegistryRequest(code, "claim", fields, reply);
+      r.ok = r.answered && JsonField(reply, "ok") == "true";
+      r.why = JsonField(reply, "why");
+      if (r.ok) r.name = JsonField(reply, "name");
+      r.ready = true;
+      std::lock_guard lock(acct_mutex_);
+      acct_result_ = r;
+    }).detach();
+  }
+  void RecoverAccount() {
+    if (acct_busy_.load()) return;
+    const std::string code = account::NormalizeCode(name_text_);
+    if (code.empty()) {
+      name_error_ = "A recovery code has 20 letters and numbers.";
+      return;
+    }
+    if (!AccountOnline()) return AccountMessage("A recovery code needs the online service.", true);
+    acct_busy_ = true;
+    AccountMessage("Looking up your recovery code...", false);
+    REXLOG_INFO("BF account: a recovery code typed in");
+    std::thread([this, code] {
+      std::string reply;
+      AccountResult r;
+      r.recover = true, r.code = code;
+      r.answered = SignedRegistryRequest(code, "recover", "", reply);
+      r.ok = r.answered && JsonField(reply, "ok") == "true";
+      r.why = JsonField(reply, "why");
+      r.name = JsonField(reply, "name");
+      r.progress = JsonField(reply, "progress_text");
+      r.ready = true;
+      std::lock_guard lock(acct_mutex_);
+      acct_result_ = r;
+    }).detach();
+  }
+  // A claim's or a recovery's outcome, on the menu's thread (the settings are its).
+  void ApplyAccountResult() {
+    AccountResult r;
+    {
+      std::lock_guard lock(acct_mutex_);
+      if (!acct_result_.ready) return;
+      r = acct_result_;
+      acct_result_ = {};
+    }
+    acct_busy_ = false;
+    if (!r.answered) {
+      REXLOG_WARN("BF account: no answer from the backend ({}){}", r.recover ? "recovery" : "protect",
+                  r.why.empty() ? std::string() : ": " + r.why);
+      return AccountMessage(r.why == "lan" ? "Names are protected by the online service of the Reborn servers, not by a "
+                                             "LAN server."
+                                           : "No answer from the online service. Try again in a moment.",
+                            true);
+    }
+    if (!r.recover) {
+      if (!r.ok) {
+        REXLOG_INFO("BF account: protecting {} refused: {}", r.name, r.why);
+        return AccountMessage(r.why == "taken"    ? "That name is protected by another player. Choose another one."
+                              : r.why == "in_use" ? "Another player is using that name online right now. Choose another "
+                                                    "one, or try again later."
+                              : r.why == "too_many" ? "Too many names were protected from your connection this hour. "
+                                                      "Try again later."
+                                                    : "The online service did not take that name.",
+                              true);
+      }
+      const bool first = settings_.Get("account_code", "") != r.code;
+      settings_.values["account_code"] = r.code;
+      settings_.values["account_name"] = r.name;
+      settings_.Save();
+      SetAccount(r.code, r.name);
+      SaveRecoveryFile(r.name, r.code);
+      acct_online_ = 1;
+      acct_show_code_ = first;
+      REXLOG_INFO("BF account: {} is protected{}", r.name, first ? " (a new account)" : " (the account moved to it)");
+      SendLeaderboard("the name protected");  // the totals so far go to the account
+      return AccountMessage(first ? "Your name is protected. Keep the recovery code above: it is also saved in your "
+                                    "game's user folder as \"BF1943 Reborn recovery code.txt\"."
+                                  : "Your protected name is now " + r.name + ". Your recovery code stays the same.",
+                            false);
+    }
+    if (!r.ok) {
+      REXLOG_INFO("BF account: the recovery code matches no account");
+      return AccountMessage("No account has that recovery code. Check it and try again.", true);
+    }
+    settings_.values["account_code"] = r.code;
+    settings_.values["account_name"] = r.name;
+    code_mode_ = false;
+    if (!r.progress.empty()) TakeBackProgress(r.progress, "the recovery code");
+    if (r.name.empty()) {
+      settings_.Save();
+      SetAccount(r.code, "");
+      name_text_ = settings_.Get("player_name", "");
+      REXLOG_INFO("BF account: recovered an account whose name was freed (unused too long)");
+      return AccountMessage("Your account is back, but its name went unused too long and was freed. Choose a name and "
+                            "protect it again.",
+                            true);
+    }
+    name_text_ = r.name;
+    SetAccount(r.code, r.name);
+    NameCommit();
+    acct_online_ = 1;
+    SaveRecoveryFile(r.name, r.code);
+    REXLOG_INFO("BF account: recovered {} with its progress", r.name);
+    AccountMessage("Welcome back, " + r.name + ". Your name and your progress are back on this PC" +
+                       (signed_in_once_ ? std::string(" (the name from your next start).") : std::string(".")),
+                   false);
+  }
+  // The account's progress (score|seconds|captures|Label=events,points;...|1,7,...) into this PC's: the larger of each
+  // total, the awards together. Never into a test profile.
+  void TakeBackProgress(const std::string& text, const char* from) {
+    if (settings_.Get("test_progression", "") == "1") return;
+    std::vector<std::string> parts;
+    size_t at = 0;
+    for (size_t bar; (bar = text.find('|', at)) != std::string::npos; at = bar + 1) parts.push_back(text.substr(at, bar - at));
+    parts.push_back(text.substr(at));
+    if (parts.size() != 5) return;
+    int raised = 0, unlocked = 0;
+    const double seconds = std::atof(parts[1].c_str());
+    if (seconds > std::atof(settings_.Get("match_seconds", "0").c_str()))
+      settings_.values["match_seconds"] = std::to_string(int64_t(seconds)), ++raised;
+    for (size_t i = 0; i <= parts[3].size();) {
+      size_t end = parts[3].find(';', i);
+      if (end == std::string::npos) end = parts[3].size();
+      const std::string item = parts[3].substr(i, end - i);
+      i = end + 1;
+      const size_t eq = item.find('='), comma = item.find(',');
+      if (eq == std::string::npos || comma == std::string::npos || comma < eq) continue;
+      const std::string key = "stat." + item.substr(0, eq), old = settings_.Get(key, "0,0");
+      const size_t old_comma = old.find(',');
+      const long long n = std::atoll(item.c_str() + eq + 1), pts = std::atoll(item.c_str() + comma + 1);
+      const long long on = std::atoll(old.c_str()),
+                      opts = old_comma == std::string::npos ? 0 : std::atoll(old.c_str() + old_comma + 1);
+      if (n > on || pts > opts) settings_.values[key] = fmt::format("{},{}", std::max(n, on), std::max(pts, opts)), ++raised;
+    }
+    if (auto* k = REX_KERNEL_STATE()) {
+      for (size_t i = 0; i < parts[4].size();) {
+        size_t end = parts[4].find(',', i);
+        if (end == std::string::npos) end = parts[4].size();
+        const unsigned long id = std::strtoul(parts[4].substr(i, end - i).c_str(), nullptr, 10);
+        i = end + 1;
+        if (id && !k->achievements().IsUnlocked(uint32_t(id)) &&
+            k->achievements().UnlockAchievement(uint32_t(id)) == rex::system::AchievementUnlockResult::kUnlocked)
+          ++unlocked;
+      }
+    }
+    if (raised) settings_.Save();
+    REXLOG_INFO("BF account: progress from {}: {} totals raised, {} awards unlocked", from, raised, unlocked);
+  }
+  // Recovery code typing: letters and digits, upper case, 20 at most (spaces and dashes left out).
+  void CodeType(char c) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) || name_text_.size() >= size_t(account::kCodeLength)) return;
+    name_text_ += char(std::toupper(static_cast<unsigned char>(c)));
+    name_error_.clear();
+  }
+  void BeginCodeMode(bool on) {
+    code_mode_ = on;
+    name_text_ = on ? std::string() : settings_.Get("player_name", "");
+    name_error_.clear();
+    acct_show_code_ = false;
+    if (on) AccountMessage("", false);
+  }
+  // The name protection box on the name page, `w` wide from `at`; its height.
+  float AccountBox(ImDrawList* d, const Stage& st, ImVec2 at, float w) {
+    const kit::Fonts& f = kit::GetFonts();
+    const float x = at.x;
+    float y = at.y;
+    const bool prot = NameProtected();
+    const bool same = name_text_ == settings_.Get("player_name", "");
+    const char* chip = code_mode_ ? "RECOVERY"
+                       : prot     ? "PROTECTED"
+                       : acct_online_ == 2 && same ? "ANOTHER PLAYER'S"
+                                                   : "NOT PROTECTED";
+    kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "NAME PROTECTION", st(2));
+    const float cw = kit::TextWidth(f.typed, st(13), chip) + st(16);
+    d->AddRectFilled(ImVec2(x + w - cw, y - st(3)), ImVec2(x + w, y + st(17)),
+                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' ? kit::kRed : kit::kInkFaint);
+    d->AddText(f.typed, st(13), ImVec2(x + w - cw + st(8), y), IM_COL32(255, 255, 255, 255), chip);
+    y += st(26);
+    std::string body;
+    if (code_mode_)
+      body = "Type the recovery code of your protected name (20 letters and numbers). Your name and your progress come "
+             "back to this PC.";
+    else if (!AccountOnline())
+      body = "Protecting a name needs the online service.";
+    else if (prot)
+      body = "Only you can use " + settings_.Get("player_name", "") +
+             " online, and your rank and stats are kept on our server. Your recovery code brings them to another PC.";
+    else if (!settings_.Get("account_code", "").empty() && !settings_.Get("account_name", "").empty())
+      body = "Your protected name is " + settings_.Get("account_name", "") + ". Protect this name instead to move it here.";
+    else if (acct_online_ == 2 && same)
+      body = "Another player protected this name: online you play as it with a number. Choose another name.";
+    else
+      body = "Protect your name so nobody else can use it online, and keep your rank and stats on our server. No email "
+             "and no password: you get a recovery code.";
+    y += kit::Wrapped(d, f.ui, st(16), ImVec2(x, y), kit::kInkSoft, body.c_str(), w) + st(6);
+    if (acct_show_code_ && prot && !code_mode_) {
+      const std::string code = "RECOVERY CODE   " + account::FormatCode(settings_.Get("account_code", ""));
+      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(34)), kit::kPaperLight);
+      d->AddText(f.typed, st(20), ImVec2(x + st(10), y + st(7)), kit::kInk, code.c_str());
+      y += st(40);
+    }
+    if (!acct_message_.empty()) {
+      y += kit::Wrapped(d, f.typed, st(13), ImVec2(x, y), acct_message_bad_ ? kit::kRed : kit::kGreenDark,
+                        acct_message_.c_str(), w);
+    }
+    return y - at.y;
   }
 #if defined(BF_DEV_TOOLS)
   // Tests (a background window gets no typing): whether the game window's text input is on (the SDK starts SDL's text
@@ -1015,6 +1276,10 @@
     }
     for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
       const ImWchar ch = io.InputQueueCharacters[i];
+      if (code_mode_) {
+        if (ch < 128) CodeType(char(ch)), name_keys_ = false;
+        continue;
+      }
       if (ch < 128 && NameChar(char(ch)) && int(name_text_.size()) < kNameMax) {
         name_text_ += char(ch);
         name_error_.clear(), name_caps_ = false;
@@ -1022,7 +1287,13 @@
       }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) NameRandom();
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !code_mode_) NameRandom();
+    // Protect your name: X (F2) protects the saved name or shows its recovery code; LB (F3) types a recovery code.
+    const bool protect_key = ImGui::IsKeyPressed(ImGuiKey_F2, false), code_key = ImGui::IsKeyPressed(ImGuiKey_F3, false);
+    const char* x_label = code_mode_ ? nullptr
+                          : NameProtected() && name_text_ == settings_.Get("player_name", "")
+                              ? (acct_show_code_ ? "Hide code" : "Show code")
+                              : "Protect name";
     std::vector<Cue> prompts;
     if (name_keys_) {
       prompts = {{kit::Button::kA, "Type"}, {kit::Button::kX, "Delete", "Backspace"},
@@ -1038,6 +1309,16 @@
                  {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
       if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
     }
+    if (code_mode_ && !name_keys_) {
+      prompts = {{kit::Button::kStart, "Use code", "Enter", true}, {kit::Button::kB, "Cancel", "Esc"}};
+      if (device_ != Device::kKeyboard) prompts.insert(prompts.begin(), {kit::Button::kA, "Type code", "Enter"});
+    } else if (code_mode_) {
+      prompts[2].label = "Use code";
+    }
+    if (!name_keys_ && x_label && AccountOnline()) {
+      prompts.push_back({kit::Button::kX, x_label, "F2"});
+      if (!NameProtected()) prompts.push_back({kit::Button::kLB, "Recovery code", "F3"});
+    }
     Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
     // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
     // layout gives a controller's A as Enter too, which saved an empty name instead of opening the keys. With the on
@@ -1048,7 +1329,7 @@
                   in.accept ? "A" : in.start ? "Start" : in.back ? "B" : in.x ? "X" : "Y",
                   in.accept && accept_from_key_ ? "keyboard" : device_ == Device::kPad ? "controller" : "keyboard or mouse",
                   name_keys_ ? " (keys open)" : "");
-    const ImVec2 a = st.P(120, 110), b = st.P(820, 560);
+    const ImVec2 a = st.P(120, 96), b = st.P(820, 640);
     {
       kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.5f);
       kit::Paper(d, a, b, st.u, false);
@@ -1057,17 +1338,19 @@
       kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
                   name_setup_ ? "STEP 2 OF 9 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
       y += st(24);
-      kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, "CHOOSE YOUR SOLDIER NAME", st(2), w);
+      kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, code_mode_ ? "USE A RECOVERY CODE" : "CHOOSE YOUR SOLDIER NAME", st(2), w);
       y += st(64);
       y += kit::Wrapped(d, f.ui, st(18), ImVec2(x, y), kit::kInkSoft,
-                        signed_in_once_ && !name_setup_
+                        code_mode_ ? "The code you were given when you protected your name. Spaces and dashes do not "
+                                     "matter."
+                        : signed_in_once_ && !name_setup_
                             ? "This is the name other players see on the scoreboard and in the server list, from your "
                               "next start. If someone on a server already uses it, a number is added for that server."
                             : "This is the name other players see on the scoreboard and in the server list. If someone "
                               "on a server already uses it, a number is added for that server.",
                         w) +
            st(20);
-      kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "SOLDIER NAME", st(2));
+      kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, code_mode_ ? "RECOVERY CODE" : "SOLDIER NAME", st(2));
       y += st(22);
       const ImVec2 n0(x, y), n1(x + w, y + st(58));
       d->AddRectFilled(n0, n1, kit::kPaperLight);
@@ -1077,16 +1360,22 @@
         const float cx = x + st(16) + kit::TextWidth(f.typed, st(30), name_text_);
         d->AddRectFilled(ImVec2(cx, y + st(12)), ImVec2(cx + st(3), y + st(46)), kit::kInk);
       }
-      const std::string count = std::to_string(name_text_.size()) + " / " + std::to_string(kNameMax);
+      const std::string count = std::to_string(name_text_.size()) + " / " +
+                                std::to_string(code_mode_ ? account::kCodeLength : kNameMax);
       d->AddText(f.typed, st(14), ImVec2(x + w - st(14) - kit::TextWidth(f.typed, st(14), count), y + st(22)),
                  kit::kInkFaint, count.c_str());
       y += st(66);
       d->AddText(f.typed, st(14), ImVec2(x, y), name_error_.empty() ? kit::kInkFaint : kit::kRed,
-                 name_error_.empty() ? "3 to 15 letters, numbers or underscores" : name_error_.c_str());
-      y += st(34);
-      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(64)), kit::kPaperDim);
-      d->AddText(f.ui, st(20), ImVec2(x + st(14), y + st(8)), kit::kInk, RankLine().c_str());
-      d->AddText(f.typed, st(14), ImVec2(x + st(14), y + st(38)), kit::kInkFaint, "Your rank grows as you play.");
+                 name_error_.empty() ? (code_mode_ ? "20 letters and numbers" : "3 to 15 letters, numbers or underscores")
+                                     : name_error_.c_str());
+      y += st(30);
+      if (!code_mode_) {
+        d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
+        d->AddText(f.ui, st(20), ImVec2(x + st(14), y + st(5)), kit::kInk, RankLine().c_str());
+        d->AddText(f.typed, st(14), ImVec2(x + st(14), y + st(33)), kit::kInkFaint, "Your rank grows as you play.");
+        y += st(68);
+      }
+      AccountBox(d, st, ImVec2(x, y), w);
     }
     // The on screen keys, QWERTY (TekRantGaming, 8 Nov): the numbers, three rows of letters with the underscore, then
     // Capitals and Done. Ten columns; a key's span is in columns.
@@ -1185,7 +1474,20 @@
         return;
       }
     }
-    if (!name_keys_ && in.y) NameRandom();
+    if (!name_keys_ && in.y && !code_mode_) NameRandom();
+    if ((!name_keys_ && in.x) || protect_key) {
+      if (code_mode_) {
+      } else if (NameProtected() && name_text_ == settings_.Get("player_name", "")) {
+        acct_show_code_ = !acct_show_code_;
+      } else {
+        ProtectName();
+      }
+    }
+    if (((!name_keys_ && in.prev_tab) || code_key) && !code_mode_ && !NameProtected() && AccountOnline()) BeginCodeMode(true);
+    if (in.back && code_mode_ && !name_keys_) {
+      BeginCodeMode(false);
+      return;
+    }
     // Enter with no name yet (too short to save) opens the keys, as A does: Steam's Enter for a controller's A can come
     // just before the A itself, which the merge then drops.
     if (enter && !name_keys_ && name_text_.size() < 3) {
@@ -1953,18 +2255,43 @@
     }
     req += "}";
     const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
-    std::thread([req, test, name, total, seconds, why] {
+    // A protected name (Protect your name): its totals go signed, with each stat and the awards, to its account too.
+    std::string code, fields;
+    if (!test && NameProtected()) {
+      code = settings_.Get("account_code", "");
+      std::string stats, awards;
+      for (const auto& [key, value] : settings_.values) {
+        if (key.rfind("stat.", 0) != 0 || key.size() > 5 + 48) continue;
+        const std::string label = key.substr(5);
+        if (label.empty() || !std::all_of(label.begin(), label.end(), [](char c) {
+              return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+            }))
+          continue;
+        const size_t comma = value.find(',');
+        const long long n = std::atoll(value.c_str()),
+                        pts = comma == std::string::npos ? 0 : std::llround(std::atof(value.c_str() + comma + 1));
+        stats += fmt::format("{}{}={},{}", stats.empty() ? "" : ";", label, std::max(0LL, n), pts);
+      }
+      if (auto* k = REX_KERNEL_STATE()) {
+        for (const auto& a : k->achievements().ListAchievements())
+          if (k->achievements().IsUnlocked(a.id)) awards += (awards.empty() ? "" : ",") + std::to_string(a.id);
+      }
+      fields = fmt::format("{}|{:.0f}|{:.0f}|{}|{}|{}", settings_.Get("account_name", name), total, seconds, captures,
+                           stats, awards);
+    }
+    std::thread([req, test, name, total, seconds, why, code, fields] {
       static constexpr int kWait[] = {0, 5, 15, 30};
       for (int attempt = 0; attempt < int(std::size(kWait)); ++attempt) {
         if (kWait[attempt]) std::this_thread::sleep_for(std::chrono::seconds(kWait[attempt]));
         std::string reply;
         // A test profile's made-up rank and awards go to a backend on this PC only.
         const bool local = std::string(REXCVAR_GET(bf_backend_registry)).rfind("127.", 0) == 0;
-        const bool answered = (!test || local) && RegistryRequest(req, reply);
+        const bool answered = code.empty() ? (!test || local) && RegistryRequest(req, reply)
+                                           : SignedRegistryRequest(code, "stats_put", fields, reply);
         const bool ok = answered && reply.find("\"ok\": true") != std::string::npos;
         if (ok) {
           REXLOG_INFO("BF leaderboard: stats posted for {} ({}: score {:.0f}, {:.0f} s played{})", name, why, total,
-                      seconds, test ? ", test profile, local backend only" : "");
+                      seconds, test ? ", test profile, local backend only" : code.empty() ? "" : ", signed, to the account");
           return;
         }
         if (answered) {  // the backend refused it: sending the same again will not help
