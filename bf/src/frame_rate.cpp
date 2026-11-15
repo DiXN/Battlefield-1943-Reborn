@@ -57,6 +57,7 @@
 
 REXCVAR_DEFINE_BOOL(bf_unlock_fps, true, "BF1943", "Run above the original 30 frames per second");
 namespace bf1943 {
+bool LauncherShowing();  // game_menu.cpp: the launcher's own pages are up
 int TickRate();  // tick_rate.cpp
 }
 REXCVAR_DECLARE(bool, server);  // server_mode.cpp: a dedicated server keeps the game's own timing
@@ -163,6 +164,13 @@ uint64_t TakeLimitWaitedUs() { return g_limit_waited_us.exchange(0); }
 // Our frame limit, before each present: wait until 1/bf_max_fps after the last frame (a high resolution timer, then
 // a spin through the last half millisecond for even pacing). A slow frame starts a new schedule instead of rushing
 // to catch up.
+// The launcher's own pages (Home, Settings from Home, the setup...: LauncherShowing) at bf_menu_max_fps at most
+// (15 Nov 2026): with an Unlimited frame rate the idle Home page took 46% of an RTX 4070 Ti, 19% at 60 FPS, and a
+// static menu gains nothing from more frames (a weaker GPU only runs hot). A match, and its pause menu, keep the
+// chosen rate.
+REXCVAR_DEFINE_INT32(bf_menu_max_fps, 60, "BF1943",
+                     "The launcher's pages (not a match nor its pause menu) at this many frames a second at most; 0: as "
+                     "the frame rate setting");
 void LimitFrame() {
 #if defined(BF_DEV_TOOLS) && defined(_WIN32)
   // BF_TIMER_PROBE=1: every 600 frames, how long a Sleep(1) takes now (the window in the background in tests).
@@ -190,7 +198,9 @@ void LimitFrame() {
   }();
   if (no_limit) return;
 #endif
-  const double fps = REXCVAR_GET(bf_max_fps);
+  double fps = REXCVAR_GET(bf_max_fps);
+  if (const int menu = REXCVAR_GET(bf_menu_max_fps); menu > 0 && bf1943::LauncherShowing() && (fps <= 0 || fps > menu))
+    fps = menu;
   using Clock = std::chrono::steady_clock;
   static Clock::time_point next{};
 #if defined(BF_DEV_TOOLS)
