@@ -628,6 +628,18 @@ REX_HOOK_RAW(sub_82616750) {
     REXLOG_INFO("BF setting {} = {}", name, value);
   }
 #endif
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_MAX_PLAYERS=<n> (tests, 15 Nov 2026): a dedicated server's Game.MaxPlayerCount (64 by default; the official
+  // servers' lists say 24) set to n, to see what the game does with a join over its cap.
+  if (REXCVAR_GET(server) && ctx.r3.u32 && name == "Game.MaxPlayerCount") {
+    if (const char* v = std::getenv("BF_DEV_MAX_PLAYERS"); v && *v) {
+      const uint32_t n = uint32_t(std::atoi(v));
+      base[ctx.r3.u32] = uint8_t(n >> 24), base[ctx.r3.u32 + 1] = uint8_t(n >> 16), base[ctx.r3.u32 + 2] = uint8_t(n >> 8),
+      base[ctx.r3.u32 + 3] = uint8_t(n);
+      REXLOG_INFO("BF test: the server's Game.MaxPlayerCount set to {}", n);
+    }
+  }
+#endif
   if (ctx.r3.u32 && name == "Game.MaxFps") g_max_fps = ctx.r3.u32;
   // A dedicated server's main timer ticks once a frame, paced by Game.MaxFps (60 Hz research, tick_rate.cpp): at
   // another rate than 30 it is paced at that rate, so its ticks a second match its players'.

@@ -38,6 +38,12 @@ MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client say
 MULTI_CHUNK = 6000   # raw payload bytes per part
 MULTI = (0xB0000000, 0xF0000000)  # multi part response, request
 RESERVATIONS = {}  # player IP -> (GID, time): the server picked in our menu, for the next Quick Match
+# A full server refuses new joins (TekRantGaming, 15 Nov 2026: players joining a full server; the game itself lets in up
+# to 64, and a join over the game's own cap crashed a test server). A server is full when the players its host last
+# reported (every 5 s) and the players who picked it in the last JOIN_WINDOW seconds and are still on their way reach
+# its MAX-PLAYERS. PICKS keeps each address's first pick of a server (a renewal of the same pick keeps its place).
+PICKS = {}  # player IP -> (GID, time of the first pick, the server's players then)
+JOIN_WINDOW = 30
 NAMES = {}  # a name, lower case -> (player id, held until: None while its player is online), see free_name
 LEADERBOARD = {}  # a name, lower case -> {'name', 'score', 'seconds', 'captures', 'at'}: the players' own totals
 MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'}}: the scoreboard, from the players' games
@@ -224,6 +230,22 @@ def leaderboard_top(count=50):
     return rows[:count], len(rows)
 
 
+def server_full(gid, address):
+    """(full, players, arriving, most): whether one more player would go over the server's MAX-PLAYERS."""
+    g = GAMES.get(gid, {})
+    try:
+        most = int(g.get('MAX-PLAYERS') or 24)
+        players = int(g.get('AP') or 0)
+    except (TypeError, ValueError):
+        return False, 0, 0, 0
+    now = time.time()
+    # The picks still on their way: those of the last JOIN_WINDOW seconds, less the players who arrived since the
+    # oldest of them (each pick keeps the player count it was made at), so an arrived player is not counted twice.
+    pending = [ap for a, (pg, at, ap) in PICKS.items() if pg == gid and a != address and now - at < JOIN_WINDOW]
+    arriving = max(0, len(pending) - max(0, players - min(pending))) if pending else 0
+    return players + arriving >= most, players, arriving, most
+
+
 def forget_old():
     """What the tables keep for players gone a while: a server that runs for weeks keeps no list of every login, every
     browser pick and every name it has seen. Run at each login."""
@@ -232,6 +254,8 @@ def forget_old():
         del NAMES[name]
     for address in [a for a, (_, at) in RESERVATIONS.items() if now - at > 300]:
         del RESERVATIONS[address]
+    for address in [a for a, (_, at, _) in PICKS.items() if now - at > 300]:
+        del PICKS[address]
     # A login's key: kept 10 minutes after its FESL connection closed (Theater reads it when the game links).
     for lkey in [k for k, at in Client.closed.items() if now - at > 600]:
         for table in (Client.sessions, Client.user_ids, Client.xuids, Client.closed):
@@ -678,6 +702,15 @@ class Client:
                 # Match) gets no server, and is not asked to host one.
                 games, gated = [], True
                 self.note('Quick Match without a reservation: no server (players need v%s)' % VERSION_GATE['required'])
+            else:
+                # No reservation and no gate (a LAN or community backend): the full servers are left out (see PICKS).
+                address = self.peer.split(':')[0]
+                full = [g for g in games if server_full(g['GID'], address)[0]]
+                if full:
+                    games = [g for g in games if g not in full]
+                    self.note('Quick Match: %d full server(s) left out' % len(full))
+                if games:
+                    PICKS[address] = (games[0]['GID'], time.time(), int(games[0].get('AP') or 0))
             if games:
                 status.update({'props.{}': 3, 'props.{resultType}': 'JOIN', 'props.{avgFit}': '1.0',
                                'props.{games}.[]': len(games)})
@@ -1227,9 +1260,22 @@ class Registry:
                         self.note('%s refused game %s: its version %s, players need v%s' %
                                   (peer, m['gid'], 'v' + yours if yours else 'not said (before the gate)', need))
                     else:
-                        RESERVATIONS[peer.split(':')[0]] = (m['gid'], time.time())
-                        writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
-                        self.note('%s picked game %s%s' % (peer, m['gid'], ' (v%s)' % yours if yours else ''))
+                        address = peer.split(':')[0]
+                        renewal = RESERVATIONS.get(address, (None, 0))[0] == m['gid']
+                        full, players, arriving, most = server_full(m['gid'], address)
+                        if full and not renewal:
+                            # (A game that does not know "full" says the list did not answer, and joins nothing.)
+                            RESERVATIONS.pop(address, None)
+                            writer.write((json.dumps({'op': 'full', 'gid': m['gid'], 'players': players,
+                                                      'max_players': most}) + '\n').encode())
+                            self.note('%s refused game %s: full (%d players, %d on their way, %d at most)' %
+                                      (peer, m['gid'], players, arriving, most))
+                        else:
+                            if not renewal:
+                                PICKS[address] = (m['gid'], time.time(), players)
+                            RESERVATIONS[address] = (m['gid'], time.time())
+                            writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
+                            self.note('%s picked game %s%s' % (peer, m['gid'], ' (v%s)' % yours if yours else ''))
                 elif op == 'name':
                     asked = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
                     try:
