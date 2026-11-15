@@ -1,6 +1,6 @@
-# The official servers
+# The Project-Official Servers
 
-The official servers are TekRantGaming's: the main backend everyone logs in to, and the servers in the Official list
+The Project-Official Servers are TekRantGaming's: the main backend everyone logs in to, and the servers in the Official list
 of the game's server browser. They run on a hosted Windows Server from a private build of the same
 [server package](SERVER.md) that everyone can download, with the same manager; what makes a server official is a key
 that only the official machine holds, which is never in a download.
@@ -19,7 +19,7 @@ The main backend lets in only players on the newest release: it reads this repos
 minutes. An older game gets a pop-up with **Update now** (0.4.0 and newer), or one line in its server list telling
 the player to restart the game, which updates itself at the start (0.2.0 to 0.3.0).
 
-The official servers are updated by hand, on the owner's word, when a release changes what a server runs.
+The Project-Official Servers are updated by hand, on the owner's word, when a release changes what a server runs.
 
 ## Ports
 

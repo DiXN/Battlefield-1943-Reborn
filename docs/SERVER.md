@@ -10,7 +10,7 @@ its name, its map, its players, its region and its tick rate.
   chat.
 - **The server manager** (`server\manager.py`): a page in your browser. It installs the game, runs any number of
   servers and starts one again if it stops, sends messages to the players, and installs new releases.
-- **The main backend** (`server\plasma.py`, the official servers only): where every player logs in and finds the
+- **The main backend** (`server\plasma.py`, the Project-Official Servers only): where every player logs in and finds the
   servers. Everyone else's servers register with the official one.
 
 ## What you need
@@ -45,7 +45,7 @@ and starts the servers again. Your `server.json`, your game files and your logs 
 | Port | For | Who needs it open |
 |---|---|---|
 | UDP 18300, 18301 and on (one for each server) | the servers (players join here) | every host |
-| TCP 18241, 18246, 18250 | the main backend (login, games, server list) | the official servers only |
+| TCP 18241, 18246, 18250 | the main backend (login, games, server list) | the Project-Official Servers only |
 
 Behind a home router the manager asks the router to open the servers' ports itself (UPnP). If the router does not
 allow it, the page says which ports to open by hand. On a hosted server, run **Open firewall ports.bat** once, and

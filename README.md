@@ -75,7 +75,7 @@ player logs in to and which lists every server.
 <td valign="middle">
 
 ### Server browser
-- **Official** and **Community** servers, **Favourites**, **LAN** and **Direct connect**
+- **Official** (the Project-Official Servers) and **Community** servers, **Favourites**, **LAN** and **Direct connect**
 - Each server's **map**, **players**, **region** with its flag, **tick rate** and **ping**
 - **Search**, a **region filter**, Has players, Not full, and sorting
 - **Quick Play** on Home joins the busiest server with room
