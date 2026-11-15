@@ -98,6 +98,10 @@ REXCVAR_DEFINE_DOUBLE(bf_render_scale, 100.0, "BF1943",
 REXCVAR_DEFINE_BOOL(bf_wheel_bindable, false, "BF1943/Controls",
                     "The mouse wheel presses what the bindings name it for (WheelUp, WheelDown among a binding's keys); "
                     "false, as before the bindings had mouse columns: Toggle Weapon on foot");
+REXCVAR_DEFINE_INT32(bf_menu_max_fps, 60, "BF1943",
+                     "The launcher's pages before the game runs, at this many frames a second at most (0: no limit)");
+REXCVAR_DEFINE_INT32(bf_menu_idle_fps, 30, "BF1943",
+                     "The launcher's pages before the game runs, after 10 s without input (0: as bf_menu_max_fps)");
 REXCVAR_DEFINE_STRING(bf_temporal, "off", "BF1943",
                       "The temporal upscaler: off, fsr (AMD FSR 3.1), xess (Intel XeSS), dlss (NVIDIA DLSS) or taa (the "
                       "renderer's own); fsr4 (AMD FSR 4) is no longer offered and becomes fsr");
@@ -452,6 +456,7 @@ bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up a
 
 void NameChosen(const std::string& name);  // below: the name the player chose on the first start, in use at once
 bool PollNameCheck(bool abandon);           // below: the backend's answer to a chosen name, applied once it is in
+int64_t LastGuestPresentMs();               // frame_rate.cpp: when the game last presented a frame (steady ms)
 // Protect your name (account_key.h): what the latest name check said, for the menu.
 struct AccountNews {
   bool any = false, protected_name = false, other_owner = false;
@@ -773,6 +778,36 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool open() const { return open_; }
   // For the graphics panel (f8_panel.cpp): the launcher's own pages are up; the settings file.
   bool ShowingLauncher() const { return open_ && LauncherPage(page_); }
+  // No input on the launcher's pages for `seconds` (the frame limiter then draws them at bf_menu_idle_fps).
+  static int64_t SteadyMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+  bool IdleFor(double seconds) const {
+    return SteadyMs() - last_input_ms_.load(std::memory_order_relaxed) > int64_t(seconds * 1000);
+  }
+  // The launcher's pages before the game sends frames (15 Nov 2026): the window's own loop asks for a new paint after
+  // each one and presents at once, so an idle Home page was drawn as fast as the GPU went (measured 19 to 46% of an RTX
+  // 4070 Ti, whatever the frame rate setting). Each such frame now waits for its turn: bf_menu_max_fps a second, and
+  // bf_menu_idle_fps after 10 s without a key, the mouse or a controller. Once the game sends frames (one in the last
+  // 250 ms) they pace the menu, as before.
+  void PaceLauncher() {
+    const int menu = REXCVAR_GET(bf_menu_max_fps);
+    if (menu <= 0 || !ShowingLauncher() || SteadyMs() - LastGuestPresentMs() < 250) return;
+    const int idle = REXCVAR_GET(bf_menu_idle_fps);
+    const bool idling = idle > 0 && idle < menu && IdleFor(10.0);
+    if (idling != launcher_idling_) {
+      launcher_idling_ = idling;
+      REXLOG_INFO("BF launcher: {}", idling ? fmt::format("idle (no input for 10 s): {} frames a second", idle)
+                                            : fmt::format("{} frames a second", menu));
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / (idling ? idle : menu)));
+    const auto now = Clock::now();
+    if (launcher_next_.time_since_epoch().count() == 0 || now > launcher_next_ + period) launcher_next_ = now;
+    if (now < launcher_next_) std::this_thread::sleep_for(launcher_next_ - now);
+    launcher_next_ += period;
+  }
   bool KeyboardLast() const { return device_.load(std::memory_order_relaxed) == Device::kKeyboard; }
   // The game's own Vertical look is Inverted (GstInput Scheme2FlipY; RefreshGameFlipY keeps it), for look.cpp.
   bool GameFlipY() const { return game_flip_y_.load(std::memory_order_relaxed); }
@@ -830,6 +865,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    PaceLauncher();
     // The keyboard's Esc in a match with our menu closed opens the pause, as the controller's Start does (auto_join.cpp
     // takes it at the next pad read; only with the soldier in the world, as Start).
     if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !comms::TypingOrJustClosed())
@@ -5046,6 +5082,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     mouse_frames_ = io.MouseDelta.x != 0 || io.MouseDelta.y != 0 ? mouse_frames_ + 1 : 0;
     const bool mouse_used = mouse_frames_ >= 2 || ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
                             ImGui::IsMouseClicked(ImGuiMouseButton_Right) || io.MouseWheel != 0;
+    // Any input: the launcher's pages leave their idle frame rate (LauncherIdle, frame_rate.cpp's bf_menu_idle_fps).
+    if (key_used || pad_pressed || io.MouseDelta.x != 0 || io.MouseDelta.y != 0 || io.MouseWheel != 0 ||
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+      last_input_ms_.store(SteadyMs(), std::memory_order_relaxed);
+    }
     const Device was = device_.load(std::memory_order_relaxed);
     Device to = was;
     if (key_used || mouse_used) to = Device::kKeyboard;
@@ -5161,6 +5202,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::atomic<Device> device_{Device::kPad};  // the UI thread (TrackDevice) and the game's pad reads (NoteMatchDevice)
   std::atomic<bool> game_flip_y_{false};      // GameFlipY: the game's own Vertical look, for the pad hook's thread
   int mouse_frames_ = 0;
+  std::atomic<int64_t> last_input_ms_{SteadyMs()};  // the last key, mouse or controller input (IdleFor)
+  bool launcher_idling_ = false;                    // PaceLauncher
+  std::chrono::steady_clock::time_point launcher_next_{};
   double pad_at_[12] = {}, key_at_[12] = {};
   bool pad_pressed_ = false;  // pad_mutex_
   bool release_click_ = false;  // a test's click: the button goes up a frame later
