@@ -168,6 +168,26 @@ access violation repeated every millisecond (a read of guest 0x3C on the main th
 this change; with the change off it did not come up, and with it on it came up once in three runs. Left for a
 follow up (below).
 
+## Weak processors and wider hardware, 15 November 2026 (unattended)
+
+The same PC and scene, with no frame limit unless said (the frame rate is no longer held to the screen's, and the
+driver's Max Frame Rate is off). "Two cores" and "four cores": the client held to those cores, one thread each.
+
+| Change | Two cores, no limit | Two cores at 90 FPS | Four cores, all cores |
+|---|---|---|---|
+| Start of the night | 50 to 71 FPS, 1% low 13 | 1% low 34 to 37, 19 to 26 frames over twice the average | 223 to 229 FPS |
+| Renderer: no recorder thread and no spinning waits below 4 cores (D171) | | 1% low 61 to 78, 2 to 7 such frames | unchanged |
+| The main thread's frame wait sleeps with no limit too (bf_job_wait_sleep_unlimited; pull request 28 made it poll) | 131 FPS, 1% low 28 | | four cores: 1% low 98 to 128, frames over twice 75 to 12; all: same FPS on 0.6 core less |
+| Direct3D's frame throttle yields, or sleeps below 4 processors, instead of spinning (bf_d3d_throttle_wait) | 198 to 204 FPS, 1% low 90 to 104 | 1% low 84 | unchanged |
+| The launcher's pages at 60 FPS at most (bf_menu_max_fps) | | | idle Home on Unlimited: GPU 46% to 23% |
+
+Compatibility: a message on processors older than x86-64-v2 instead of an illegal instruction (the game needs SSE4.2
+and POPCNT, not AVX); the Visual C++ runtime beside the game; no temporal upscaler libraries loaded or shipped (none
+is offered); the Linux AppImage built for glibc 2.35 (Ubuntu 22.04, Mint 21, Debian 12 and newer), from an Ubuntu
+22.04 root (tools/linux/build_in_ubuntu2204.sh). The dedicated server's ticks are unchanged (60.00 a second, the same
+longest gaps). Not changed after measuring: the renderer's spins on many cores (no difference), memory (the console
+game's own), the GPU time of the presets (on this card the renderer's "GPU time" is mostly the GPU waiting for draws).
+
 ## Linux compared with Windows
 
 On the same CPU the idle Linux server (WSL) now costs less than the Windows one did before change 2, and about the
