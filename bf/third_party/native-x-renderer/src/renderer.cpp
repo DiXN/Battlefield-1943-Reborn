@@ -2540,8 +2540,8 @@ bool PresentWithGeneratedFrame(const Command& c) {
                                        g_present_area);
   g_hudless_this_frame = false;
   auto show = [&](ITextureView* srv) {
+    ITextureView* back_buffer = g_device->BackBuffer();  // first: a new swap chain replaces the description (issue 26)
     const auto& desc = g_device->swap_chain()->GetDesc();
-    ITextureView* back_buffer = g_device->swap_chain()->GetCurrentBackBufferRTV();
     Blitter::Rect all{0, 0, desc.Width, desc.Height};
     g_blit.Copy(context, srv, Blitter::Source::kColor, all, back_buffer, all);
     g_overlay.Present(context, back_buffer, desc.Width, desc.Height, g_window);
@@ -2560,7 +2560,7 @@ void ShowPendingFrame(uint32_t index) {
   FrameImage& image = g_frame_images[g_pending_frames[index].image];
   if (image.srv) {
     auto* context = g_device->context();
-    auto* back_buffer = g_device->swap_chain()->GetCurrentBackBufferRTV();
+    auto* back_buffer = g_device->BackBuffer();  // first: a new swap chain replaces the description (issue 26)
     const auto& desc = g_device->swap_chain()->GetDesc();
     const auto& from_desc = image.texture->GetDesc();
     Blitter::Rect from{0, 0, from_desc.Width, from_desc.Height}, to{0, 0, desc.Width, desc.Height};
@@ -2669,13 +2669,14 @@ void ExecutePresent(const Command& c) {
     if (g_draw) g_draw->TargetsChanged();
     return;
   }
-  const auto& desc = g_device->swap_chain()->GetDesc();
   // With the guest's swaps (D86): composed into a frame image now, shown when the command processor executes the
   // frame's swap, which comes after this command has run (the swap passes the signal gate).
   // Frame generation (D123); not with the guest's swaps (D86) for now.
   if (g_frame_generation && !with_swap && PresentWithGeneratedFrame(c)) return;
   FrameImage* image = with_swap ? NextFrameImage() : nullptr;
-  ITextureView* target = image ? image->rtv : g_device->swap_chain()->GetCurrentBackBufferRTV();
+  // The back buffer before the swap chain's description: a new swap chain replaces it (issue 26).
+  ITextureView* target = image ? image->rtv : g_device->BackBuffer();
+  const auto& desc = g_device->swap_chain()->GetDesc();
   PresentFrontBuffer(c, target);
   g_overlay.Present(g_device->context(), target, desc.Width, desc.Height, g_window);
   if (!image) {

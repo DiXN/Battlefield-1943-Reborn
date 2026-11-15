@@ -43,7 +43,12 @@ class Device {
   Diligent::IRenderDevice* device() const { return device_; }
   Diligent::IDeviceContext* context() { return recorder_.context(); }
   Recorder& recorder() { return recorder_; }
+  // Asked for again at each use: after a failure the swap chain is a new one (RebuildSwapChain).
   Diligent::ISwapChain* swap_chain() const { return swap_chain_; }
+  // The image to draw the frame into (the swap chain's current one, acquired if need be). If the swap chain fails
+  // while getting it, it is made again first (RebuildSwapChain). Ask for it before the swap chain's description: a
+  // new swap chain replaces the old one's.
+  Diligent::ITextureView* BackBuffer();
 
   // Follows the window's client size. Returns false while the window has no area (minimized): skip
   // the frame then.
@@ -98,9 +103,19 @@ class Device {
   uint64_t frame_ = 0;
   // native_x_renderer_present_mode as the swap chain was last given it.
   void ApplyPresentMode();
+  // native_x_renderer_present_mode, or "vsync" while ForceVsync is on.
+  std::string WantedPresentMode() const;
   std::string present_mode_;
   bool present_mode_applied_ = false;
   bool force_vsync_ = false;
+  // Issue 26 (14 Nov 2026): the swap chain on the window, made at Create and again by RebuildSwapChain.
+  bool CreateSwapChain();
+  // A swap chain call threw (DiligentCore throws when Vulkan cannot make the swap chain again, for a present mode
+  // change or the window's new size): the GPU waited for, the swap chain released and a new one made from nothing, as
+  // at the start, and V-Sync from then on (a present mode change is such a remake). False when none could be made.
+  bool RebuildSwapChain(const char* where, const char* what);
+  bool vsync_fallback_ = false;
+  uint32_t rebuilds_ = 0;
   // D159: a size the surface did not take (UpdateSize), not asked for again until the SDK's size changes.
   uint32_t refused_width_ = 0, refused_height_ = 0;
   int real_size_notes_ = 0;

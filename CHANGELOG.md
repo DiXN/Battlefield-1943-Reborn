@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.6.4 (15 November 2026): no more closing at the shaders page
+
+**Fixed**
+- **The game no longer closes at the shaders page of its first start.** On some PCs the graphics driver, or an
+  overlay hooked into the game, refuses to set up the game's display a second time, and the game set it up twice as
+  it started. It now sets it up once, as it will show it; if a later change still fails, it sets it up afresh with
+  V-Sync on instead of closing. Reported by MrMister5305 ([issue 26](../../issues/26)).
+
 ## 0.4.6.3 (14 November 2026): a US Central warning and a new version pop-up
 
 **New**
