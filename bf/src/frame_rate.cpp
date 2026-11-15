@@ -342,6 +342,19 @@ REXCVAR_DEFINE_BOOL(bf_job_wait_wake, true, "BF1943",
                     "The game's main thread sleeps in its frame wait until another thread has run a job");
 REXCVAR_DEFINE_INT32(bf_job_wait_wake_processors, 4, "BF1943",
                      "bf_job_wait_wake only with at least this many processors (fewer: the frame wait polls)");
+// bf_job_wait_sleep_unlimited (15 Nov 2026): whether the frame wait sleeps (bf_job_wait_sleep, bf_job_wait_wake) with
+// no frame rate limit too. Pull request 28 made it poll then, for the most frames a second; but its polls hold the
+// main thread at 95% of a core (57% of it in the scheduler's polls, run o15_prof_low) and on a processor with few
+// cores they take the core the game's jobs need. Measured with no limit (Wake Island, 50 s a run): all 16 threads
+// 226.5 and 224.6 FPS sleeping against 226.7 and 226.2 polling, on 3.15 cores instead of 3.76; four cores 1% low 127.8
+// FPS and 12 frames over twice the average sleeping, 97.8 and 75 polling; two cores 132.9 FPS sleeping, 50.3 polling
+// (runs o15_sleep_*, o15_poll_*). 1 (the default): sleep; 0: poll (pull request 28); -1: sleep only with fewer than
+// bf_job_wait_sleep_unlimited_processors processors.
+REXCVAR_DEFINE_INT32(bf_job_wait_sleep_unlimited, 1, "BF1943",
+                     "With no frame rate limit, the main thread's frame wait sleeps (1), polls (0), or sleeps only on "
+                     "processors with fewer than bf_job_wait_sleep_unlimited_processors processors (-1)");
+REXCVAR_DEFINE_INT32(bf_job_wait_sleep_unlimited_processors, 8, "BF1943",
+                     "bf_job_wait_sleep_unlimited -1: the frame wait sleeps with no limit on fewer processors than this");
 namespace jobwake {
 std::atomic<uint32_t> g_runs{0};       // jobs run by any thread's poll (the futex word on Linux)
 std::atomic<bool> g_sleeping{false};  // the main thread sleeps in its frame wait
@@ -442,8 +455,13 @@ REX_HOOK_RAW(sub_82609000) {
 #if defined(BF_DEV_TOOLS)
   if (jobwaits::On()) jobwaits::Poll(caller, ran);
 #endif
-  // Only with a frame rate limit (DiXN, pull request 28): with none, the frame wait polls.
-  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && frame_wait && (!Unlocked() || REXCVAR_GET(bf_max_fps) > 0);
+  // With a frame rate limit; with none, as bf_job_wait_sleep_unlimited says (DiXN, pull request 28: it polled then).
+  const int unlimited = REXCVAR_GET(bf_job_wait_sleep_unlimited);
+  const bool limited = !Unlocked() || REXCVAR_GET(bf_max_fps) > 0;
+  const bool sleep = REXCVAR_GET(bf_job_wait_sleep) && frame_wait &&
+                     (limited || unlimited > 0 ||
+                      (unlimited < 0 && jobwake::Processors() <
+                                            uint32_t(std::max(1, REXCVAR_GET(bf_job_wait_sleep_unlimited_processors)))));
   if (!sleep && !REXCVAR_GET(bf_job_wait_yield)) return;
   // `empty` counts a thread's empty polls from any call site, as it always has: counting them per call site instead
   // (reset when the site changed) made the waiting threads yield less, and on two cores the 1% low fell from 83 to
