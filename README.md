@@ -25,10 +25,8 @@ and community servers, and the options of a modern PC release.
 
 <img src="docs/images/readme/home.jpg" alt="The main menu's Home" width="100%">
 
-<img src="docs/images/readme/wake-carrier.jpg" alt="Wake Island: the carrier's deck, Corsairs ready to take off" width="49%">
-<img src="docs/images/readme/guadalcanal-tank.jpg" alt="Guadalcanal: beside a Sherman at the Allied base" width="49%">
-<img src="docs/images/readme/iwo-jima-sunset.jpg" alt="Iwo Jima at sunset" width="49%">
-<img src="docs/images/readme/coral-sea-peaks.jpg" alt="Coral Sea: the island's peaks from the water" width="49%">
+<img src="docs/images/readme/server-browser.jpg" alt="The server browser" width="49%">
+<img src="docs/images/readme/settings-graphics.jpg" alt="Settings: Graphics" width="49%">
 
 <sub>The original Xbox 360 game code, translated to native PC code with the <a href="https://github.com/rexglue/rexglue-sdk">ReXGlue SDK</a> and drawn with Vulkan. <b>No game files included</b>: bring your own copy of the Xbox 360 game. A fan project, not made, endorsed or supported by Electronic Arts or DICE.</sub>
 
@@ -53,51 +51,18 @@ and community servers, and the options of a modern PC release.
 
 ## The battlefield
 
-<div align="center">
-
-### Wake Island
-
-<img src="docs/images/readme/wake-coast.jpg" alt="Wake Island's lagoon and beaches" width="49%">
-<img src="docs/images/readme/wake-grass.jpg" alt="Grass and shrubs inland on Wake Island" width="49%">
-
-### Guadalcanal
-
-<img src="docs/images/readme/guadalcanal-coast.jpg" alt="Guadalcanal's coast" width="49%">
-<img src="docs/images/readme/guadalcanal-tank.jpg" alt="A Sherman at the Allied base" width="49%">
-
-### Iwo Jima
-
-<img src="docs/images/readme/iwo-jima-island.jpg" alt="Iwo Jima from the water" width="49%">
-<img src="docs/images/readme/iwo-jima-carrier.jpg" alt="A Corsair on the carrier at sunset" width="49%">
-
-### Coral Sea
-
-<img src="docs/images/readme/coral-sea-pier.jpg" alt="Coral Sea: the pier under the peak" width="49%">
-<img src="docs/images/readme/coral-sea-peaks.jpg" alt="Coral Sea's island" width="49%">
-
-<sub>Up to 24 players a server, on foot, in jeeps, tanks, boats and planes, with the air raid, as in the original. Coral Sea is Air Superiority.</sub>
-
-</div>
+All four maps of the original: **Wake Island**, **Guadalcanal**, **Iwo Jima** and **Coral Sea** (Air Superiority).
+Up to 24 players a server, on foot, in jeeps, tanks, boats and planes, with the air raid, as in the original.
 
 ## Modern graphics
 
-The game's Xbox 360 graphics drawn with Vulkan at your screen's resolution, with lighting the console never had.
+The game's Xbox 360 graphics drawn with Vulkan at your screen's resolution, with what the console never had:
 
-<div align="center">
-
-<img src="docs/images/readme/ao-gi-off.jpg" alt="Wake Island under the trees, ambient occlusion and global illumination off" width="49%">
-<img src="docs/images/readme/ao-gi-on.jpg" alt="The same view with ambient occlusion and global illumination on" width="49%">
-
-<sub><b>Ambient occlusion and global illumination</b>, off (left) and on (right): shade where light cannot reach, and light bounced between surfaces.</sub>
-
-<img src="docs/images/readme/ao-gi-detail.jpg" alt="Close up of the trees with ambient occlusion and global illumination off and on" width="98%">
-
-<img src="docs/images/readme/wake-grass.jpg" alt="Grass and shrubs on Wake Island" width="49%">
-<img src="docs/images/readme/settings-graphics.jpg" alt="The Graphics settings" width="49%">
-
-<sub><b>Grass and shrubs</b> on Wake Island, Guadalcanal and Iwo Jima, placed from each level's own data and drawn to the horizon, and <b>graphics presets</b> from Potato to Ultra.</sub>
-
-</div>
+- **Ambient occlusion** (Intel's XeGTAO) and **global illumination**: shade where light cannot reach, and light bounced
+  between surfaces
+- **Grass and shrubs** on Wake Island, Guadalcanal and Iwo Jima, placed from each level's own data and drawn to the horizon
+- **Sharper shadows**, up to four times the original
+- **Graphics presets** from Potato to Ultra, and AMD FSR 1 or NVIDIA Image Scaling for older and low end PCs
 
 ## Online play
 
