@@ -43,6 +43,7 @@
 093f0bda54882749 p 321 fbrb dist/xenon/levels/guadal_canal/reduced-level-00.fbrb Levels/Guadal_Canal/Shaders/Single.res 1722293
 09545961f9f00b4e p 273 fbrb dist/xenon/levels/guadal_canal/reduced-level-00.fbrb Levels/Guadal_Canal/Shaders/Single.res 2272625
 0964981094716fd4 v 228 fbrb dist/xenon/levels/coral_sea/reduced-level-00.fbrb Levels/Coral_sea/Shaders/Single.res 288681 24:00000020 25:49322000 26:0f000000 28:00101040 29:0f020000 31:00101040 32:0f030000 34:09301f40 35:0f040000 36:00000020 37:00302600 38:0f050000 40:00200640 41:0f090000
+09c2ed8e357d412f p 309 fbrb dist/xenon/levels/coral_sea/reduced-level-00.fbrb Levels/Coral_sea/Shaders/Single.res 1688185
 09d937fc1bae588e v 261 fbrb dist/xenon/levels/coral_sea/reduced-level-00.fbrb Levels/Coral_sea/Shaders/Single.res 454709 27:00000020 28:49322000 29:0e000000 31:00101040 32:0e020000 34:00101040 35:0e030000 37:40321f40 38:0e040000 39:00000020 40:00302600 41:0e050000 43:00200640 44:0e090000 46:00302600 47:0e0a0000
 0a46188261a06cc6 p 33 fbrb dist/xenon/async/startup-00.fbrb Scenes/UIBackground/shaders/single.res 58565
 0a7847f161da00a7 p 306 fbrb dist/xenon/levels/wake_island_s/reduced-level-00.fbrb Levels/Wake_island_s/Shaders/Single.res 2670529
@@ -554,6 +555,7 @@
 78958d16f3281eaf p 81 fbrb dist/xenon/levels/guadal_canal/reduced-level-00.fbrb Levels/Guadal_Canal/Shaders/Single.res 2481025
 789dc0d5887d9a8d v 36 fbrb dist/xenon/async/startup-00.fbrb systems/postprocess/shadercontainer/vs3d.res 312 9:00000028 10:00302500 11:06000000 13:00000640 14:06020000 16:00303940 17:06030000
 79c4723b81b9425d p 24 fbrb dist/xenon/async/startup-00.fbrb systems/postprocess/shadercontainer/pstex2dgrayscalelog.res 332
+79c87dd974bd33e3 p 93 fbrb dist/xenon/levels/guadal_canal/reduced-level-00.fbrb Levels/Guadal_Canal/Shaders/Single.res 2643833
 79d360be9eb2fbe9 p 834 fbrb dist/xenon/levels/wake_island_s/reduced-level-00.fbrb Levels/Wake_island_s/Shaders/Single.res 2337461
 79fb5a7344f6fb3e p 45 fbrb dist/xenon/async/startup-00.fbrb systems/postprocess/shadercontainer/psdownsamplequarter.res 380
 7a1dd9f6d6c8d7b6 p 1065 fbrb dist/xenon/levels/iwo_jima_s/reduced-level-00.fbrb Levels/Iwo_Jima_s/Shaders/Single.res 2325585
@@ -766,6 +768,7 @@ ab90db294cfe9f97 p 129 fbrb dist/xenon/levels/guadal_canal/reduced-level-00.fbrb
 ab9a6b5d2c98c3a8 v 156 fbrb dist/xenon/levels/coral_sea/reduced-level-00.fbrb Levels/Coral_sea/Shaders/Single.res 745253 18:00000038 19:49302000 20:08000000 22:00101040 23:08020000 25:09301f40 26:08040000 28:40321f40 29:08050000 31:09301f40 32:08060000 34:00200640 35:08070000
 abd5dd788064833e p 345 fbrb dist/xenon/levels/iwo_jima_s/reduced-level-00.fbrb Levels/Iwo_Jima_s/Shaders/Single.res 2301157
 abe9479a505655e5 p 714 fbrb dist/xenon/levels/iwo_jima_s/reduced-level-00.fbrb Levels/Iwo_Jima_s/Shaders/Single.res 2989077
+abee1c684ee9ff3e p 165 fbrb dist/xenon/levels/guadal_canal/reduced-level-00.fbrb Levels/Guadal_Canal/Shaders/Single.res 1885953
 abf9b818de8d3992 p 144 fbrb dist/xenon/levels/coral_sea/reduced-level-00.fbrb Levels/Coral_sea/Shaders/Single.res 1336017
 ac0262e459dcd01c p 765 fbrb dist/xenon/levels/wake_island_s/reduced-level-00.fbrb Levels/Wake_island_s/Shaders/Single.res 2344785
 ac0849deb3e473a3 p 204 fbrb dist/xenon/levels/coral_sea/reduced-level-00.fbrb Levels/Coral_sea/Shaders/Single.res 1598373
