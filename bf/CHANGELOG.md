@@ -46,7 +46,7 @@ themselves, and the servers only let the newest version in.
 - **Animation smoothing** (experimental, off by default): in Graphics. By ThatZaliaSGuy ([pull request 20](../../pull/20)).
 
 **Changed**
-- **The game now plays at 60 Hz.** It starts at 60 ticks a second, the official servers' rate, so it joins them
+- **The game now plays at 60 Hz.** It starts at 60 ticks a second, the Project-Official Servers' rate, so it joins them
   straight away. Quick Play picks a 60 Hz server first, and the experimental server warning is gone for 30 and
   60 Hz servers (a 75 or 100 Hz server still warns you first).
 - **Custom Match: 60 Hz or 30 Hz.** 60 Hz is the default; 30 Hz is the original game's rate.
@@ -101,7 +101,7 @@ themselves, and the servers only let the newest version in.
 - **Mouse buttons 4 and 5 can be bound.** Settings > Controls > Keyboard bindings now takes the mouse's side buttons,
   and its middle button, which it could not take before. The HUD's prompts show them too ([issue 14](../../issues/14)).
 - **EU Central.** Servers can now say they are in EU Central, with the European Union's flag in the server browser.
-  The official servers move to it.
+  The Project-Official Servers move to it.
 - **Mouse and keyboard in every vehicle seat.** Tank guns, turrets and AA guns turn with the mouse as planes fly:
   the mouse's speed is the gun's speed, and a still mouse leaves the gun still (this also fixes the AA gun of
   [issue 13](../../issues/13)). The game knows your seat from the game itself, and drivers without a gun look around
@@ -297,9 +297,9 @@ to it by themselves at their next start, on Windows and Linux.
   deploy screen on. Settings > Gameplay > Text chat turns it off; Settings > Controls > Keyboard bindings has the keys.
 - **Profanity filter.** In text chat, words with profanity show as stars. A soldier name with profanity cannot be
   used: the name page refuses it, and a player who already has one chooses a new name at their next start.
-- Voice and text chat need the server's update: the official servers have it. Community servers need the 0.2.2
+- Voice and text chat need the server's update: the Project-Official Servers have it. Community servers need the 0.2.2
   server package; on an older server the game says chat is not available there yet.
-- Server package: the crash fix the official servers got on 11 November (a server could stop when a game object list
+- Server package: the crash fix the Project-Official Servers got on 11 November (a server could stop when a game object list
   had an empty slot), and a watchdog that starts a stopped server or backend again within about 15 seconds.
 
 **Fixed**

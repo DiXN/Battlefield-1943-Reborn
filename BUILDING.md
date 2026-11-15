@@ -78,7 +78,7 @@ From a command prompt:
 6. Start `bf1943.exe`. The first start asks for your package and installs the game into a `game` folder beside the
    program. A build from source looks for the main backend at `127.0.0.1`: run your own with
    `python -I server\plasma.py` ([docs/SERVER.md](docs/SERVER.md)), or copy `bf1943.toml` from a release download
-   next to `bf1943.exe` to play on the official servers.
+   next to `bf1943.exe` to play on the Project-Official Servers.
 
 Release packages: `powershell -File tools\make_packages.ps1 -Version <version> -OnlineHost <address>` (add
 `-AppImage <file>` for the Linux file). They go to `runs\release\<version>`; see [docs/RELEASES.md](docs/RELEASES.md).
