@@ -61,7 +61,7 @@
     const std::string server = sv ? sv->name : joining_.empty() ? "This server" : joining_;
     std::string eyebrow = "FIELD REPORT \xC2\xB7 " + Upper(server.substr(0, 30));
     eyebrow += fmt::format(" \xC2\xB7 {}HZ", sv ? sv->Tick() : TickRate());  // 0.4.2: the match's tick rate after its name
-    if (sv) eyebrow += sv->official ? " \xC2\xB7 OFFICIAL" : " \xC2\xB7 COMMUNITY";
+    if (sv) eyebrow += sv->official ? " \xC2\xB7 REBORN" : " \xC2\xB7 COMMUNITY";
     kit::Spaced(d, f.typed, st(10), ImVec2(x, y), kit::kInkSection, eyebrow, st(2));
     y += st(22);
     kit::GameText(d, kit::GameFont::kHeadline, st(24), ImVec2(x, y), kit::kInk, Upper(map));

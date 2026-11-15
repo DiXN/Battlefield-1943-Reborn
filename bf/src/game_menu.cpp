@@ -1887,7 +1887,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // The selected row's card, at the right, and the backend's numbers.
     static const std::map<std::string, const char*> kAbout = {
         {"QUICK MATCH", "Straight into the busiest server with room."},
-        {"SERVER BROWSER", "Every official and community server: maps, players and ping."},
+        {"SERVER BROWSER", "Every Reborn and community server: maps, players and ping."},
         {"JOIN MATCH WITH FRIENDS", "The game's own friends list and invitations."},
         {"CUSTOM MATCH", "Host a match on this PC for you and your friends: pick the map, then play. Friends "
                                  "join it by Direct connect."},

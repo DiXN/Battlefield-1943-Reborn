@@ -2610,7 +2610,7 @@
     // ---- the band: the chosen row's help, the green button
     {
       static constexpr const char* kAbout[] = {
-          "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
+          "The map your match plays. All four in turn: the next map after each round, as on the Reborn servers.",
           "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
           "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
           "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "

@@ -268,7 +268,7 @@
       kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "SERVER BROWSER");
     }
     {
-      static const char* kTabNames[kBrowserTabCount] = {"Official", "Community", "Favourites", "LAN", "Direct connect"};
+      static const char* kTabNames[kBrowserTabCount] = {"Reborn", "Community", "Favourites", "LAN", "Direct connect"};
       // 0.4.2: manila folder tabs; the open one in front, the others behind it and a little lower.
       const float y0 = st.P(0, 170).y, h = st(34), size = st(13);  // standing on the table's sheet (204)
       struct TabBox {
@@ -517,7 +517,7 @@
       else if (browser_has_players_ || browser_not_full_ || browser_night_) why = "No server passes the filters. Switch one off.";
       else
         why = fmt::format("No {} server right now. The list refreshes every 5 seconds.",
-                          browser_tab_ == kTabOfficial ? "official" : "community");
+                          browser_tab_ == kTabOfficial ? "Reborn" : "community");
       kit::Wrapped(d, f.ui, st(13.75f), ImVec2(ta.x + st(20), top + st(20)), kit::kInkFaint, why, tb.x - ta.x - st(40));
     }
     if (ImGui::GetTime() - browser_note_at_ < 2.5)
@@ -543,7 +543,7 @@
       const ImVec2 j0(pa.x + st(18), pb.y - st(18) - st(40)), j1(pb.x - st(18) - st(40) - st(8), pb.y - st(18));
       d->PushClipRect(pa, ImVec2(pb.x, j0.y - st(10)), true);
       float x = pa.x + st(18), y = p1.y + st(16);
-      x += Chip(d, st, ImVec2(x, y), st(18), sv->official ? "OFFICIAL" : "COMMUNITY", kit::kStrip, kit::kStripText, false) + st(6);
+      x += Chip(d, st, ImVec2(x, y), st(18), sv->official ? "REBORN" : "COMMUNITY", kit::kStrip, kit::kStripText, false) + st(6);
       if (sv->night && kNightOps)
         x += Chip(d, st, ImVec2(x, y), st(18), "NIGHT OPS", IM_COL32(40, 46, 88, 255), kit::kStripText, false) + st(6);
       if (fav) Chip(d, st, ImVec2(x, y), st(18), "FAVOURITE", kit::kGold, kit::kInk, false);
@@ -556,7 +556,7 @@
       kit::Spaced(d, f.typed, st(9.5f), ImVec2(pa.x + st(18), y), full ? kit::kStamp : kit::kInkSection, line, st(1.5f));
       y += st(20);
       const std::string desc = !sv->description.empty() ? sv->description
-                               : sv->official              ? "An official server, run by TRG Studios."
+                               : sv->official              ? "A Reborn server, run by TRG Studios."
                                                            : "A community server.";
       y += kit::Wrapped(d, f.ui, st(12), ImVec2(pa.x + st(18), y), kit::kInk, desc, pb.x - pa.x - st(36)) + st(12);
       auto row = [&](const char* k, const std::string& v) {
