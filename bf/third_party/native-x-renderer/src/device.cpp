@@ -9,6 +9,8 @@
 #include <rex/logging.h>
 
 #include <algorithm>
+#include <atomic>
+#include <stdexcept>
 #include <chrono>
 #include <mutex>
 #include <vector>
@@ -26,6 +28,7 @@
 #define VK_NO_PROTOTYPES
 #endif
 #include <vulkan/vulkan_core.h>
+#include "../thirdparty/diligent-core/ThirdParty/volk/volk.h"  // vkCreateSwapchainKHR's pointer (NXR_TEST_SWAPCHAIN_FAIL)
 #include "SwapChainVk.h"
 #include "RenderDeviceVk.h"
 #include "ThreadPool.hpp"
@@ -96,6 +99,12 @@ REXCVAR_DEFINE_STRING(native_x_renderer_present_mode, "", "NativeXRenderer",
                       "\"mailbox\" = MAILBOX, else FIFO; \"immediate\" = IMMEDIATE (tearing, or a variable refresh "
                       "rate display following the game), else MAILBOX. FIFO where the driver offers none of them");
 
+// DiligentCore's (diligent_patches/0011, GraphicsEngineVulkan/include/SwapChainVkImpl.hpp, not on the include path):
+// the V-Sync state and present modes the next swap chains start with.
+namespace Diligent {
+void SetSwapChainVkInitialPresentation(bool VSync, const VkPresentModeKHR* pModes, Uint32 NumModes);
+}  // namespace Diligent
+
 // DiligentCore's (GraphicsEngineVulkan/include/VulkanUtilities/Debug.hpp, not on the include path): loads the
 // VK_EXT_debug_utils functions it names objects with.
 namespace VulkanUtilities {
@@ -109,6 +118,46 @@ namespace native_x_renderer {
 using namespace Diligent;
 
 namespace {
+
+// Issue 26: DiligentCore reported that the swap chain could not be made again (OnDiligentMessage).
+std::atomic<bool> g_swap_chain_failed{false};
+
+// NXR_TEST_SWAPCHAIN_FAIL=<n> (tests of issue 26): the next n remakes of the swap chain (vkCreateSwapchainKHR with
+// oldSwapchain) fail as on the player's PC: the new swap chain is made, which retires the old one, then destroyed, and
+// VK_ERROR_INITIALIZATION_FAILED returned. Through volk's pointer, which DiligentCore calls.
+// NXR_TEST_SWAPCHAIN_FAIL=after-first: every swap chain after the first fails, remade or new (the player's PC).
+PFN_vkCreateSwapchainKHR g_real_create_swapchain = nullptr;
+std::atomic<int> g_swapchain_failures_left{0};
+std::atomic<int> g_swapchains_made{0};
+bool g_fail_after_first = false;
+VKAPI_ATTR VkResult VKAPI_CALL FailingCreateSwapchain(VkDevice device, const VkSwapchainCreateInfoKHR* info,
+                                                      const VkAllocationCallbacks* allocator, VkSwapchainKHR* out) {
+  if (g_fail_after_first && g_swapchains_made.fetch_add(1) > 0) {
+    if (info && info->oldSwapchain != VK_NULL_HANDLE) {
+      VkSwapchainKHR made = VK_NULL_HANDLE;
+      if (g_real_create_swapchain(device, info, allocator, &made) == VK_SUCCESS) vkDestroySwapchainKHR(device, made, allocator);
+    }
+    REXLOG_WARN("[native_x_renderer] NXR_TEST_SWAPCHAIN_FAIL=after-first: this swap chain fails");
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  if (!g_fail_after_first && info && info->oldSwapchain != VK_NULL_HANDLE && g_swapchain_failures_left.fetch_sub(1) > 0) {
+    VkSwapchainKHR made = VK_NULL_HANDLE;
+    if (g_real_create_swapchain(device, info, allocator, &made) == VK_SUCCESS) vkDestroySwapchainKHR(device, made, allocator);
+    REXLOG_WARN("[native_x_renderer] NXR_TEST_SWAPCHAIN_FAIL: this remake of the swap chain fails");
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  return g_real_create_swapchain(device, info, allocator, out);
+}
+void InstallSwapChainFailureTest() {
+  const char* v = std::getenv("NXR_TEST_SWAPCHAIN_FAIL");
+  g_fail_after_first = v && std::strcmp(v, "after-first") == 0;
+  const int n = g_fail_after_first ? 1 : v ? std::atoi(v) : 0;
+  if (n <= 0 || g_real_create_swapchain || !vkCreateSwapchainKHR) return;
+  g_swapchain_failures_left = n;
+  g_real_create_swapchain = vkCreateSwapchainKHR;
+  vkCreateSwapchainKHR = FailingCreateSwapchain;
+  REXLOG_WARN("[native_x_renderer] NXR_TEST_SWAPCHAIN_FAIL: the next {} remakes of the swap chain fail", n);
+}
 
 // DiligentCore's messages, in the game's log.
 void DILIGENT_CALL_TYPE OnDiligentMessage(DEBUG_MESSAGE_SEVERITY severity, const Char* message, const Char* function,
@@ -125,6 +174,9 @@ void DILIGENT_CALL_TYPE OnDiligentMessage(DEBUG_MESSAGE_SEVERITY severity, const
       break;
     default:
       REXLOG_ERROR("[native_x_renderer] DiligentCore: {} ({})", text, where);
+      // Issue 26: the swap chain could not be made again. DiligentCore throws then, or, in Resize, catches it itself
+      // and leaves the swap chain without images: the next use makes a new one first (Device::RebuildSwapChain).
+      if (std::strstr(where, "SwapChainVkImpl")) g_swap_chain_failed.store(true);
       break;
   }
 }
@@ -233,25 +285,8 @@ bool Device::Create(void* native_window, bool half_precision) {
     return false;
   }
 
-  SwapChainDesc swap_chain_desc;
-  // The guest's front buffer is 8-bit RGBA, already gamma-corrected by the game: no sRGB conversion
-  // on the way out.
-  swap_chain_desc.ColorBufferFormat = TEX_FORMAT_RGBA8_UNORM;
-  swap_chain_desc.DepthBufferFormat = TEX_FORMAT_UNKNOWN;
-  swap_chain_desc.BufferCount = 3;
-  if (std::getenv("NXR_FRAME_DUMP")) swap_chain_desc.Usage |= SWAP_CHAIN_USAGE_COPY_SOURCE;  // DumpFrame
-#ifdef _WIN32
-  Win32NativeWindow window{static_cast<HWND>(native_window)};
-#else
-  // Linux: Wayland when the window has a Wayland surface, else X11 (Xlib: display and window id).
-  const auto* host = static_cast<const HostWindow*>(native_window);
-  NativeWindow window{};
-  window.pDisplay = host->display;
-  window.pWaylandSurface = host->wayland_surface;
-  window.WindowId = host->x11_window;
-#endif
-  factory->CreateSwapChainVk(device_, context_, swap_chain_desc, window, &swap_chain_);
-  if (!swap_chain_) {
+  InstallSwapChainFailureTest();
+  if (!CreateSwapChain()) {
     REXLOG_ERROR("[native_x_renderer] could not create the swap chain on the game window");
     return false;
   }
@@ -261,6 +296,95 @@ bool Device::Create(void* native_window, bool half_precision) {
   REXLOG_INFO("[native_x_renderer] Vulkan device on {}; swap chain {}x{}", adapter.Description, desc.Width,
               desc.Height);
   return true;
+}
+
+static std::vector<VkPresentModeKHR> PresentModesFor(const std::string& mode);
+static const char* PresentModeText(const std::string& mode);
+
+bool Device::CreateSwapChain() {
+  IEngineFactoryVk* factory = GetEngineFactoryVk();
+  if (!factory) return false;
+  SwapChainDesc swap_chain_desc;
+  // The guest's front buffer is 8-bit RGBA, already gamma-corrected by the game: no sRGB conversion
+  // on the way out.
+  swap_chain_desc.ColorBufferFormat = TEX_FORMAT_RGBA8_UNORM;
+  swap_chain_desc.DepthBufferFormat = TEX_FORMAT_UNKNOWN;
+  swap_chain_desc.BufferCount = 3;
+  if (std::getenv("NXR_FRAME_DUMP")) swap_chain_desc.Usage |= SWAP_CHAIN_USAGE_COPY_SOURCE;  // DumpFrame
+#ifdef _WIN32
+  Win32NativeWindow window{static_cast<HWND>(window_)};
+#else
+  // Linux: Wayland when the window has a Wayland surface, else X11 (Xlib: display and window id).
+  const auto* host = static_cast<const HostWindow*>(window_);
+  NativeWindow window{};
+  window.pDisplay = host->display;
+  window.pWaylandSurface = host->wayland_surface;
+  window.WindowId = host->x11_window;
+#endif
+  // Issue 26: made with the present mode and the V-Sync it is presented with (Present: V-Sync off, or on after a
+  // failure), so the first Present needs no second swap chain. Before, the first one was made with V-Sync and made
+  // again at the first Present; a player's PC refused every swap chain after the first on the game window.
+  const std::string mode = vsync_fallback_ ? std::string() : WantedPresentMode();
+  const std::vector<VkPresentModeKHR> modes = vsync_fallback_ ? std::vector<VkPresentModeKHR>() : PresentModesFor(mode);
+  SetSwapChainVkInitialPresentation(vsync_fallback_, modes.empty() ? nullptr : modes.data(), Uint32(modes.size()));
+  factory->CreateSwapChainVk(device_, context_, swap_chain_desc, window, &swap_chain_);
+  SetSwapChainVkInitialPresentation(true, nullptr, 0);  // DiligentCore's default again
+  if (!swap_chain_) return false;
+  if (!vsync_fallback_) {
+    present_mode_applied_ = true;
+    present_mode_ = mode;
+    REXLOG_INFO("[native_x_renderer] present mode: {} (the swap chain made with it)", PresentModeText(mode));
+  }
+  return true;
+}
+
+// Issue 26 (14 Nov 2026, a player's RTX 4090 with six Vulkan overlay layers: OBS twice, Overwolf twice, RivaTuner,
+// HudSight): the swap chain made at the start worked, but making it again for the first frame's present mode (the
+// V-Sync of its creation off, MAILBOX: oldSwapchain set) failed with VK_ERROR_INITIALIZATION_FAILED. DiligentCore threw
+// out of Present on the renderer's thread and the game closed, at the shaders page of a first start, every start. A
+// failure now costs a frame: the swap chain is made again from nothing, as the one at the start was, and V-Sync stays
+// on (Present(1): no present mode change, which would make it again with oldSwapchain).
+bool Device::RebuildSwapChain(const char* where, const char* what) {
+  ++rebuilds_;
+  g_swap_chain_failed.store(false);
+  if (!vsync_fallback_ || rebuilds_ <= 5) {
+    REXLOG_ERROR("[native_x_renderer] the swap chain failed while {} ({}): made again from nothing, with V-Sync from "
+                 "now on (time {})",
+                 where, what ? what : "", rebuilds_);
+  }
+  vsync_fallback_ = true;
+  // The frame's work submitted (its frame fence signal too, or WaitForFramesInFlight would wait for it forever) and the
+  // GPU idle before the swap chain's images go.
+  try {
+    context_->Flush();
+    device_->IdleGPU();
+  } catch (const std::exception& e) {
+    REXLOG_ERROR("[native_x_renderer] waiting for the GPU before the new swap chain: {}", e.what());
+  }
+  swap_chain_.Release();
+  g_swap_chain_failed.store(false);
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (attempt) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (CreateSwapChain()) {
+      g_swap_chain_failed.store(false);  // a failed attempt before this one reported itself
+      const auto& desc = swap_chain_->GetDesc();
+      REXLOG_INFO("[native_x_renderer] a new swap chain {}x{} (V-Sync)", desc.Width, desc.Height);
+      return true;
+    }
+  }
+  REXLOG_ERROR("[native_x_renderer] no new swap chain could be made on the game window");
+  return false;
+}
+
+ITextureView* Device::BackBuffer() {
+  if (g_swap_chain_failed.load() && !RebuildSwapChain("drawing", "it had failed before"))
+    throw std::runtime_error("no swap chain on the game window");
+  try {
+    return swap_chain_->GetCurrentBackBufferRTV();
+  } catch (const std::exception& e) {
+    if (!RebuildSwapChain("acquiring an image", e.what())) throw;
+  }
+  return swap_chain_->GetCurrentBackBufferRTV();
 }
 
 bool Device::UpdateSize() {
@@ -289,6 +413,10 @@ bool Device::UpdateSize() {
   // from then on.
   if (width == refused_width_ && height == refused_height_) return true;
   swap_chain_->Resize(width, height);
+  if (g_swap_chain_failed.load()) {
+    RebuildSwapChain("resizing", "see DiligentCore's line above");
+    return true;
+  }
   const auto& now = swap_chain_->GetDesc();
   if (now.Width != width || now.Height != height) {
     refused_width_ = width, refused_height_ = height;
@@ -305,6 +433,7 @@ bool Device::UpdateSize() {
   }
 #else
   swap_chain_->Resize(width, height);
+  if (g_swap_chain_failed.load()) RebuildSwapChain("resizing", "see DiligentCore's line above");
 #endif
   return true;
 }
@@ -319,35 +448,44 @@ Device::FenceState Device::GetFenceState() {
   return state;
 }
 
+// The present modes for native_x_renderer_present_mode's value, in order; none: DiligentCore's for Present's sync
+// interval (without V-Sync: MAILBOX, else IMMEDIATE, else FIFO).
+// D107: V-Sync is FIFO, which every driver offers. NVIDIA's MAILBOX queued three frames whenever the game ran at the
+// display's rate (16-19 ms from present to display at 160 Hz, FIFO 5.8 ms).
+static std::vector<VkPresentModeKHR> PresentModesFor(const std::string& mode) {
+  if (mode == "vsync") return {VK_PRESENT_MODE_FIFO_KHR};
+  if (mode == "mailbox") return {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR};
+  if (mode == "immediate") return {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR};
+  if (!mode.empty())
+    REXLOG_WARN("[native_x_renderer] native_x_renderer_present_mode \"{}\" is not one: the default", mode);
+  return {};
+}
+
+static const char* PresentModeText(const std::string& mode) {
+  return mode == "vsync"       ? "vsync (FIFO)"
+         : mode == "mailbox"   ? "mailbox (MAILBOX, else FIFO)"
+         : mode == "immediate" ? "immediate (IMMEDIATE, else MAILBOX)"
+                               : "default (MAILBOX, else IMMEDIATE)";
+}
+
+std::string Device::WantedPresentMode() const {
+  return force_vsync_ ? std::string("vsync") : REXCVAR_GET(native_x_renderer_present_mode);
+}
+
 void Device::ApplyPresentMode() {
-  const std::string& mode = force_vsync_ ? std::string("vsync") : REXCVAR_GET(native_x_renderer_present_mode);
+  // After a swap chain failure (issue 26) the new one keeps its V-Sync: a present mode change makes it again.
+  if (vsync_fallback_) return;
+  const std::string mode = WantedPresentMode();
   if (present_mode_applied_ && mode == present_mode_) return;
   present_mode_applied_ = true;
   present_mode_ = mode;
   RefCntAutoPtr<ISwapChainVk> swap_chain_vk(swap_chain_, IID_SwapChainVk);
   if (!swap_chain_vk) return;
-  // D107: V-Sync is FIFO, which every driver offers. NVIDIA's MAILBOX queued three frames whenever the game ran at the
-  // display's rate (16-19 ms from present to display at 160 Hz, FIFO 5.8 ms).
-  static constexpr VkPresentModeKHR kVsync[] = {VK_PRESENT_MODE_FIFO_KHR};
-  static constexpr VkPresentModeKHR kMailbox[] = {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_FIFO_KHR};
-  static constexpr VkPresentModeKHR kImmediate[] = {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR,
-                                                    VK_PRESENT_MODE_FIFO_KHR};
-  if (mode == "vsync") {
-    swap_chain_vk->SetPresentModes(kVsync, Uint32(std::size(kVsync)));
-  } else if (mode == "mailbox") {
-    swap_chain_vk->SetPresentModes(kMailbox, Uint32(std::size(kMailbox)));
-  } else if (mode == "immediate") {
-    swap_chain_vk->SetPresentModes(kImmediate, Uint32(std::size(kImmediate)));
-  } else {
-    if (!mode.empty()) {
-      REXLOG_WARN("[native_x_renderer] native_x_renderer_present_mode \"{}\" is not one: the default", mode);
-    }
-    swap_chain_vk->SetPresentModes(nullptr, 0);
-  }
-  REXLOG_INFO("[native_x_renderer] present mode: {}", mode == "vsync"       ? "vsync (FIFO)"
-                                                      : mode == "mailbox"   ? "mailbox (MAILBOX, else FIFO)"
-                                                      : mode == "immediate" ? "immediate (IMMEDIATE, else MAILBOX)"
-                                                                            : "default (MAILBOX, else IMMEDIATE)");
+  // A change made while playing (a setting, frame generation's V-Sync): the swap chain is made again at the next
+  // Present. The one at the start is made with it already (CreateSwapChain).
+  const std::vector<VkPresentModeKHR> modes = PresentModesFor(mode);
+  swap_chain_vk->SetPresentModes(modes.empty() ? nullptr : modes.data(), Uint32(modes.size()));
+  REXLOG_INFO("[native_x_renderer] present mode: {}", PresentModeText(mode));
 }
 
 double Device::Present(double* submit_ms) {
@@ -363,8 +501,19 @@ double Device::Present(double* submit_ms) {
     if (submit_ms)
       *submit_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   }
-  DumpFrame();
-  swap_chain_->Present(0);
+  if (g_swap_chain_failed.load()) {
+    // The swap chain failed since the last present (a resize DiligentCore kept to itself): this frame is not shown.
+    if (!RebuildSwapChain("presenting", "it had failed before")) throw std::runtime_error("no swap chain");
+    return WaitForFramesInFlight();
+  }
+  try {
+    DumpFrame();
+    // V-Sync off: the game paces itself (above). After a swap chain failure, on (issue 26, RebuildSwapChain).
+    swap_chain_->Present(vsync_fallback_ ? 1 : 0);
+  } catch (const std::exception& e) {
+    // The frame is lost; the next one goes to the new swap chain.
+    if (!RebuildSwapChain("presenting", e.what())) throw;
+  }
   return WaitForFramesInFlight();
 }
 

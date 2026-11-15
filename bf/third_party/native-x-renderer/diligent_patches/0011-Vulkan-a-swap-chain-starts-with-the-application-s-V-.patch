@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: "Claude (for TekRantGaming)" <noreply@anthropic.com>
+Date: Fri, 14 Nov 2026 23:55:00 +0000
+Subject: [PATCH] Vulkan: a swap chain starts with the application's V-Sync and
+ present modes
+
+A swap chain was created with V-Sync on and the sync interval's present modes,
+so an application that presents without V-Sync, or with its own present modes
+(SetPresentModes), had a second swap chain made at its first Present. Some
+drivers and overlays refuse a second swap chain on the same window
+(VK_ERROR_INITIALIZATION_FAILED; Battlefield 1943 Reborn issue 26).
+
+SetSwapChainVkInitialPresentation sets the V-Sync state and present modes the
+swap chains created from then on start with. By default V-Sync on and none, as
+before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+diff --git a/Graphics/GraphicsEngineVulkan/include/SwapChainVkImpl.hpp b/Graphics/GraphicsEngineVulkan/include/SwapChainVkImpl.hpp
+index d64fbbd33..364c2f92a 100644
+--- a/Graphics/GraphicsEngineVulkan/include/SwapChainVkImpl.hpp
++++ b/Graphics/GraphicsEngineVulkan/include/SwapChainVkImpl.hpp
+@@ -40,6 +40,10 @@
+ namespace Diligent
+ {
+ 
++/// The V-Sync state (as Present's sync interval) and the present modes (as ISwapChainVk::SetPresentModes; none: the
++/// sync interval's) the swap chains created from now on start with. By default V-Sync on and none, as before.
++void SetSwapChainVkInitialPresentation(bool VSync, const VkPresentModeKHR* pModes, Uint32 NumModes);
++
+ /// Swap chain implementation in Vulkan backend.
+ class SwapChainVkImpl final : public SwapChainBase<ISwapChainVk>
+ {
+diff --git a/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp b/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp
+index 3af4b7389..061411895 100644
+--- a/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp
++++ b/Graphics/GraphicsEngineVulkan/src/SwapChainVkImpl.cpp
+@@ -35,7 +35,9 @@
+ #include "GraphicsAccessories.hpp"
+ 
+ #include <chrono>
++#include <mutex>
+ #include <thread>
++#include <vector>
+ 
+ namespace Diligent
+ {
+@@ -43,6 +45,11 @@ namespace Diligent
+ namespace
+ {
+ 
++// SetSwapChainVkInitialPresentation: what the next swap chain is created with.
++std::mutex                    g_InitialPresentationMtx;
++bool                          g_InitialVSync = true;
++std::vector<VkPresentModeKHR> g_InitialPresentModes;
++
+ // A short sleep while no swap chain image is free (AcquireNextImage).
+ void SleepWhileNoImageIsFree()
+ {
+@@ -88,6 +95,13 @@ SwapChainVkImpl::SwapChainVkImpl(IReferenceCounters*  pRefCounters,
+     m_SwapChainImagesInitialized (STD_ALLOCATOR_RAW_MEM(bool, GetRawAllocator(), "Allocator for vector<bool>"))
+ // clang-format on
+ {
++    {
++        // The application's V-Sync and present modes from the start (SetSwapChainVkInitialPresentation): the first
++        // Present then needs no second swap chain, which some drivers and overlays refuse on the same window.
++        std::lock_guard<std::mutex> Lock{g_InitialPresentationMtx};
++        m_VSyncEnabled = g_InitialVSync;
++        m_PresentModes = g_InitialPresentModes;
++    }
+     CreateSurface();
+     CreateVulkanSwapChain();
+     InitBuffersAndViews();
+@@ -744,6 +758,16 @@ void SwapChainVkImpl::AcquireDeferredImage()
+     }
+ }
+ 
++void SetSwapChainVkInitialPresentation(bool VSync, const VkPresentModeKHR* pModes, Uint32 NumModes)
++{
++    std::lock_guard<std::mutex> Lock{g_InitialPresentationMtx};
++    g_InitialVSync = VSync;
++    if (pModes != nullptr)
++        g_InitialPresentModes.assign(pModes, pModes + NumModes);
++    else
++        g_InitialPresentModes.clear();
++}
++
+ void SwapChainVkImpl::SetPresentModes(const VkPresentModeKHR* pModes, Uint32 NumModes)
+ {
+     std::vector<VkPresentModeKHR> Modes;
