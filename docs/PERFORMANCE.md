@@ -179,7 +179,7 @@ driver's Max Frame Rate is off). "Two cores" and "four cores": the client held t
 | Renderer: no recorder thread and no spinning waits below 4 cores (D171) | | 1% low 61 to 78, 2 to 7 such frames | unchanged |
 | The main thread's frame wait sleeps with no limit too (bf_job_wait_sleep_unlimited; pull request 28 made it poll) | 131 FPS, 1% low 28 | | four cores: 1% low 98 to 128, frames over twice 75 to 12; all: same FPS on 0.6 core less |
 | Direct3D's frame throttle yields, or sleeps below 4 processors, instead of spinning (bf_d3d_throttle_wait) | 198 to 204 FPS, 1% low 90 to 104 | 1% low 84 | unchanged |
-| The launcher's pages at 60 FPS at most (bf_menu_max_fps) | | | idle Home on Unlimited: GPU 46% to 23% |
+| The launcher paces its own frames before the game runs: 60 a second, 30 after 10 s idle (bf_menu_max_fps, bf_menu_idle_fps) | | | idle Home: the whole card 31 to 39% busy to 13% (nvidia-smi) |
 
 Compatibility: a message on processors older than x86-64-v2 instead of an illegal instruction (the game needs SSE4.2
 and POPCNT, not AVX); the Visual C++ runtime beside the game; no temporal upscaler libraries loaded or shipped (none
