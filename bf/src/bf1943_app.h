@@ -115,6 +115,10 @@ class Bf1943App : public rex::ReXApp {
     bf1943::RaiseTimerResolution();  // 1 ms sleeps for the game's waits and our frame limit (frame_rate.cpp)
     bf1943::ApplyStartupDisplaySettings(paths_.user_data_root);  // before the window is made
     bf1943::ApplyPlayerIdentity(paths_.user_data_root);          // the player's own name and XUID
+    // A dedicated server skips a guest call through a broken function pointer instead of stopping with every player in
+    // it (our SDK copy's guest_invalid_call_skip; All Maps 3, 14 and 15 Nov 2026: four such stops, by null, freed and
+    // stack addresses). Logged with the caller; the client keeps the SDK's stop.
+    if (REXCVAR_GET(server)) rex::cvar::SetFlagByName("guest_invalid_call_skip", "true");
     // Every graphics device on the high-performance GPU (King Kong's fix, gpu_preference.cpp): before the GPU plugin
     // makes its provider below, unless the player chose one (vulkan_device, d3d12_adapter). Hybrid laptops ran the game
     // on the integrated GPU (TekRantGaming, 11 Nov 2026). NativeXRenderer's own device takes the same vulkan_device.

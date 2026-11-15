@@ -177,7 +177,26 @@ namespace bf1943 {
 // slots, the middle one empty, built on the free part of that thread's guest stack (below its frames). The first
 // and last are objects whose type is not in the (empty) filter, so no method runs. Without the guard the empty slot
 // faults at guest 0x8. The registers are put back after.
+// BF_DEV_BADCALL_TEST=1: once, on the server's thread, a call through a broken function pointer (the stack address
+// of the 15 Nov All Maps 3 stop). With guest_invalid_call_skip (on for dedicated servers, bf1943_app.h) it is skipped
+// and logged; without, the program stops. The registers are put back after.
+void RunBadCallTest(PPCContext& ctx, uint8_t* base) {
+  static bool done = false;
+  const char* v = std::getenv("BF_DEV_BADCALL_TEST");
+  if (done || !v || *v != '1') return;
+  done = true;
+  PPCContext saved;
+  std::memcpy(&saved, &ctx, sizeof(ctx));
+  ctx.last_indirect_target = 0x7018E740;
+  ctx.lr = 0x82000000;
+  ctx.r3.u64 = 0x1234;
+  rex::runtime::ResolveIndirectFunction(0x7018E740)(ctx, base);
+  REXLOG_INFO("BF game fix test: the call through a broken pointer came back (r3 {:#x}); the server goes on", ctx.r3.u32);
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+}
+
 void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
+  RunBadCallTest(ctx, base);
   static bool done = false;
   const char* v = std::getenv("BF_DEV_FIX_TEST");
   if (done || !v || *v != '1') return;

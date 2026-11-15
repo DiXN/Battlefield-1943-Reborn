@@ -14,6 +14,7 @@
  */
 
 #include <rex/assert.h>
+#include <rex/cvar.h>
 #include <rex/dbg.h>
 #include <rex/logging.h>
 #include <rex/perf/counter.h>
@@ -22,6 +23,8 @@
 #include <rex/runtime.h>
 #include <rex/system/function_dispatcher.h>
 #include <rex/system/thread_state.h>
+
+#include <atomic>
 
 namespace rex::runtime {
 
@@ -34,7 +37,30 @@ FunctionDispatcher* GetBoundFunctionDispatcher() {
 
 }  // namespace
 
+// Battlefield 1943 (TekRantGaming, 15 Nov 2026): a dedicated server stopped with every player in it each time the game
+// called through a broken function pointer (null, a freed object's, a stack address): official servers 13 to 15 Nov,
+// targets 0x00000000, 0x1F993A61, 0x1F8E9ED0, 0x7018E740. With guest_invalid_call_skip the call is skipped instead
+// (it returns 0), logged with its caller, as the game's null page reads give zeros.
+REXCVAR_DEFINE_BOOL(guest_invalid_call_skip, false, "Runtime",
+                    "A guest call to an invalid or unregistered function address is skipped (returning 0) and logged, "
+                    "instead of stopping the program");
+
+namespace {
+std::atomic<uint32_t> g_invalid_calls_skipped{0};
+}  // namespace
+
 static void InvalidFunctionTrap(PPCContext& ctx, uint8_t* /*base*/) {
+  if (REXCVAR_GET(guest_invalid_call_skip)) {
+    const uint32_t n = ++g_invalid_calls_skipped;
+    // The first 20, then at each power of two: a call made every frame does not fill the log.
+    if (n <= 20 || (n & (n - 1)) == 0) {
+      REXLOG_ERROR("Call to invalid or unregistered function at guest address 0x{:08X} skipped (caller's return "
+                   "address 0x{:08X}); {} skipped so far",
+                   ctx.last_indirect_target, uint32_t(ctx.lr), n);
+    }
+    ctx.r3.u64 = 0;
+    return;
+  }
   REX_FATAL("Call to invalid or unregistered function at guest address 0x{:08X}",
             ctx.last_indirect_target);
 }
