@@ -183,6 +183,7 @@ driver's Max Frame Rate is off). "Two cores" and "four cores": the client held t
 | A minimised game held to 30 frames a second (bf_minimized_fps; nothing is shown, so VSync held nothing) | | | minimised in a match, all cores: 251 FPS, 3.3 cores, the card 99.8% busy at 293 W, to 30.0 FPS, 0.86 core, 37 W; back to 227 FPS at once when restored |
 | The renderer's dynamic heap (system memory for draws' constants and uploads) 64 MB instead of 256 (renderer D172) | | | a match: working set 2.9 to 2.7 GB, private 4.58 to 4.39 GB, same FPS; no waits for heap space on the four maps, with the HD pack, or on Ultra camera tours |
 | The renderer lets go of its pipeline cache once the stored pipelines are compiled (renderer D173; the drivers keep their own) | | | a start with the cache file there: working set 2.62 to 2.54 GB, the renderer's heap 608 to 527 MB, same FPS and start |
+| Windows: the guest threads' 16 MB host stacks reserved, not committed (SDK threading_win.cpp) | | | a match: about 400 MB less commit charge (private bytes 4.2 to 3.8 GB), resident memory and FPS the same; matters on PCs with a small or no page file |
 
 Compatibility: a message on processors older than x86-64-v2 instead of an illegal instruction (the game needs SSE4.2
 and POPCNT, not AVX); the Visual C++ runtime beside the game; no temporal upscaler libraries loaded or shipped (none
