@@ -40,7 +40,11 @@ for d in data fonts glyphs; do cp -a "$B/$d" "$A/usr/bin/"; done
 printf '# Battlefield 1943 Reborn: runtime settings. Your own settings are in user/bf1943-settings.txt beside the AppImage.\nbf_online_host = "%s"\n' \
   "$ONLINE_HOST" > "$A/usr/bin/bf1943.toml"
 # The C++ runtime from GCC 13 (GLIBCXX_3.4.32), for systems with an older one; AppRun uses it only then.
-for lib in libstdc++.so.6 libgcc_s.so.1; do cp -L "$(g++ -print-file-name=$lib)" "$A/usr/lib/"; done
+# BF_CXX_LIB_DIR: where to take it from (15 Nov 2026: a build made in an Ubuntu 22.04 root takes that root's GCC 13
+# runtime, built for glibc 2.35; the host's own needs the glibc it was built with, 2.38 on Ubuntu 24.04).
+for lib in libstdc++.so.6 libgcc_s.so.1; do
+  if [ -n "${BF_CXX_LIB_DIR:-}" ]; then cp -L "$BF_CXX_LIB_DIR/$lib" "$A/usr/lib/"; else cp -L "$(g++ -print-file-name=$lib)" "$A/usr/lib/"; fi
+done
 cp "$WT/bf/data/linux/bf1943-reborn.png" "$A/bf1943-reborn.png"
 cp "$A/bf1943-reborn.png" "$A/.DirIcon"
 cat > "$A/bf1943-reborn.desktop" <<'EOF'
