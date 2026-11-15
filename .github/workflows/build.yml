@@ -1,0 +1,116 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (BF_VERSION), empty for upstream's latest release
+        required: false
+      online_host:
+        description: Main backend address, empty for the BF_ONLINE_HOST variable
+        required: false
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y ninja-build pkg-config lld-20 \
+            libx11-dev libx11-xcb-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev libegl-dev libgl-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev libdbus-1-dev libudev-dev
+
+      - name: Build SDK
+        working-directory: sdk/src-bf
+        run: |
+          cmake --preset linux-amd64 -DCMAKE_C_COMPILER=clang-20 -DCMAKE_CXX_COMPILER=clang++-20 \
+            -DREXGLUE_USE_VULKAN=ON -DREXGLUE_BUILD_TESTS=OFF \
+            -DBF_NATIVE_RENDERER_DIR="$GITHUB_WORKSPACE/bf/native-renderer"
+          cmake --build out/build/linux-amd64 --config Release --target install --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-linux-amd64
+          path: sdk/src-bf/out/install/linux-amd64
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+
+      - name: Build SDK
+        shell: cmd
+        run: sdk\src-bf\build_bf.bat
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-win-amd64
+          path: sdk/src-bf/out/install/win-amd64
+
+  windows-game:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/performance')
+    runs-on: windows-2022
+    steps:
+      - run: git config --system core.longpaths true
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.BF_XEX_REPO }}
+          ssh-key: ${{ secrets.BF_XEX_KEY }}
+          path: bf/assets
+
+      - name: Version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v="${{ inputs.version }}"
+          [ -n "$v" ] || v=$(gh release view -R TekRantGaming/Battlefield-1943-Reborn --json tagName -q .tagName | sed 's/^v//')
+          [ -n "$v" ] || { echo "no version"; exit 1; }
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Preflight
+        run: |
+          if (-not (Test-Path bf/assets/default.xex)) { throw "default.xex missing" }
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          & "$vs\VC\Tools\Llvm\x64\bin\clang.exe" --version
+          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Include" -Directory -Name -Filter "10.*" | Sort-Object { [version]$_ } | Select-Object -Last 1
+          if ([version]$sdk -lt [version]'10.0.26100.0') { throw "Windows SDK $sdk is older than 10.0.26100: no DLSS" }
+          "Windows SDK $sdk"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build SDK
+        shell: cmd
+        run: sdk\src-bf\build_bf.bat
+
+      - name: Generate code
+        shell: cmd
+        working-directory: bf
+        run: ..\sdk\src-bf\out\install\win-amd64\bin\rexglue.exe codegen bf1943_manifest.toml
+
+      - name: Build game
+        shell: cmd
+        run: bf\build.bat bf-relwithdebinfo "-DBF_VERSION=%VERSION%"
+
+      - name: Package
+        run: powershell -File tools\make_packages.ps1 -Version $env:VERSION -OnlineHost ${{ inputs.online_host || vars.BF_ONLINE_HOST }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BF1943-Reborn-${{ env.VERSION }}-windows
+          path: runs/release/${{ env.VERSION }}/*.zip

@@ -8,5 +8,5 @@ for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 set PATH=%VSPATH%\VC\Tools\Llvm\x64\bin;%PATH%
 cd /d "%~dp0"
-cmake --preset %PRESET% || exit /b 1
+cmake --preset %PRESET% %2 %3 %4 || exit /b 1
 cmake --build --preset %PRESET% || exit /b 1
