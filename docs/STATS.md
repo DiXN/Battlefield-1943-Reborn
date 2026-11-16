@@ -118,6 +118,11 @@ later. Deaths, K/D and rounds won show a dash until the servers have counted the
   counts: the game decides the unlock.
 - Each one shows how many players have it.
 - X filters all, unlocked or locked. Y shows a test popup.
+- It works on Home before the game runs too. The SDK only has its catalog once the game starts, at the first join on
+  a normal start, so each run with the game keeps a copy of the game's list in
+  `user/cache/extracted/achievements/catalog.txt` (beside the pictures). Before the game runs, the page reads that copy,
+  Reborn's own 3 and the SDK's unlock file. Until the game has run once on a user folder, only Reborn's own 3 show,
+  with a note. The popup is made with the menus at startup (not at the game's launch), so Y works there as well.
 
 ## Achievements and the popup
 

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <rex/ui/overlay/achievement_notification.h>
 
@@ -44,6 +45,19 @@ void TestAchievementPopup(uint32_t id);
 // The achievement's own picture (the game's title data, its image `image_id`), written once into the user's cache as
 // a PNG for the menus (kit::DrawImageFile). Empty while there is none.
 std::filesystem::path AchievementIconFile(uint32_t image_id);
+
+// Every achievement, the game's and Reborn's own, with this player's unlocks, also before the game runs (the
+// Achievements page on Home: the SDK has no catalog until the game starts, at the first join). From the SDK once it
+// has its catalog; else from the copy of the game's list kept in the user's cache (achievements\catalog.txt beside
+// the pictures, written each run once the game has it, NoteAchievementCatalog) with the SDK's own unlock file.
+// `from_game`: whether the SDK's catalog answered; `has_games`: whether the game's own are in the list (false before
+// the game has ever run on this user folder: only Reborn's own then).
+struct AchievementEntry {
+  rex::system::AchievementInfo info;
+  bool unlocked = false;
+  uint64_t when = 0;  // FILETIME
+};
+std::vector<AchievementEntry> AchievementList(bool* from_game = nullptr, bool* has_games = nullptr);
 
 // The chime (or the player's achievement.wav), at the achievement_sound volume.
 void PlayAchievementSound();

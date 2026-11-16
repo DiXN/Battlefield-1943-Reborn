@@ -55,6 +55,14 @@ bool Ensure() {
   if (!missing) return g_ready = true;
   // Only after the game's own are in: until then a register would be wiped by the SDK's load of them.
   if (m.ListAchievements().empty()) return g_ready = false;
+  for (auto& info : Infos()) m.RegisterAchievement(std::move(info));
+  REXLOG_INFO("BF achievements: Reborn's own 3 added beside the game's ({} in all; unlocked: {}, {}, {})",
+              m.ListAchievements().size(), m.IsUnlocked(kReborn), m.IsUnlocked(kForever), m.IsUnlocked(kInevitable));
+  return g_ready = true;
+}
+
+std::vector<rex::system::AchievementInfo> Infos() {
+  std::vector<rex::system::AchievementInfo> out;
   for (const Ours& o : kOurs) {
     rex::system::AchievementInfo info;
     info.id = o.id;
@@ -64,11 +72,9 @@ bool Ensure() {
     info.image_id = o.id;
     info.icon_path = IconFile(o.id).string();
     info.gamerscore = o.gamerscore;
-    m.RegisterAchievement(std::move(info));
+    out.push_back(std::move(info));
   }
-  REXLOG_INFO("BF achievements: Reborn's own 3 added beside the game's ({} in all; unlocked: {}, {}, {})",
-              m.ListAchievements().size(), m.IsUnlocked(kReborn), m.IsUnlocked(kForever), m.IsUnlocked(kInevitable));
-  return g_ready = true;
+  return out;
 }
 
 std::filesystem::path IconFile(uint32_t image_id) {

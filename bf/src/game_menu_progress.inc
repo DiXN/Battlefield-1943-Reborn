@@ -192,23 +192,25 @@
     uint64_t when = 0;  // FILETIME
     long long have = 0, need = 0;  // need 0: no count of ours
   };
+  // The game's 12 and Reborn's own 3, also before the game runs (AchievementList: the copy of the game's catalog
+  // from an earlier run and the unlock file; until the game has run once on this user folder, Reborn's own only).
+  bool ach_has_games_ = true;
   std::vector<AchRow> AchievementRows(const ProgCard& c) {
     std::vector<AchRow> rows;
-    auto* k = REX_KERNEL_STATE();
-    if (!k) return rows;
-    reborn_achievements::Ensure();  // the game's 12 and Reborn's own 3
+    SetAchievementUserDir(UserDir());  // the unlock file and the copy, before the game's launch set it
     const std::string default_state = test_profile_.Get("achievements", "actual");
-    for (const auto& a : k->achievements().ListAchievements()) {
+    for (const AchievementEntry& e : AchievementList(nullptr, &ach_has_games_)) {
+      const auto& a = e.info;
       AchRow r;
       r.info = a;
       while (!r.info.label.empty() && r.info.label.back() == ' ') r.info.label.pop_back();
-      r.got = k->achievements().IsUnlocked(a.id);
+      r.got = e.unlocked;
       if (test_profile_active_) {
         const std::string state = test_profile_.Get("achievement." + std::to_string(a.id), default_state);
         if (state == "unlocked") r.got = true;
         if (state == "locked") r.got = false;
       }
-      r.when = r.got ? k->achievements().GetUnlockTime(a.id) : 0;
+      r.when = r.got ? e.when : 0;
       auto maps_won = [&] {
         long long n = 0;
         for (const char* m : {"wake", "iwo", "guadalcanal"})
@@ -922,7 +924,8 @@
           next = fmt::format("NEXT: {} \xC2\xB7 {} OF {}", Upper(r->info.label), r->have, r->need);
           break;
         }
-      if (next.empty()) next = got == int(all.size()) && got ? "EVERY ONE OF THEM IS YOURS" : "";
+      if (next.empty()) next = !ach_has_games_ ? "THE GAME'S OWN 12 SHOW ONCE IT HAS STARTED"
+                             : got == int(all.size()) && got ? "EVERY ONE OF THEM IS YOURS" : "";
       kit::Spaced(d, f.typed, st(8), ImVec2(x, y + st(27)), kit::kInkSection, next, st(2.2f));
       float cx = b.x - st(19);
       const std::string chips[3] = {fmt::format("ALL {}", all.size()), fmt::format("UNLOCKED {}", got), fmt::format("LOCKED {}", int(all.size()) - got)};
@@ -992,6 +995,11 @@
       d->AddTriangleFilled(ImVec2(ax, ay + s * 0.6f), ImVec2(ax + s * 2, ay + s * 0.6f), ImVec2(ax + s, ay - s * 0.8f), up ? kit::kInk : kit::kRule);
       d->AddTriangleFilled(ImVec2(ax + st(13), ay - s * 0.6f), ImVec2(ax + st(13) + s * 2, ay - s * 0.6f), ImVec2(ax + st(13) + s, ay + s * 0.8f), down ? kit::kInk : kit::kRule);
     }
+    // Before the game has ever run on this user folder there is no copy of its catalog yet: Reborn's own only.
+    if (!all.empty() && !ach_has_games_ && ach_filter_ != 1)
+      kit::Wrapped(d, f.ui, st(13.75f), st.P(668, 257), kit::kInkFaint,
+                   "The game's own 12 are listed here once the game has started: join a match once, and they stay here "
+                   "from then on.", st(540));
     if (all.empty())
       kit::Wrapped(d, f.ui, st(13.75f), st.P(68, 257), kit::kInkFaint, "The game's achievements load with the game: open this page again in a moment.",
                    st(540));

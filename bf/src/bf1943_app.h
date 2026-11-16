@@ -1,4 +1,4 @@
-﻿// bf1943 - ReXGlue Recompiled Project
+// bf1943 - ReXGlue Recompiled Project
 //
 // Customize your app by overriding virtual hooks from rex::ReXApp.
 
@@ -337,6 +337,12 @@ class Bf1943App : public rex::ReXApp {
 
   // Our main menu inside the game (game_menu.cpp), drawn over BF's own menu scene.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    // The achievement popup made now, not at the game's launch (ReXApp::LaunchModule asks for it only then): the
+    // Achievements page's Test the popup works on Home before the game runs. Handed to the SDK when it asks.
+    if (!REXCVAR_GET(server) && drawer) {
+      bf1943::SetAchievementUserDir(paths_.user_data_root);
+      early_toast_ = std::make_unique<bf1943::AchievementToast>(drawer);
+    }
     bf1943::CreateGameMenu(
         drawer, paths_.user_data_root,
         [this](bool on) {
@@ -409,6 +415,7 @@ class Bf1943App : public rex::ReXApp {
   // None on a dedicated server (no window).
   std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog() override {
     if (REXCVAR_GET(server) || !imgui_drawer()) return nullptr;
+    if (early_toast_) return std::move(early_toast_);  // made with the menus (OnCreateDialogs)
     bf1943::SetAchievementUserDir(paths_.user_data_root);
     return std::make_unique<bf1943::AchievementToast>(imgui_drawer());
   }
@@ -423,5 +430,6 @@ class Bf1943App : public rex::ReXApp {
 
  private:
   rex::PathConfig paths_;
+  std::unique_ptr<bf1943::AchievementToast> early_toast_;  // the popup until the SDK takes it (at the game's launch)
   std::chrono::steady_clock::time_point launched_at_{};  // OnPostLaunchModule; zero while the game was never launched
 };

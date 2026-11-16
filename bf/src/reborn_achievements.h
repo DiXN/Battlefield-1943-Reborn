@@ -18,6 +18,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <vector>
+
+#include <rex/system/achievement_store.h>
 
 namespace bf1943::reborn_achievements {
 
@@ -25,6 +28,9 @@ inline constexpr uint32_t kReborn = 101, kForever = 102, kInevitable = 103;
 
 // One of ours (their image ids are their ids).
 bool IsOurs(uint32_t id);
+
+// Ours as the catalog has them (also for the Achievements page before the game runs, achievement_toast.h).
+std::vector<rex::system::AchievementInfo> Infos();
 
 // Puts ours into the SDK's catalog once the game's own are loaded (it replaces the whole catalog when it loads the
 // game's title data). Cheap: call it before anything that asks the catalog. True once ours are there.

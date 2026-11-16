@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
 #include <vector>
@@ -139,9 +140,164 @@ std::vector<uint8_t> LoadOwnWav(const fs::path& file, float volume) {
 
 }  // namespace
 
+namespace {
+
+// user\cache\extracted\achievements: the game's pictures and the copy of its catalog.
+fs::path AchievementCacheDir() {
+  fs::path dir = kit::MenuArtDir().empty() ? fs::path() : kit::MenuArtDir().parent_path();
+  if (dir.empty()) {
+    std::lock_guard lock(g_dir_mutex);
+    if (!g_user_dir.empty()) dir = g_user_dir / "cache" / "extracted";
+  }
+  return dir.empty() ? dir : dir / "achievements";
+}
+
+// The SDK's unlock file (KernelState: user\achievements\<title id>.toml; Battlefield 1943 is 5841097E).
+fs::path UnlockFile() {
+  std::lock_guard lock(g_dir_mutex);
+  return g_user_dir.empty() ? fs::path() : g_user_dir / "achievements" / "5841097E.toml";
+}
+
+std::string OneLine(std::string s) {
+  for (char& c : s)
+    if (c == '\t' || c == '\n' || c == '\r') c = ' ';
+  return s;
+}
+
+// The copy of the game's own catalog (catalog.txt): one line per achievement, its fields split by tabs: id,
+// gamerscore, image id, flags, name, description, locked description. Reborn's own are not in it (code has them).
+std::vector<rex::system::AchievementInfo> ReadCatalogCopy() {
+  std::vector<rex::system::AchievementInfo> out;
+  const fs::path dir = AchievementCacheDir();
+  if (dir.empty()) return out;
+  std::ifstream in(dir / "catalog.txt");
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.empty() || line[0] == '#') continue;
+    std::vector<std::string> f;
+    for (size_t at = 0;;) {
+      const size_t tab = line.find('\t', at);
+      f.push_back(line.substr(at, tab == std::string::npos ? std::string::npos : tab - at));
+      if (tab == std::string::npos) break;
+      at = tab + 1;
+    }
+    if (f.size() < 7) continue;
+    rex::system::AchievementInfo a;
+    a.id = uint32_t(std::strtoul(f[0].c_str(), nullptr, 10));
+    a.gamerscore = uint32_t(std::strtoul(f[1].c_str(), nullptr, 10));
+    a.image_id = uint32_t(std::strtoul(f[2].c_str(), nullptr, 10));
+    a.flags = uint32_t(std::strtoul(f[3].c_str(), nullptr, 10));
+    a.label = f[4], a.description = f[5], a.unachieved_description = f[6];
+    if (a.id && !reborn_achievements::IsOurs(a.id)) out.push_back(std::move(a));
+  }
+  return out;
+}
+
+// The SDK's unlock file as it saves it: "[unlocked.<id>]" then "filetime = <n>".
+std::map<uint32_t, uint64_t> ReadUnlockFile() {
+  std::map<uint32_t, uint64_t> out;
+  const fs::path file = UnlockFile();
+  if (file.empty()) return out;
+  std::ifstream in(file);
+  std::string line;
+  uint32_t id = 0;
+  while (std::getline(in, line)) {
+    if (line.rfind("[unlocked.", 0) == 0) {
+      id = uint32_t(std::strtoul(line.c_str() + 10, nullptr, 10));
+      if (id) out[id] = 0;
+    } else if (id && line.rfind("filetime", 0) == 0) {
+      const size_t eq = line.find('=');
+      if (eq != std::string::npos) out[id] = std::strtoull(line.c_str() + eq + 1, nullptr, 10);
+    }
+  }
+  return out;
+}
+
+// Once a run, when the game has its catalog: the copy written (only when it changed), for the next start's Home.
+void NoteAchievementCatalog() {
+  static bool done = false;
+  if (done) return;
+  auto* k = REX_KERNEL_STATE();
+  if (!k) return;
+  std::string text = "# The game's achievements as its title data has them (achievement_toast.cpp), for our menus "
+                     "before the game runs.\n";
+  int n = 0;
+  for (const auto& a : k->achievements().ListAchievements()) {
+    if (reborn_achievements::IsOurs(a.id)) continue;
+    text += fmt::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\n", a.id, a.gamerscore, a.image_id, a.flags, OneLine(a.label),
+                        OneLine(a.description), OneLine(a.unachieved_description));
+    ++n;
+  }
+  if (!n) return;
+  done = true;
+  const fs::path dir = AchievementCacheDir();
+  if (dir.empty()) return;
+  {
+    std::ifstream in(dir / "catalog.txt", std::ios::binary);
+    const std::string old((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (old == text) return;
+  }
+  std::error_code ec;
+  fs::create_directories(dir, ec);
+  {
+    std::ofstream out((dir / "catalog.txt").string() + ".tmp", std::ios::binary | std::ios::trunc);
+    out << text;
+  }
+  fs::rename((dir / "catalog.txt").string() + ".tmp", dir / "catalog.txt", ec);
+  REXLOG_INFO("BF achievements: the game's {} kept for the menus before the game runs ({}){}", n,
+              (dir / "catalog.txt").string(), ec ? ", could not be written" : "");
+}
+
+}  // namespace
+
+std::vector<AchievementEntry> AchievementList(bool* from_game, bool* has_games) {
+  std::vector<AchievementEntry> out;
+  bool game = false, games = false;
+  if (auto* k = REX_KERNEL_STATE()) {
+    reborn_achievements::Ensure();
+    auto& m = k->achievements();
+    for (const auto& a : m.ListAchievements()) {
+      AchievementEntry e;
+      e.info = a;
+      e.unlocked = m.IsUnlocked(a.id);
+      e.when = e.unlocked ? m.GetUnlockTime(a.id) : 0;
+      games |= !reborn_achievements::IsOurs(a.id);
+      out.push_back(std::move(e));
+    }
+    game = !out.empty();
+  }
+  if (!game) {
+    // Before the game runs: the copy and the unlock file, read again at most once a second (the page asks each frame).
+    static std::mutex mutex;
+    static double read_at = -100;
+    static std::vector<AchievementEntry> copy;
+    static bool copy_games = false;
+    std::lock_guard lock(mutex);
+    const double now = ImGui::GetTime();
+    if (now - read_at > 1.0 || now < read_at) {
+      read_at = now;
+      copy.clear();
+      std::vector<rex::system::AchievementInfo> infos = ReadCatalogCopy();
+      copy_games = !infos.empty();
+      for (auto& a : reborn_achievements::Infos()) infos.push_back(std::move(a));
+      const std::map<uint32_t, uint64_t> unlocks = ReadUnlockFile();
+      for (auto& a : infos) {
+        AchievementEntry e;
+        e.info = std::move(a);
+        if (auto it = unlocks.find(e.info.id); it != unlocks.end()) e.unlocked = true, e.when = it->second;
+        copy.push_back(std::move(e));
+      }
+    }
+    out = copy, games = copy_games;
+  }
+  if (from_game) *from_game = game;
+  if (has_games) *has_games = games;
+  return out;
+}
+
 void SetAchievementUserDir(const fs::path& user_dir) {
   std::lock_guard lock(g_dir_mutex);
-  g_user_dir = user_dir;
+  if (g_user_dir != user_dir) g_user_dir = user_dir;  // the Achievements page sets it each frame
 }
 
 void PlayAchievementSound() {
@@ -199,13 +355,9 @@ fs::path AchievementIconFile(uint32_t image_id) {
     return {};
   }
   // Beside the menu art (user\cache\extracted\achievements), made once from the game's title data.
-  fs::path dir = kit::MenuArtDir().empty() ? fs::path() : kit::MenuArtDir().parent_path();
-  if (dir.empty()) {
-    std::lock_guard lock(g_dir_mutex);
-    if (!g_user_dir.empty()) dir = g_user_dir / "cache" / "extracted";
-  }
+  const fs::path dir = AchievementCacheDir();
   if (dir.empty()) return {};
-  const fs::path file = dir / "achievements" / (std::to_string(image_id) + ".png");
+  const fs::path file = dir / (std::to_string(image_id) + ".png");
   // Tried again every 2 s (the game's title data is there once the game runs), each reason logged once.
   static std::map<uint32_t, double> next_try;
   static std::set<std::string> said;
@@ -253,13 +405,12 @@ void AchievementToast::Push(const rex::system::AchievementEvent& event) {
 }
 
 void TestAchievementPopup(uint32_t id) {
-  auto* k = REX_KERNEL_STATE();
-  if (!g_toast || !k) return;
-  reborn_achievements::Ensure();  // ours too
-  for (const auto& a : k->achievements().ListAchievements()) {
-    if (a.id != id) continue;
+  if (!g_toast) return;
+  // The game's catalog, or before the game runs its copy (AchievementList), Reborn's own too.
+  for (const auto& entry : AchievementList()) {
+    if (entry.info.id != id) continue;
     rex::system::AchievementEvent e;
-    e.achievement = a;
+    e.achievement = entry.info;
     g_test = true;
     g_toast->Push(e);
     g_test = false;
@@ -270,7 +421,7 @@ void TestAchievementPopup(uint32_t id) {
 void AchievementToast::OnDraw(ImGuiIO& io) {
   Toast toast;
   const double now = ImGui::GetTime();
-  reborn_achievements::Ensure();  // Reborn's own 3 in the catalog once the game's are (cheap)
+  if (reborn_achievements::Ensure()) NoteAchievementCatalog();  // Reborn's own 3 beside the game's; the copy kept
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_ACHIEVEMENT_TEST="<s>:<id>[,<s>:<id>...]" (tests): a test popup for achievement <id> <s> seconds after the
   // window opened, as the page's Y does.
