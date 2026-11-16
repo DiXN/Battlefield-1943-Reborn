@@ -410,6 +410,10 @@ const char* MapIconsFileName();         // shader_prep.cpp: the pause menu map's
 void PlayMenuMusic(const std::filesystem::path& wav, bool on);  // game_music.cpp
 void SetGameAudioMuted(bool muted);  // audio_settings.cpp: the game's own sound silent while our menus show
 void PlaySoundOnce(const std::filesystem::path& wav);
+// game_music.cpp: the original menus' sounds (0 scroll, 1 tick, 2 forward, 3 back), and the game's own kept quiet
+// while ours show.
+void PlayMenuSound(const std::filesystem::path& dir, int which, float gain, const char* why);
+void SetMenuOwnsUiSound(bool ours);
 }  // namespace bf1943
 #if defined(BF_DEV_TOOLS)
 REXCVAR_DEFINE_BOOL(bf_dev_auto_host, false, "BF1943",
@@ -997,6 +1001,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool in_match = MenuDriverStage() == 5 && page_ != Page::kJoining;  // the joining page is ours to its end
       const bool our_menus = page_ != Page::kIntro && !in_match && (pre_game_ || open_);
       bf1943::SetGameAudioMuted(our_menus && !pre_game_);
+      // Our menus play the original menus' sounds (MenuSounds): BF's own copies, from the presses we send its hidden
+      // menus, are kept quiet meanwhile. BF's own screens that have the real pad (passing_) play their own.
+      bf1943::SetMenuOwnsUiSound(open_);
       // (Quiet while the news' video plays with its sound, game_menu_news.inc.)
       const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music) &&
                         !(news_open_ && !news_muted_ && news::VideoShowing());
@@ -1149,6 +1156,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Start showed the game's own pause). Never A there: on the Exit Game question it was YES. auto_join.cpp keeps the
     // press from the game until it is let go.
     if (in.start && InPause()) {
+      PlayMenuSound(kSoundBack, "Start closed the pause");
       ClosePause("Start");
       return;
     }
@@ -1180,6 +1188,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
     const float popup_wheel = io.MouseWheel;
+    const SoundLook sound_before = LookForSound(popup_in);  // the original menus' sounds (MenuSounds)
     if (over_popup) in = {}, io.MouseDown[0] = false, io.MouseDelta = ImVec2(0, 0), io.MouseWheel = 0;
     switch (page_) {
       case Page::kIntro: IntroPage(d, io, in); break;
@@ -1227,6 +1236,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                          pw_popup_ || whats_new_open_))
         news::VideoHide();
     }
+    MenuSounds(sound_before, popup_in, popup_down, popup_delta);
     // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
     if (kit::WatermarkOn() && open_ &&
         (page_ == Page::kStats ||
@@ -1243,6 +1253,120 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
  private:
+  // ---- the original menus' sounds (TekRantGaming, 16 Nov 2026: "the original menus sounds for moving and button
+  // pressing ... used in our menus now and pause menus"; game_music.cpp PlayMenuSound has the game's table).
+  //
+  // Judged once a frame for every page and pop-up, from what the player pressed and what it changed: the page, the
+  // selection (every page's row, tab, card and on screen key), a pop-up, a setting. A press that changes nothing
+  // plays nothing, as the original's SND_NAV_NOGO at a list's end. Up and down (and LB and RB, the tabs) are the
+  // scroll; left and right, and a slider dragged, the tick (the original's option values); A, a click that did
+  // something, and a page opened by a press are forward; B or Esc that went somewhere is back. The mouse moving
+  // over a new row is the scroll. Pages with nothing to press (the cards, shaders, starting, joining, leaving) are
+  // silent, and nothing plays for what changes by itself.
+  static constexpr int kSoundScroll = 0, kSoundTick = 1, kSoundForward = 2, kSoundBack = 3;
+  struct SoundLook {
+    Page page = Page::kMain;
+    bool open = false;
+    uint64_t selection = 0, popups = 0, values = 0;
+    bool with_values = false;  // values hashed (only on a frame with a press, a click or a drag)
+  };
+  static void HashIn(uint64_t& h, uint64_t v) { h = (h ^ v) * 0x100000001B3ull; }
+  static void HashIn(uint64_t& h, const std::string& s) {
+    for (unsigned char c : s) HashIn(h, c);
+    HashIn(h, 0xFFu);
+  }
+  SoundLook SoundLookNow(bool with_values) const {
+    SoundLook l;
+    l.page = page_, l.open = open_, l.with_values = with_values;
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (int v : {row_, tab_, pm_row_, pm_map_, direct_key_, popup_row_, pause_row_, home_row_, news_focus_,
+                  news_first_card_, setup_tab_, prompts_row_, help_row_, ctl_tab_, browse_row_, browser_tab_,
+                  preset_cursor_, voice_choice_, fr_row_, slot_cursor_, files_card_, allset_row_, name_key_,
+                  pm_edit_key_, project_, capture_slot_})
+      HashIn(h, uint64_t(int64_t(v)));
+    HashIn(h, pause_focus_panel_);
+    l.selection = h;
+    h = 0xCBF29CE484222325ull;
+    for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_,
+                   new_version_popup_, notice_popup_, news_open_, quit_popup_, skip_popup_, files_help_, browsing_,
+                   browser_typing_, browser_has_players_, browser_not_full_, browser_night_, quick_waiting_ > 0,
+                   direct_keys_, direct_letters_, name_keys_})
+      HashIn(h, b);
+    for (int v : {pause_confirm_, handing_over_, passing_}) HashIn(h, uint64_t(int64_t(v)));
+    HashIn(h, capture_), HashIn(h, browser_region_);
+    // What the on screen keys typed (a key pressed is a press that did something).
+    for (const std::string* t : {&direct_text_, &name_text_, &pm_edit_text_, &pw_text_, &browser_search_}) HashIn(h, *t);
+    l.popups = h;
+    if (with_values) {
+      h = 0xCBF29CE484222325ull;
+      for (const auto& [k, v] : settings_.values) HashIn(h, k), HashIn(h, v);
+      for (const auto& [k, v] : gfx_pending_) HashIn(h, k), HashIn(h, v);
+      l.values = h;
+    }
+    return l;
+  }
+  SoundLook LookForSound(const Input& in) const {
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool pressed = in.accept || in.back || in.left || in.right || in.x || in.y || in.view || in.start;
+    return SoundLookNow(pressed || ImGui::IsMouseClicked(ImGuiMouseButton_Left) || io.MouseDown[0]);
+  }
+  // The menu's volume rows: Menu sounds on, its volume, and the master volume (all game audio).
+  float MenuSoundGain() const {
+    auto value = [this](const char* name, const char* fallback) {
+      std::string v = settings_.Get(std::string("cvar.") + name, "");
+      if (v.empty()) v = rex::cvar::GetFlagByName(name);
+      return v.empty() ? std::string(fallback) : v;
+    };
+    if (!Truthy(value("bf_menu_sounds", "true"))) return 0.0f;
+    const float master = float(std::atof(value("bf_master_volume", "100").c_str()));
+    const float menu = float(std::atof(value("bf_menu_sounds_volume", "100").c_str()));
+    return std::clamp(master / 100.0f, 0.0f, 1.0f) * std::clamp(menu / 100.0f, 0.0f, 1.0f);
+  }
+  void PlayMenuSound(int which, const char* why) {
+    bf1943::PlayMenuSound(UserDir() / "cache" / "extracted" / "sounds", which, MenuSoundGain(), why);
+  }
+  double slider_tick_at_ = -1;
+  void MenuSounds(const SoundLook& before, const Input& in, bool mouse_down, ImVec2 mouse_delta) {
+    if (!before.open && !open_) return;
+    for (Page p : {before.page, page_})
+      if (p == Page::kIntro || p == Page::kShaders || p == Page::kStarting || p == Page::kJoining ||
+          p == Page::kLeaving)
+        return;
+    const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool moved = mouse_delta.x != 0 || mouse_delta.y != 0;
+    const bool drag = mouse_down && !click && moved;
+    const bool vertical = in.up || in.down || in.prev_tab || in.next_tab;
+    const bool sideways = in.left || in.right;
+    const bool press = in.accept || in.x || in.y || in.view || in.start;
+    if (!vertical && !sideways && !press && !in.back && !click && !drag && !moved) return;
+    const SoundLook after = SoundLookNow(before.with_values);
+    const bool page = after.page != before.page || after.open != before.open;
+    const bool popup = after.popups != before.popups;
+    const bool selection = after.selection != before.selection;
+    const bool value = before.with_values && after.values != before.values;
+    const bool any = page || popup || selection || value;
+    if (in.back) {
+      if (any) PlayMenuSound(kSoundBack, "back");
+    } else if (press) {
+      if (any) PlayMenuSound(kSoundForward, "press");
+    } else if (click) {
+      if (page || popup) PlayMenuSound(kSoundForward, "click");
+      else if (value) PlayMenuSound(kSoundTick, "click on a value");
+      else if (selection) PlayMenuSound(kSoundForward, "click");
+    } else if (page) {
+      PlayMenuSound(kSoundForward, "page");
+    } else if (sideways) {
+      if (value || selection || popup) PlayMenuSound(kSoundTick, "left or right");
+    } else if (vertical) {
+      if (selection || value || popup) PlayMenuSound(kSoundScroll, "up or down");
+    } else if (drag) {
+      // A slider dragged: a tick for its value's changes, at most every 80 ms (the pad's held steps' pace).
+      if (value && ImGui::GetTime() - slider_tick_at_ > 0.08) slider_tick_at_ = ImGui::GetTime(), PlayMenuSound(kSoundTick, "slider");
+    } else if (moved && selection) {
+      PlayMenuSound(kSoundScroll, "mouse over");
+    }
+  }
+
   // ---- drawing helpers
 
   // The stencil (our headings) is the game's own headline lettering once its font is there (the new look,
@@ -3719,10 +3843,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_menu_music"));
     rows.push_back(NotYet(Slider("Menu", "Menu music volume", "How loud the menu's music is.", "bf_menu_music_volume", 0,
                                  100, 5, Percent, 100)));
-    rows.push_back(NotYet(Toggle("Menu", "Menu sounds", "The game's own menu sounds as you move around our menu.",
-                                 "bf_menu_sounds")));
-    rows.push_back(NotYet(Slider("Menu", "Menu sound volume", "How loud the menu sounds are.", "bf_menu_sounds_volume",
-                                 0, 100, 5, Percent, 100)));
+    rows.push_back(Toggle("Menu", "Menu sounds",
+                          "The original menus' own sounds as you move and press in our menus and the pause, made from "
+                          "your game files. Applies at once.",
+                          "bf_menu_sounds"));
+    rows.push_back(Slider("Menu", "Menu sound volume", "How loud the menu sounds are (with the master volume). Applies at once.",
+                          "bf_menu_sounds_volume", 0, 100, 5, Percent, 100));
     // The rest of the game's own Sound page (its master, music and dialogue volumes are the rows above).
     rows.push_back(GameChoice("Game sound", "Sound system",
                               "What you listen on, as the game's own setting: it mixes its sound for that.",
@@ -4661,6 +4787,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (what == "bfright") PressBf({0x0008}), Passing(0x0008);
       else if (what == "bfy") PressBf({0x8000}), Passing(0x8000);
       else if (what == "bfstart") open_ = false, PressBf({kPadStart});  // ours closed, the game's own pause (traces)
+      else if (what == "show") ShowPause();  // ours again, over whatever BF shows (the menu sounds' test: BF's quiet)
 #if defined(BF_DEV_TOOLS)
       // sdlmb4, sdlmb5: a mouse side button pressed and let go (issue 14).
       else if (what == "sdlmb4" || what == "sdlmb5") PushSideButton(what == "sdlmb4" ? SDL_BUTTON_X1 : SDL_BUTTON_X2, true);
