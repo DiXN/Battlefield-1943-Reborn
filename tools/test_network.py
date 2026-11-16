@@ -9,10 +9,11 @@ test broadcast key), community B (an official build, knows no broadcast key: wha
 key is in gmhost.py), community C (a build with no manifest: hidden), and community O, the released v0.4.6.7 host
 (origin/main's gmhost.py). Then a tiny registry of our own feeds host F forged, replayed and old messages directly.
 
-    python -I tools/test_network.py [--keep]    (--keep: leave the folder for a look; about 3 minutes, the block
-                                                 list's check runs once a minute)
+    python -I tools/test_network.py [--keep] [--hold=<s>]   (--keep: leave the folder for a look; --hold: keep
+        everything running that long at the end, for the manager's page; about 6 minutes in all)
 """
 import json
+import re
 import os
 import shutil
 import socket
@@ -373,6 +374,172 @@ def main():
     check('host F (community) refuses an official only one', 'refused: meant for the official servers only' in log)
     check('host F refuses a changed text', log.count('refused: the signature does not check') >= 2)
 
+    # ---- phase 2: the host's own limits, an official host taking official only ones, a clock ahead
+    fake2 = socket.socket()
+    fake2.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    fake2.bind(('127.0.0.78', 18789))
+    fake2.listen(1)
+    now = time.time()
+    sends2 = [gmhost.sign_network(official_key, 'everyone', 'custom', 'Future one', now=now + 200),
+              gmhost.sign_network(official_key, 'official', 'custom', 'Official only, to an official host')]
+    sends2 += [gmhost.sign_network(official_key, 'everyone', 'custom', 'Quick %d' % i) for i in range(6)]
+
+    def registry2():
+        conn, _ = fake2.accept()
+        conn.makefile('rb').readline()
+        conn.sendall((json.dumps({'op': 'registered', 'gid': '998', 'uid': 1, 'pid': 1, 'official': True,
+                                  'listed': True, 'address': '127.0.0.78:18788'}) + '\n').encode())
+        time.sleep(1)
+        for m in sends2:
+            conn.sendall((json.dumps(m) + '\n').encode())
+            time.sleep(0.2)
+        time.sleep(20)
+        conn.close()
+
+    threading.Thread(target=registry2, daemon=True).start()
+    with open(os.path.join(base, 'host_G.key'), 'w') as f:
+        f.write(os.urandom(32).hex())
+    start([PY, '-I', os.path.join(new_pkg, 'server', 'gmhost.py'), '--backend', '127.0.0.78:18789', '--listen',
+           '127.0.0.78:18788', '--game-server', '127.0.0.78:9', '--name', 'Test G', '--host-key-file',
+           os.path.join(base, 'host_G.key'), '--log', os.path.join(base, 'host_G.log')],
+          os.path.join(base, 'host_G.out'), dict(os.environ, BF_SERVER_ROOT=new_pkg, BF_DEV_BROADCAST_KEY=test_public))
+    wait_for('g', lambda: host_log('G').count('network broadcast') >= 8, 25)
+    log = host_log('G')
+    check('host G refuses one made 200 s in the future (its clock)', re.search(r'refused: made 19[0-9] s in the future', log) is not None, log[-900:])
+    check('host G (registered as official) shows an official only one', 'Official only, to an official host' in log)
+    check('host G shows 6 in a minute, then refuses the next (too many)',
+          log.count('comms: broadcast') == 6 and 'refused: too many in a minute' in log and 'Quick 5' not in log,
+          log[-900:])
+
+    # ---- phase 3: countdowns and the network wording, through the running manager (a fresh minute first)
+    time.sleep(61)
+    with open(blocked_file, 'w') as f:
+        json.dump({}, f)
+    out = mgr('broadcast', '--kind', 'custom', '--text', 'Custom countdown test, {time} left', '--minutes', '0.7',
+              '--to', 'everyone')
+    check('a custom network countdown of 42 s starts', 'countdown' in out, out)
+    check('it is said at the start, at 30 s and at 10 s, on the official host and on community host B',
+          wait_for('cd', lambda: all(host_log('official').count('Custom countdown test') == 3 for _ in [0]), 60),
+          [l for l in host_log('official').splitlines() if 'Custom countdown' in l])
+    lines = [l.split(': ', 2)[-1] for l in host_log('official').splitlines() if 'comms: broadcast' in l and 'Custom countdown' in l]
+    check('... with the time in words: 42 seconds, 30 seconds, 10 seconds',
+          [x.split(', ')[-1] for x in lines] == ['42 seconds left', '30 seconds left', '10 seconds left'], lines)
+    check('... and the backend counted community servers for it too',
+          'community servers: Custom countdown test, 30 seconds left' in read(backend_log))
+    def manager_state():
+        return json.loads(subprocess.run([PY, '-I', '-c', 'import sys,json;sys.path.insert(0,%r);import manager;print('
+                                          'json.dumps(manager.ask("/api/state")))' % os.path.join(mgr_root, 'server')],
+                                         env=menv, capture_output=True, text=True).stdout or '{}')
+
+    wait_for('end', lambda: not manager_state().get('countdowns'), 20)  # the 10 s mark came about 11 s before its end
+    st = manager_state()
+    check('the countdown is gone when its time is up, and nothing was restarted',
+          not st.get('countdowns') and 'restarting' not in read(os.path.join(data, 'logs', 'manager.log')), st.get('countdowns'))
+    check('the page state says the manager can send network broadcasts', st.get('network') is True)
+    check('the Sent list names the network message', any(s.get('network', '').startswith('everyone: 1 official')
+                                                          for s in st.get('sent', [])), st.get('sent', [])[:2])
+    for kind, words in (('restart', 'The Reborn servers restart in 5 minutes'),
+                        ('update', 'A new version of Battlefield 1943 Reborn is out. The Reborn servers update in 5 minutes')):
+        mgr('broadcast', '--kind', kind, '--minutes', '5', '--to', 'official')
+        check('--kind %s --to official: "%s"' % (kind, words),
+              wait_for(kind, lambda: words in host_log('official'), 10), host_log('official')[-300:])
+    state = json.loads(subprocess.run([PY, '-I', '-c', 'import sys,json;sys.path.insert(0,%r);import manager;print(json.dumps('
+                                       'manager.ask("/api/state")["countdowns"]))' % os.path.join(mgr_root, 'server')],
+                                      env=menv, capture_output=True, text=True).stdout or '[]')
+    check('a network restart countdown never restarts (restart false)', state and all(not c['restart'] and not c['update']
+                                                                                     for c in state), state)
+    for cd in state:
+        subprocess.run([PY, '-I', '-c', 'import sys;sys.path.insert(0,%r);import manager;manager.ask('
+                        '"/api/broadcast/cancel",{"id":%r})' % (os.path.join(mgr_root, 'server'), cd['id'])], env=menv)
+    check('the countdowns can be cancelled', 'countdown cancelled' in read(os.path.join(data, 'logs', 'manager.log')))
+    out = mgr('broadcast', '--kind', 'custom', '--text', '', '--to', 'official')
+    check('an empty network text is refused', 'Type the message first' in out, out)
+
+    # ---- phase 4: the promotion commands' edges
+    out = mgr('promote', keys['B'][:4])
+    check('promote with 4 characters of a key is refused', 'No community server' in out, out)
+    out = mgr('promote', 'ffffffffff')
+    check('promote with an unknown start is refused', 'No community server' in out, out)
+    gid_b = [l.split()[2] for l in mgr('community').splitlines() if keys['B'] in l][0]
+    out = mgr('promote', gid_b)
+    check('promote by the game number (from manager.py community)', keys['B'] in read(promoted_file), out)
+    out = mgr('promote', gid_b)
+    check('promoting it twice says so', 'promoted already' in out, out)
+    offline = os.urandom(32).hex()
+    out = mgr('promote', offline, '--note', 'Offline host')
+    check('a whole key of a host that is not online is taken', offline in read(promoted_file), out)
+    out = mgr('promoted')
+    check('manager.py promoted: the offline one "not registered now", its note kept',
+          'Offline host; not registered now' in out, out)
+    check('B shows promoted', wait_for('pb', lambda: listed()['Test B'].get('promoted') is True, 10))
+    out = mgr('demote', 'abcd')
+    check('demote with 4 characters is refused', 'No promoted host' in out, out)
+    mgr('demote', offline)
+    with open(promoted_file, 'w') as f:
+        f.write('{not json')
+    time.sleep(6.5)
+    check('a broken promoted file: the backend keeps the last list', listed()['Test B'].get('promoted') is True and
+          'not read' in read(backend_log))
+    out = mgr('promote', keys['A'])
+    check('the manager will not write over a broken file', 'not valid JSON' in out, out)
+    with open(promoted_file, 'w') as f:
+        json.dump({'servers': [{'key': keys['B']}, {'key': keys['A']}]}, f)
+
+    # ---- phase 5: the backend starts again: the promoted list and the hosts come back
+    procs[0].kill()
+    procs[0].wait(5)
+    time.sleep(1)
+    start([PY, '-I', os.path.join(ROOT, 'server', 'plasma.py'), '--host', HOST, '--theater-host', HOST,
+           '--log', backend_log, '--official-key-file', os.path.join(data, 'official.key'),
+           '--check-servers', os.path.join(data, 'attest'), '--blocked-file', blocked_file,
+           '--promoted-file', promoted_file], os.path.join(base, 'backend2.out'))
+    check('after a backend restart the hosts register again and A and B are promoted again',
+          wait_for('re', lambda: listed()['Test A'].get('promoted') and listed()['Test B'].get('promoted')
+                   and 'Test O' in listed() and listed()['Test official']['official'], 40))
+    r = ask(gmhost.sign_network(official_key, 'everyone', 'custom', 'After the restart'))
+    check('a broadcast after the restart reaches the hosts again', r.get('ok') and
+          wait_for('ar', lambda: 'After the restart' in host_log('A') and 'After the restart' in host_log('official'), 10),
+          r)
+
+    # ---- phase 6: other packages: a second official machine, a community package
+    us = os.path.join(base, 'us')
+    shutil.copytree(mgr_root, us, ignore=shutil.ignore_patterns('__pycache__'))
+    with open(os.path.join(us, 'package.json'), 'w') as f:
+        json.dump({'official': True, 'main_backend': False}, f)
+    us_data = os.path.join(base, 'us_data')
+    os.makedirs(us_data)
+    shutil.copy(os.path.join(data, 'official.key'), us_data)
+    with open(os.path.join(us_data, 'server.json'), 'w') as f:
+        json.dump({'backend': HOST}, f)
+    uenv = dict(menv, BF_SERVER_ROOT=us, BF_SERVER_DATA=us_data)
+    uenv.pop('BF_SERVER_BACKEND_BIND')
+    u = subprocess.run([PY, '-I', os.path.join(us, 'server', 'manager.py'), 'community'], env=uenv, capture_output=True,
+                       text=True, timeout=60)
+    check('a second official machine (main_backend false) asks the main backend of its server.json',
+          keys['A'] in u.stdout, u.stdout + u.stderr)
+    cm = os.path.join(base, 'cm')
+    shutil.copytree(mgr_root, cm, ignore=shutil.ignore_patterns('__pycache__'))
+    os.remove(os.path.join(cm, 'package.json'))
+    cm_data = os.path.join(base, 'cm_data')
+    os.makedirs(cm_data)
+    cenv = dict(menv, BF_SERVER_ROOT=cm, BF_SERVER_DATA=cm_data)
+    for args, want in ((['promote', keys['A']], 'only works on the official server package'),
+                       (['community'], 'only works on the official server package'),
+                       (['broadcast-key'], 'only works on the official server package')):
+        c = subprocess.run([PY, '-I', os.path.join(cm, 'server', 'manager.py')] + args, env=cenv, capture_output=True,
+                           text=True, timeout=60)
+        check('a community package refuses manager.py %s' % args[0], want in c.stdout, c.stdout + c.stderr)
+    c = subprocess.run([PY, '-I', '-c', 'import sys;sys.path.insert(0,%r);import manager;m=manager.Manager();'
+                        'm.broadcast("custom",0,"x",network="everyone")' % os.path.join(cm, 'server')], env=cenv,
+                       capture_output=True, text=True, timeout=60)
+    check('a community package refuses a network broadcast', 'only works on the official server package' in c.stderr,
+          c.stderr[-300:])
+
+    hold = [a for a in sys.argv if a.startswith('--hold=')]
+    if hold:
+        print('HOLD: manager page http://127.0.0.1:18293/ for %s s, folder %s' % (hold[0][7:], base), flush=True)
+        time.sleep(float(hold[0][7:]))
+
     for p in procs:
         p.kill()
     for p in procs:
@@ -381,6 +548,7 @@ def main():
         except subprocess.TimeoutExpired:
             pass
     fake.close()
+    fake2.close()
     print('\n%d failed%s' % (len(FAILS), ': ' + ', '.join(FAILS) if FAILS else ''))
     print('folder: %s' % base if keep else '')
     if not keep:

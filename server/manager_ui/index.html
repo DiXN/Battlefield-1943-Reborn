@@ -433,7 +433,7 @@ function renderMessages() {
   $('countdown-box').style.display = s.countdowns.length ? '' : 'none';
   sync($('countdowns'), s.countdowns.map(cd => cd.id), () => s.countdowns.map(cd => h('div', { class: 'row', style: 'margin-bottom:8px' }, h('span', { id: 'cd-' + cd.id }), h('span', { class: 'spacer' }),
     h('button', { class: 'btn small', onclick: () => act('/api/broadcast/cancel', { id: cd.id }, 'Countdown cancelled') }, 'Cancel'))));
-  s.countdowns.forEach(cd => { const e = $('cd-' + cd.id); if (e) e.textContent = (cd.update ? 'Update' : cd.restart ? 'Restart' : 'Message') + ' in ' + (cd.left >= 120 ? Math.round(cd.left / 60) + ' minutes' : cd.left + ' seconds') + ', for ' + (cd.network === 'official' ? 'every official server' : cd.network === 'everyone' ? 'everyone' : (cd.servers.length || 'no') + (cd.servers.length === 1 ? ' server' : ' servers')); });
+  s.countdowns.forEach(cd => { const e = $('cd-' + cd.id); if (e) e.textContent = (cd.update ? 'Update' : cd.restart ? 'Restart' : cd.kind === 'maintenance' ? 'Maintenance' : 'Message') + ' in ' + (cd.left >= 120 ? Math.round(cd.left / 60) + ' minutes' : cd.left + ' seconds') + ', for ' + (cd.network === 'official' ? 'every official server' : cd.network === 'everyone' ? 'everyone' : (cd.servers.length || 'no') + (cd.servers.length === 1 ? ' server' : ' servers')); });
   sync($('sent'), s.sent.map(m => [m.at, m.text]), () => s.sent.length ? s.sent.map(m => h('div', { style: 'padding:5px 0;border-bottom:1px solid #d9cfae;color:#24251f' }, h('small', { class: 'mono', style: 'color:#6b6450', text: new Date(m.at * 1000).toLocaleTimeString() + '  ' + (m.network ? '[' + m.network + ']  ' : '') }), m.text)) : 'Nothing sent yet.');
   previewMessage();
 }
