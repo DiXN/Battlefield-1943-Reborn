@@ -82,6 +82,7 @@ function Copy-Licences([string]$dest) {
     # The menu music's EA block layout follows vgmstream (bf\src\game_music.cpp; ISC licence).
     Copy-Item (Join-Path $root "bf\licences\vgmstream.txt") (Join-Path $l "vgmstream.txt")
     Copy-Item (Join-Path $root "bf\glyphs\LICENSE.txt") (Join-Path $l "Button prompts.txt")
+    Copy-Item (Join-Path $root "bf\third_party\webview2\LICENSE.txt") (Join-Path $l "Microsoft WebView2.txt")
     # Intel's CMAA2 (Apache License 2.0, Copyright (c) 2018 Intel Corporation), ported into the renderer's shaders (pull
     # request 16, src/cmaa_shaders.h): the licence's text, from the Vulkan headers' copy.
     Copy-Item (Join-Path $sdk "thirdparty\vulkan-headers\LICENSES\Apache-2.0.txt") (Join-Path $l "CMAA2 (Apache License 2.0).txt")
@@ -112,7 +113,10 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
     if ($Shaders) {
         # The launcher's button glyphs (Xelu's and Kenney's CC0 prompts, glyphs\LICENSE.txt): the player's only.
         Copy-Item (Join-Path $build "glyphs") (Join-Path $bin "glyphs") -Recurse
-        $list = Join-Path $build "data\shaders\bf1943-shaders.list"
+        # The news window's YouTube player (bf\src\news_video.cpp, docs\NEWS.md): Microsoft's WebView2 loader, signed by
+        # Microsoft (no submission of ours needed). The player's only.
+        Copy-Item (Join-Path $root "bf\third_party\webview2\x64\WebView2Loader.dll") $bin
+        $list =Join-Path $build "data\shaders\bf1943-shaders.list"
         if (-not (Test-Path $list)) { throw "no shader list in the build: $list" }
         # The list and NativeXRenderer's translations and pipelines (players draw with Vulkan only); not the Direct3D
         # 12 pipeline file, a type the check below keeps out of packages.
@@ -170,7 +174,7 @@ function New-ServerPackage([string]$sname, [bool]$official) {
     Copy-Licences $s
     $sv = Join-Path $s "server"
     New-Item -ItemType Directory -Force (Join-Path $sv "manager_ui") | Out-Null
-    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
+    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\stats.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
     Copy-Item (Join-Path $root "server\manager_ui\index.html") (Join-Path $sv "manager_ui")
     Copy-Item (Join-Path $root "tools\server_package\open_firewall.ps1") $s
     # The package's own Python (tools\server_package\make_python_runtime.py): a host installs nothing. python.org's

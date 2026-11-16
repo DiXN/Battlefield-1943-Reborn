@@ -32,6 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's folder out
 import gmhost  # noqa: E402
+import stats  # noqa: E402
 
 HEADER = 12
 MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client says fragmentSize=8096)
@@ -48,6 +49,8 @@ NAMES = {}  # a name, lower case -> (player id, held until: None while its playe
 LEADERBOARD = {}  # a name, lower case -> {'name', 'score', 'seconds', 'captures', 'at'}: the players' own totals
 MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'}}: the scoreboard, from the players' games
 LEADERBOARD_FILE = None  # where it is kept (--leaderboard), loaded at the start
+# The website's totals (server/stats.py): players who joined a match, this month's, hours played. Kept in --stats.
+STATS = stats.Stats()
 
 # ---- Protect your name (TekRantGaming, 15 Nov 2026: "a secure your username option ... prevents anyone else from
 # taking that name ... store long term progression tracking for the user", with no email and no setup from players).
@@ -466,6 +469,13 @@ async def keep_accounts_saved(every):
     while True:
         await asyncio.sleep(every)
         save_accounts()
+
+
+async def keep_stats_saved(every):
+    """The website's totals (--stats), written when they changed: a backend stopped hard loses at most this long."""
+    while True:
+        await asyncio.sleep(every)
+        STATS.save()
 
 
 def challenge(address):
@@ -905,6 +915,7 @@ class TheaterClient(Client):
             await self.send('EGAM', 0, 0, {'TID': tid, 'LID': f.get('LID', ''), 'GID': f.get('GID', '')})
             if not g:
                 return
+            STATS.joined(self.xuid)  # the website's player counts (server/stats.py)
             self.xnaddr = f.get('R-XNADDR', '')
             pid = next(TheaterClient.pids)
             # One ticket per join: the joiner shows the one from EGEG to the host, which compares it with the one
@@ -1136,6 +1147,8 @@ class Registry:
                with the version gate (VERSION_GATE): "required_version" too, and for a game that says no "version"
                (one from before the gate) the servers are one line telling the player to restart the game
       anyone:  {"op": "find", "address", "port"} -> {"op": "found", "server"|null}   Direct connect
+      anyone:  {"op": "stats"} -> {"op": "stats", "players", "players_month", "month", "hours", "since"}   the
+               website's totals (server/stats.py; its feed asks): counts only
       player:  {"op": "reserve", "gid", "version"?, "platform"?} -> {"op": "reserved"}  the player's next Quick Match
                joins that game; with the version gate a game older than the newest release (or one that says no
                version) gets {"op": "outdated", "required", "yours"} and no reservation
@@ -1421,6 +1434,7 @@ class Registry:
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
+                    STATS.status(gid, GAMES[gid]['AP'])  # the website's hours played (server/stats.py)
                     GAMES[gid]['map'] = m.get('map', GAMES[gid]['map'])
                     GAMES[gid]['next_map'] = str(m.get('next_map', ''))[:32]
                     names = m.get('names', [])
@@ -1505,6 +1519,9 @@ class Registry:
                         writer.write((json.dumps({'op': 'recover', 'ok': False}) + '\n').encode())
                 elif op == 'name' and 'signed' in m:
                     writer.write((json.dumps(self.signed_name(m, address)) + '\n').encode())
+                elif op == 'stats':
+                    # The website's totals (server/stats.py, read by its feed): counts only, nothing about anyone.
+                    writer.write((json.dumps(dict(STATS.totals(), op='stats')) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
                     writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
@@ -1590,6 +1607,7 @@ class Registry:
         finally:
             if gid:
                 GAMES.pop(gid, None)
+                STATS.gone(gid)
                 MATCH_SCORES.pop(gid, None)
                 self.note('game %s gone (server disconnected)' % gid)
             writer.close()
@@ -1734,6 +1752,11 @@ async def main():
                     help="a file keeping the players' accounts (Protect your name: protected names and progress)")
     ap.add_argument('--accounts-save-every', type=float, default=30.0,
                     help='seconds between two writes of the accounts file (only when something changed)')
+    ap.add_argument('--stats', default='',
+                    help="a file keeping the website's totals (server/stats.py: players who joined a match, by month, "
+                         "and hours played; totals only, ids kept hashed)")
+    ap.add_argument('--stats-save-every', type=float, default=30.0,
+                    help='seconds between two writes of the stats file (only when something changed)')
     ap.add_argument('--test-progression', action='store_true',
                     help='store rank and achievement IDs submitted by local test clients')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0: run until stopped)')
@@ -1754,6 +1777,8 @@ async def main():
     ACCOUNTS_FILE = args.accounts or None
     if ACCOUNTS_FILE and os.path.exists(ACCOUNTS_FILE):
         load_accounts(ACCOUNTS_FILE)
+    STATS.path = args.stats or None
+    STATS.load()
     for n, address in enumerate(args.game, 1):
         host, port = address.rsplit(':', 1)
         GAMES[str(n)] = {'GID': str(n), 'LID': '1', 'I': host, 'P': int(port), 'HU': n, 'HN': 'bf1943-server-%d' % n,
@@ -1800,8 +1825,13 @@ async def main():
             MAINTENANCE.update(file=args.maintenance_file, note={'said': None, 'say': gate_note})
             maintenance_now()
         accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
+        stats_task = asyncio.ensure_future(keep_stats_saved(max(0.5, args.stats_save_every)))
         log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
                                              ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
+        t = STATS.totals()
+        log.write('%s stats: %d players, %d this month, %d hours%s\n' % (
+            time.strftime('%H:%M:%S'), t['players'], t['players_month'], t['hours'],
+            ' (%s)' % STATS.path if STATS.path else ' (kept in memory only)'))
         if args.required_version:
             VERSION_GATE.update(required=args.required_version.lstrip('vV'), platforms=None, source='--required-version')
             gate_note('version gate: players need v%s (--required-version)' % VERSION_GATE['required'])
@@ -1818,7 +1848,9 @@ async def main():
         if feed_task:
             feed_task.cancel()
         accounts_task.cancel()
+        stats_task.cancel()
         save_accounts()
+        STATS.save()
 
 
 if __name__ == '__main__':
