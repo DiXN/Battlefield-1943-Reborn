@@ -47,7 +47,9 @@ Reborn servers and community servers, and the options of a modern PC release.
 | 🖱️ **Keyboard and mouse** in every seat, planes flown with the mouse | 🎮 **Any controller**, with Xbox, PlayStation or Steam Deck prompts | 🎚️ **Graphics presets** from Potato to Ultra |
 | 🎙️ **Proximity voice chat** and text chat, with a profanity filter | 🔒 **Custom Match**: your own match, online or LAN, with a password | 🔎 **Server browser** with regions, tick rates and Direct connect |
 | 🗺️ **Lettered flags** and a map of the whole battle in the menu | 🔄 **Updates itself** at every start | 🚂 **Add to Steam** with the game's artwork |
-| 🐧 **Linux** as one AppImage | 🖧 **Host your own servers** from a page in your browser | 💬 **[Join the Discord](https://discord.gg/8eakYSvBZS)** right from Home |
+| 🏅 **Stats & Awards, Leaderboards** and **Achievements**, all 12 plus 3 of Reborn's own | 🏷️ **Clan tags** and **a name you can protect**, with no email or password | ⚖️ **Fairer teams**, with no points lost when you are moved |
+| 🐧 **Linux and Steam Deck** as one AppImage, Ubuntu 22.04 and newer | 🖧 **Host your own servers** from a page in your browser | 📰 **News** on the main menu and **your match on Discord** |
+| 🐞 **Report an issue** from the game, no GitHub account needed | 🔊 **The original menu sounds** in our menus | 💬 **[Join the Discord](https://discord.gg/8eakYSvBZS)** right from Home |
 
 ## The battlefield
 
@@ -92,26 +94,42 @@ player logs in to and which lists every server.
   from a page in the browser, each with its own name, description, maps, players, region and tick rate. See
   [docs/SERVER.md](docs/SERVER.md)
 - **Custom Match**: a match on your own PC for you and your friends, online or LAN, with a password if you want one
-- Messages from a server to everyone on it, for an update or a restart
+- **Fairer teams** on Reborn servers: lopsided teams are evened out one player at a time, with no points lost
+- Messages from a server to everyone on it, for an update or a restart, and a clear message when a server is full or
+  the servers are closed for maintenance
 
 </td>
 <td width="55%"><img src="docs/images/readme/server-browser-community.jpg" alt="Community servers"></td>
 </tr>
 </table>
 
+## Your progress and your name
+
+- **Stats & Awards**: your rank, kills, flags, headshots, repairs, your time in each kit and vehicle and your results
+  on each map, counted by the Reborn servers, for all time, this month and this week
+- **Leaderboards**: Score, Kills, K/D, Flags and Time, with your own row pinned
+- **Achievements**: the game's 12 plus 3 of Reborn's own, with your progress on each, how many players have it, and a
+  popup with a chime when you unlock one
+- **Clan tags**: 2 to 4 letters or digits before your name, as [TAG]YourName, on the menus, the scoreboard, the kill
+  feed and in chat
+- **Protect your name** with a recovery code, no email or password: your name, rank and stats come back on a new PC
+  with the code, and anyone else using your name plays with a number added
+
 ## Getting started
 
-**You need:** Windows 10 or 11 (64 bit), or Linux on x86_64 (glibc 2.38 or newer, X11 or XWayland), a graphics card
-with Vulkan (NVIDIA GTX 10 series, AMD RX 5000 series, Intel Arc or newer recommended), and your own copy of
-Battlefield 1943 for Xbox 360 (Xbox Live Arcade, title ID `5841097E`): its package file from your console.
+**You need:** Windows 10 or 11 (64 bit), or Linux on x86_64 (glibc 2.35 or newer: Ubuntu 22.04, Linux Mint 21 and
+newer, X11 or XWayland), a graphics card with Vulkan (NVIDIA GTX 10 series, AMD RX 5000 series, Intel Arc or newer
+recommended), a processor with SSE4.2 (Intel Core i3, i5, i7 or AMD FX, Ryzen and newer), 8 GB of memory, and your
+own copy of Battlefield 1943 for Xbox 360 (Xbox Live Arcade, title ID `5841097E`): its package file from your console.
+The full list: [docs/SYSTEM-REQUIREMENTS.md](docs/SYSTEM-REQUIREMENTS.md).
 
 1. Download **BF1943-Reborn-...-windows-x64.zip** from the [latest release](https://github.com/TekRantGaming/Battlefield-1943-Reborn/releases/latest)
    and unzip it somewhere you can write to (for example `C:\Games`, not Program Files).
 2. Run **bf1943.exe**.
 3. The first time, a short setup: select your Battlefield 1943 package (the single file in `5841097E\000D0000` from your
-   console's storage, or a folder that holds it; it is installed into the folder `game`, once), choose your soldier
-   name, your display, graphics, controls and voice chat, then the game prepares its shaders, so effects do not
-   stutter the first time you see them.
+   console's storage, or a folder that holds it; it is installed into the folder `game`, once). The game then prepares
+   its shaders, once, so effects do not stutter the first time you see them. Then choose your soldier name and clan
+   tag (and protect your name if you like), your display, graphics, controls and voice chat.
 4. **Quick Play** joins the busiest server with room, or pick one in the **Server Browser**.
 
 Your settings, logs and crash reports stay in the folder `user` next to the game.
@@ -125,15 +143,16 @@ not cleared this build's files.
 1. Download **BF1943-Reborn-linux-x86_64.AppImage** from the [latest release](https://github.com/TekRantGaming/Battlefield-1943-Reborn/releases/latest)
    into a folder of its own (for example `~/Games/BF1943-Reborn`): its `game` and `user` folders go beside it.
 2. Make it runnable (right click it, **Properties**, **Allow executing file as program**, or `chmod +x`) and run it.
-3. Everything else works as on Windows. It needs `curl` for updates; tested on a ROG Ally with Bazzite.
+3. Everything else works as on Windows. It needs `curl` for updates; tested on a ROG Ally with Bazzite. Videos in the
+   news window open on YouTube in your browser.
 
 ### Updates
 
 **The game updates itself.** At every start it looks at this page's latest release; a newer one is downloaded, checked
 against the release's `SHA256SUMS.txt`, installed and started. On Windows only the files that changed are replaced, and
 if any of them cannot be, every one is put back; on Linux the AppImage replaces itself. Your `game` and `user` folders
-are never touched. The servers only let the newest version in: when a newer one is out, a pop-up says so, with
-**Update**. Builds before 0.2.0 cannot update themselves: download the latest once and unzip it over your folder.
+are never touched, and the shaders are prepared once more for the new version. The servers only let the newest version
+in: when a newer one is out, a pop-up says so, with **Update**. Builds before 0.2.0 cannot update themselves: download the latest once and unzip it over your folder.
 
 ## Settings
 
@@ -160,7 +179,7 @@ Everything is in our Settings menu, from the main menu and the pause menu, with 
 
 ### Display
 - **Windowed or borderless**, the monitor, window size, resolution and **refresh rate**
-- **Frame rate limit** from 30 to 240, or none, and **VSync**
+- **Frame rate limit** from 30 to 240, or none, and **VSync**; **Future frame rendering** for more frames (off by default)
 - **Ultrawide**: the game fills 21:9, 32:9 and other wide screens with a wider view, the HUD at the screen's sides or in
   the middle; or Letterbox 16:9
 - **Field of view** on foot and in vehicles, camera shake, brightness and gamma, HUD scale and minimap size
@@ -173,13 +192,15 @@ Everything is in our Settings menu, from the main menu and the pause menu, with 
 <td valign="middle">
 
 ### Controls
+- **By device**: pick **Keyboard & Mouse** or **Controller** and see only its own settings and bindings, with a picture
+  of your device and the chosen key or button lit up
 - **Keyboard and mouse** beside any controller, every key rebindable, two keys and two mouse buttons for each action
 - The **mouse aims** guns and turrets in every seat, **flies planes**, and looks around from a driver's or passenger's seat
 - Mouse sensitivity, with its own for aiming down sights and for vehicles; aim hold or toggle; **Iron Sight** for the SMGs
 - **Controllers** play as on the console, with the game's own layouts (Normal, Southpaw, Lefty), sensitivity, dead zone,
   inversion, vibration and remapping
-- **Button prompts** for Xbox 360, Xbox Series, PlayStation 3, PlayStation 5, Steam Deck or the keys, changing as you
-  switch between controller and keyboard
+- **Button prompts** for Xbox Series, PlayStation 3, PlayStation 5, Steam Deck or the keys, from Kenney's Input
+  Prompts, or the game's own Xbox 360 style, changing as you switch between controller and keyboard
 
 </td>
 </tr>
@@ -188,8 +209,10 @@ Everything is in our Settings menu, from the main menu and the pause menu, with 
 
 ### Audio, Gameplay and Enhancements
 - **Volume** for master, music, effects and voices, menu music and sounds, the game's voiceover language
+- **The original menu sounds** in our menus, and **achievement popups** with their chime, each with its own volume
 - **Voice chat**: push to talk, open mic or off, voice volume and microphone sensitivity
-- **The game in** English, French, German, Italian, Spanish or Japanese, aim assist, text chat, performance metrics
+- **The game in** English, French, German, Italian, Spanish or Japanese, aim assist, text chat, performance metrics,
+  **Discord status**
 - **Enhancements**: what Reborn adds to the game, such as the lettered flags
 
 </td>
@@ -200,7 +223,7 @@ Everything is in our Settings menu, from the main menu and the pause menu, with 
 ## Controls
 
 Keyboard and mouse are on by default, beside any controller. Every key can be changed in Settings > Controls >
-Keyboard bindings.
+Keyboard & Mouse.
 
 | Key | On foot | In a vehicle |
 |---|---|---|
@@ -235,7 +258,7 @@ This is an alpha. The main ones:
 
 - The first person weapon and hands move with the game's own updates, not every frame, at high frame rates (the view
   itself turns on every frame).
-- Stats, awards and leaderboards are kept only while the Reborn backend runs: they reset when it restarts.
+- Stats, awards and leaderboards count only on Reborn servers, and as this is an alpha they may still be reset.
 - No HDR. On 16:10 and 4:3 screens Fill screen crops the picture's sides: Settings > Display > Aspect ratio >
   Letterbox 16:9 shows all of it.
 - Linux: the Vulkan renderer needs X11 or XWayland; the game's tutorial (Help) can drop back to the menu at once; the
@@ -249,16 +272,26 @@ This is an alpha. The main ones:
 
 ### Reporting a problem
 
-Use **Report an issue** on the main menu: it shows your log file and opens our Discord. Or open an
-[issue](https://github.com/TekRantGaming/Battlefield-1943-Reborn/issues) with what you did, what you saw and what you
-expected, your CPU and graphics card, and the files from `user\crashes` for a crash.
+Use **Report an issue** on the main menu: say what happened, tick what goes with it (your PC and settings, the end of
+the log, a crash report, a screenshot), and send it from the game with no GitHub account, open it on GitHub with your
+own, or copy it. A report that could not be sent is tried again at the next start. Or open an
+[issue](https://github.com/TekRantGaming/Battlefield-1943-Reborn/issues) yourself with what you did, what you saw and
+what you expected, your CPU and graphics card, and the files from `user\crashes` for a crash.
 
 ### Privacy
 
 - **Share graphics data** (on by default, Settings > Gameplay > Sharing) sends the graphics pipelines your game builds
   (render settings and shader numbers: no game files, no name, nothing about you) to our server, at most every 15
   minutes and only when something new was built, so the next update has them ready and everyone gets less stutter.
-- Playing online, the backend sees the name you chose and your IP address, as any game server does.
+- Playing online, the backend sees the name you chose and your IP address, as any game server does. Your stats are
+  kept under your soldier name.
+- **Protect your name** needs no email or password, and your recovery code never leaves your PC: the game only proves
+  it has the code. Keep a copy somewhere safe, as nobody else can give it back to you.
+- **Report an issue** sends only what you ticked, and you see all of it first. Your user name, PC name, addresses,
+  recovery code and email addresses are taken out before anything is sent.
+- **Discord status** talks only to the Discord app on your own PC, and shows what you are playing, never a server
+  address or another player's name. Turn it off in Settings > Gameplay.
+- **The news window** reads our news from this repository on GitHub; its videos are YouTube's own player.
 - **Voice and text chat** go through the server you play on: your voice only to the players near you, and only while
   you hold push to talk (or speak, with Open mic); the game opens your microphone only when you first use it. Servers
   keep a log of text chat for moderation; voice is passed on, never recorded.
@@ -323,7 +356,11 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
   the mouse in the game's own input ([pull request 11](../../pull/11)); the mouse in every vehicle seat, Custom Match
   with LAN, key bindings with two keys, HUD scale and minimap size, and the experimental tick rates
   ([pull request 16](../../pull/16)); Custom Match passwords, Iron Sight, motion blur and menu work
-  ([pull request 20](../../pull/20)).
+  ([pull request 20](../../pull/20)); the server stall diagnostics ([pull request 22](../../pull/22)).
+- **[@DiXN](https://github.com/DiXN)**: the big performance work, the renderer's own drawing thread, Future frame
+  rendering, the audio crackling fix, the leaner Linux build and Wayland ([pull request 28](../../pull/28)).
+- **[@Erubadhron](https://github.com/Erubadhron)**: deploy map clicks that land where you click
+  ([pull request 31](../../pull/31)).
 - [**ReXGlue SDK**](https://github.com/rexglue/rexglue-sdk) (BSD 3 Clause), derived from
   [**Xenia**](https://github.com/xenia-project/xenia): the recompiler and runtime.
 - **NativeXRenderer** by Gustavo Garcia (MIT): the Vulkan renderer. **GHMetalRecomp** (MIT): its NativeXRenderer
@@ -335,8 +372,8 @@ steps: [BUILDING.md](BUILDING.md). Third party code and its licences: [THIRD_PAR
   **NVIDIA DLSS** (NVIDIA RTX SDKs licence): libraries the renderer is built with.
 - **FFmpeg** (its decoders only) and **libmspack**, both LGPL 2.1, in the runtime. **vgmstream** (ISC): the layout of
   the game's menu music. **Oswald** (SIL Open Font Licence): the menus' font.
-- Button prompts: **Xelu's Free Controllers and Keyboard Prompts** by Nicolae Berbece (CC0) and **Input Prompts** by
-  Kenney (CC0). The Discord and Steam marks from **Simple Icons** (CC0).
+- Button prompts: **Input Prompts** by [Kenney](https://kenney.nl/assets/input-prompts) (CC0); our controller
+  drawings in Settings > Controls follow its outlines. The Discord and Steam marks from **Simple Icons** (CC0).
 - Add to Steam's artwork and More from TRG Studios' pictures from [**SteamGridDB**](https://www.steamgriddb.com),
   downloaded when used.
 

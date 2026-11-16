@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.4.7 (16 November 2026): stats, leaderboards and achievements, clan tags, protect your name, a news window
+
+An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
+themselves, and the servers only let the newest version in.
+
+**Your progress**
+- **Stats & Awards.** Your own service record on the main menu: your rank and the next one, kills, deaths, K/D,
+  score, flags, rounds won, headshots and repairs, your time in each kit and vehicle, your results on each map and
+  your latest awards. Counted by the Reborn servers from the game itself, for all time, this month and this week.
+- **Leaderboards are back.** Score, Kills, K/D, Flags and Time, for all time, this month and this week (LB and RB
+  switch boards, X the period), with your own row pinned under the table. The K/D board needs 50 kills.
+- **Achievements: all 12, plus 3 new Reborn ones, with a popup and sound.** Each shows your progress and how many
+  players have it. Reborn's own: I am reborn (your first multiplayer match), I am forever (a match on a community
+  server) and I am inevitable (a Custom Match you host). Settings > Audio has Achievement popups and their volume.
+
+**Your name**
+- **Clan tags: [TAG]YourName.** 2 to 4 letters or digits before your name, set on your name page (RB, F4 or a click
+  moves between the tag and the name). They show on the menus, the scoreboard, the leaderboards, the kill feed, the
+  name tags and in chat. Tags that pretend to be the developers or staff, and rude ones, are refused, and the page
+  says why.
+- **Protect your name with a recovery code: no email or password.** On your name page, X (F2) protects your name and
+  gives you a code, also saved as "BF1943 Reborn recovery code.txt" in your user folder. On a new PC, LB (F3) and the
+  code bring back your name, rank and stats. Anyone else using a protected name plays with a number added.
+- **Paste your recovery code.** Ctrl+V or Shift+Insert, or a right click and PASTE, in the recovery code, tag and name
+  boxes.
+
+**Better matches**
+- **Fairer teams, with no points lost when moved.** On Reborn servers, when one team has 2 or more players more than
+  the other, players waiting to spawn are moved one at a time, and their score comes with them. A Change Team that
+  would leave the teams 2 or more apart is refused, and the scoreboard's team names follow your team after a switch.
+  Server hosts: Team balance is on by default for managed servers.
+- **Clear messages for full servers and maintenance.** A full server says SERVER FULL with its player count, and while
+  the servers are closed for maintenance, the main menu and the server browser say SERVERS CLOSED with the reason.
+- **Fewer server crashes.**
+
+**New in the menus**
+- **News window.** It opens once at each start with the state of the Reborn servers, our news, what is coming up and
+  our videos (they play in the game on Windows; on Linux and the Steam Deck, A opens them on YouTube). The NEWS row on
+  the main menu opens it again.
+- **Report an issue, with no GitHub account needed.** A three step form on the main menu: say what happened, tick
+  what goes with it (you see all of it before it is sent), then send it from the game, open it on GitHub with your
+  own account, or copy it.
+- **Easier controls setup by device.** Settings > Controls, and the first start's Controls step, open on two cards,
+  Keyboard & Mouse or Controller, each with only its own settings and bindings and a picture of your device.
+- **New button prompts for every controller**, from Kenney's Input Prompts: Xbox Series, PlayStation 3,
+  PlayStation 5, Steam Deck and the keyboard and mouse (the Xbox 360 style keeps the game's own). **Plus the original
+  menu sounds** in our launcher, menus, pause menu and on screen keys, made from your own game files. Settings > Audio
+  has Menu sounds and their volume.
+- **Discord status.** Your Discord profile shows the menus, or your map, mode, team, server and match time; never a
+  server address or another player's name. Settings > Gameplay > Discord status.
+- **Custom Match:** on a controller, A on Server name or Password opens the on screen keys.
+
+**Smoother and lighter**
+- **Much less memory**: about 340 MB less graphics memory and about 190 MB less system memory in a match.
+- **Better frame rates, especially on older PCs.** On PCs with few cores the game sleeps instead of spinning while it
+  waits; the renderer draws on a thread of its own with four cores or more; an unlimited frame rate is really
+  unlimited, and VSync off no longer holds you to your screen's rate. Future frame rendering is a new choice in
+  Settings > Display (off by default: more frames, a little more input lag). The menus run at 60 FPS and 30 when idle,
+  and a minimised game at 30. With work by [@DiXN](https://github.com/DiXN) ([pull request 28](../../pull/28)).
+- **Faster startup and a smaller download.** The window opens sooner, the download is 161 MB smaller, and the Visual C++
+  runtime now comes with the game.
+- **Audio crackling fixed.** By [@DiXN](https://github.com/DiXN) ([pull request 28](../../pull/28)).
+- **Shaders prepared once, right after setup** (and once after each update), on a page of their own.
+- **Older processors** (Intel Core 2, AMD Phenom II) get a clear message at start instead of the game closing.
+
+**Linux and Steam Deck**
+- **Works on more Linux versions, including Ubuntu 22.04 and Linux Mint 21** (and Pop!_OS 22.04, Zorin 17, Debian 12
+  and newer).
+- **Wayland:** the window is drawn at its real size, and the Linux build is leaner. By [@DiXN](https://github.com/DiXN)
+  ([pull request 28](../../pull/28)).
+
+**Also**
+- **Deploy map clicks land where you click**, on every map. By [@Erubadhron](https://github.com/Erubadhron)
+  ([pull request 31](../../pull/31)).
+- **The server browser's Official tab is now Reborn**, and our servers carry a REBORN badge.
+- General bug fixes.
+
+**Thanks** to everyone who played and reported, and to DiXN, Erubadhron, ThatZaliaSGuy (server stall diagnostics,
+[pull request 22](../../pull/22)) and Kenney.
+
 ## 0.4.6.4 (15 November 2026): no more closing at the shaders page
 
 **Fixed**
