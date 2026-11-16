@@ -638,11 +638,17 @@ def lan_addresses():
 
 class Upnp:
     """The router's port forwarding (UPnP IGD), with the standard library: found once by SSDP, then asked to map each
-    port to this machine and for the router's public address."""
+    port to this machine and for the router's public address. Each forward lasts LEASE seconds unless asked for again
+    (the manager renews them while it runs) and is taken away when the manager closes (TekRantGaming, 16 Nov 2026: the
+    forwards were permanent and never removed, so a host who stopped hosting kept an open port on the router)."""
+
+    LEASE = 3600  # seconds; the manager asks again every RENEW
+    RENEW = 1200
 
     def __init__(self):
         self.control, self.service, self.local, self.looked = None, None, None, 0.0
         self.external, self.error = '', ''
+        self.mapped = {}  # (port, 'UDP' or 'TCP') -> the lease the router took (0: permanent, all some routers take)
 
     def find(self):
         if self.control or time.time() - self.looked < 300:
@@ -697,24 +703,50 @@ class Upnp:
         with urllib.request.urlopen(request, timeout=5) as r:
             return r.read().decode('utf-8', 'replace')
 
-    def open(self, ports):
-        """Asks the router for each (port, 'UDP' or 'TCP'); the ones it would not open."""
+    def add(self, port, proto, lease):
+        self.call('AddPortMapping', [('NewRemoteHost', ''), ('NewExternalPort', port), ('NewProtocol', proto),
+                                     ('NewInternalPort', port), ('NewInternalClient', self.local),
+                                     ('NewEnabled', 1),
+                                     ('NewPortMappingDescription', 'Battlefield 1943 Reborn %d' % port),
+                                     ('NewLeaseDuration', lease)])
+
+    def open(self, ports, permanent=False):
+        """Asks the router for each (port, 'UDP' or 'TCP') for LEASE seconds (or for good: `permanent`, or a router
+        that takes nothing else, its error 725 OnlyPermanentLeasesSupported); the ones it would not open."""
         if not self.find() or not self.local:
             return ['%s %d' % (proto, port) for port, proto in ports]
         failed = []
         for port, proto in ports:
+            lease = 0 if permanent else self.LEASE
             try:
-                self.call('AddPortMapping', [('NewRemoteHost', ''), ('NewExternalPort', port), ('NewProtocol', proto),
-                                             ('NewInternalPort', port), ('NewInternalClient', self.local),
-                                             ('NewEnabled', 1),
-                                             ('NewPortMappingDescription', 'Battlefield 1943 Reborn %d' % port),
-                                             ('NewLeaseDuration', 0)])
+                try:
+                    self.add(port, proto, lease)
+                except urllib.error.HTTPError as e:
+                    if not lease or e.code != 500:  # a SOAP fault comes as 500
+                        raise
+                    lease = 0
+                    self.add(port, proto, 0)
+                self.mapped[(port, proto)] = lease
             except (OSError, ValueError):
                 failed.append('%s %d' % (proto, port))
         with contextlib.suppress(OSError, ValueError):
             m = re.search(r'<NewExternalIPAddress>([^<]*)<', self.call('GetExternalIPAddress', []))
             if m:
                 self.external = m.group(1).strip()
+        return failed
+
+    def close(self, ports=None):
+        """Takes the forwards this manager made away again (all, or these of them); the ones the router would not
+        take away (a leased one still ends by itself)."""
+        keys = list(self.mapped) if ports is None else [k for k in ports if k in self.mapped]
+        failed = []
+        for port, proto in keys:
+            try:
+                if self.control:
+                    self.call('DeletePortMapping', [('NewRemoteHost', ''), ('NewExternalPort', port), ('NewProtocol', proto)])
+            except (OSError, ValueError):
+                failed.append('%s %d' % (proto, port))
+            self.mapped.pop((port, proto), None)
         return failed
 
 
@@ -745,6 +777,9 @@ class Manager:
         self.backend_mode = ''
         self.upnp = Upnp()
         self.ports_note = ''
+        self.ports_lock = threading.Lock()           # one router request round at a time (open, renew, close)
+        self.ports_at = 0.0                          # when the router's forwards were last asked for
+        self.keep_servers = False                    # quit with the servers left running (their forwards kept)
         self.countdowns = []                         # running countdowns
         self.sent = []                               # the last messages sent
         self.seq = int(time.time())
@@ -991,20 +1026,55 @@ class Manager:
             with contextlib.suppress(OSError):
                 os.remove(pids)
 
-    def open_ports(self):
-        """The router's ports (UPnP), where the settings ask for it; what could not be opened is said on the page."""
-        if not self.cfg['upnp']:
-            self.ports_note = ''
-            return
+    def wanted_ports(self):
         ports = [(s['port'], 'UDP') for s in self.cfg['servers']]
         if self.own_backend():
             ports += [(p, 'TCP') for p in BACKEND_PORTS]
+        return ports
+
+    def open_ports(self, quiet=False):
+        """The router's ports (UPnP), where the settings ask for it; what could not be opened is said on the page.
+        Forwards no longer wanted (a server removed, its port changed, UPnP turned off) are taken away; the wanted ones
+        are asked for again, which also renews their lease (watch, every Upnp.RENEW)."""
+        if not self.cfg['upnp']:
+            self.ports_note = ''
+            if self.upnp.mapped:
+                threading.Thread(target=self.close_ports, args=('UPnP turned off',), daemon=True).start()
+            return
+        ports = self.wanted_ports()
 
         def work():
-            failed = self.upnp.open(ports)
-            self.ports_note = ('Open these on your router: ' + ', '.join(failed)) if failed else 'Router ports opened (UPnP).'
-            self.note('router ports: ' + self.ports_note)
+            with self.ports_lock:
+                gone = [k for k in self.upnp.mapped if k not in ports]
+                if gone:
+                    self.upnp.close(gone)
+                    self.note('router ports closed (no longer used): ' + ', '.join('%s %d' % (p, n) for n, p in gone))
+                failed = self.upnp.open(ports)
+                self.ports_at = time.time()
+            note = ('Open these on your router: ' + ', '.join(failed)) if failed else 'Router ports opened (UPnP).'
+            if not quiet or note != self.ports_note:
+                self.ports_note = note
+                self.note('router ports: ' + note)
         threading.Thread(target=work, daemon=True).start()
+
+    def close_ports(self, why):
+        """Takes away every router forward this manager made (when it closes, or UPnP is turned off)."""
+        with self.ports_lock:
+            if not self.upnp.mapped:
+                return
+            names = ', '.join('%s %d' % (p, n) for n, p in self.upnp.mapped)
+            failed = self.upnp.close()
+        self.note('router ports closed (%s): %s%s' % (why, names, ('; the router would not take away ' + ', '.join(failed) +
+                                                                    ' (they end within an hour by themselves)') if failed else ''))
+
+    def keep_ports(self):
+        """Quit with the servers left running: their forwards are asked for for good, since nothing renews them now
+        (the next manager start takes them over again and closes them when it closes)."""
+        with self.ports_lock:
+            if self.cfg['upnp'] and self.upnp.mapped:
+                failed = self.upnp.open(list(self.upnp.mapped), permanent=True)
+                self.note('router ports kept open for the servers left running%s' % (
+                    (': could not keep ' + ', '.join(failed)) if failed else ''))
 
     def server_status(self, n):
         s = self.cfg['servers'][n - 1]
@@ -1072,6 +1142,10 @@ class Manager:
                     with contextlib.suppress(RuntimeError):
                         self.ensure_backend()
                 self.tick_countdowns()
+                # The router's forwards are leased (Upnp.LEASE): asked for again before they end.
+                if self.cfg['upnp'] and any(self.upnp.mapped.values()) and time.time() - self.ports_at > Upnp.RENEW:
+                    self.ports_at = time.time()
+                    self.open_ports(quiet=True)
             except Exception as e:  # the watch never ends for one bad turn
                 self.note('watch: %s: %s' % (type(e).__name__, e))
 
@@ -1758,6 +1832,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/firewall':
             open_firewall(m)
         elif path == '/api/quit':
+            m.keep_servers = bool(data.get('keep_servers'))
             if not data.get('keep_servers'):
                 threading.Thread(target=m.stop_all, daemon=True).start()
             m.note('the manager is closing%s' % (' (the servers keep running until this machine restarts)' if data.get('keep_servers') else ''))
@@ -1960,6 +2035,14 @@ def run(args):
     restart = m.restart_after_quit
     if not restart:
         m.stop_all()
+    # The router's forwards (UPnP) go with the manager, unless servers are really left running (quit --keep-servers;
+    # 16 Nov 2026: the stop_all above still stops them, so today they always go).
+    with m.lock:
+        alive = any(s.get(k) and s[k].poll() is None for s in m.run.values() for k in ('game', 'host'))
+    if alive and not restart:
+        m.keep_ports()
+    else:
+        m.close_ports('an update restarts the manager' if restart else 'the manager closed')
     server.shutdown()
     with contextlib.suppress(OSError):
         os.remove(STATE)

@@ -15,5 +15,5 @@ On a VPS with no desktop, run it as a service that starts at boot and comes back
 bf1943-reborn-server.service in this folder says how (a user of its own, its paths, systemctl enable --now). A server
 that crashes is started again within seconds; its stack is kept in <data>/logs/server<n>/game.out.
 
-This archive needs python3 (3.9 or newer) and a 64 bit Linux with glibc 2.39 or newer. The AppImage carries its own
-Python.
+This archive needs python3 (3.9 or newer) and a 64 bit Linux with glibc 2.35 or newer (Ubuntu 22.04, Linux Mint 21,
+Debian 12 and newer). The AppImage carries its own Python and needs the same glibc.

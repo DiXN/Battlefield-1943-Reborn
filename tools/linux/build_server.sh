@@ -34,7 +34,10 @@ stage() {
   cp -a "$S/bf1943" "$S"/*.so* "$T/bin/"
   if [ -d "$S/fonts" ]; then cp -a "$S/fonts" "$T/bin/"; fi
   if [ -d "$S/licences" ]; then cp -a "$S/licences" "$T/licences"; else echo "warning: no licences folder in $S"; fi
-  cp "$WT/server/manager.py" "$WT/server/gmhost.py" "$WT/server/plasma.py" "$WT/server/ed25519.py" "$WT/server/stats.py" "$WT/server/text_filter.py" "$T/server/"
+  # Every module plasma.py imports (16 Nov 2026: player_stats.py was missing, so the package's own backend, LAN only
+  # mode and the manager's commands that load plasma.py, stopped at the start); as tools/make_packages.ps1 copies.
+  cp "$WT/server/manager.py" "$WT/server/gmhost.py" "$WT/server/plasma.py" "$WT/server/ed25519.py" "$WT/server/stats.py" \
+    "$WT/server/player_stats.py" "$WT/server/text_filter.py" "$T/server/"
   cp "$WT/server/manager_ui/index.html" "$T/server/manager_ui/"
   cp "$WT/tools/linux/server/bf1943-server" "$T/bf1943-server"
   chmod +x "$T/bf1943-server" "$T/bin/bf1943"
@@ -43,9 +46,16 @@ stage() {
     "$ONLINE_HOST" > "$T/server.default.json"
   # The C++ runtime from GCC 13, for systems with an older one, and the X11 and Wayland client libraries the program
   # is linked with, for a host without a desktop (bf1943-server uses each only when the system has none).
-  for lib in libstdc++.so.6 libgcc_s.so.1; do cp -L "$(g++ -print-file-name=$lib)" "$T/lib/"; done
+  # BF_SERVER_LIB_DIR: take them from the system the game was built on (the Ubuntu 22.04 root's
+  # /srv/jammy/usr/lib/x86_64-linux-gnu, build_in_ubuntu2204.sh), not this one: this system's need its newer glibc
+  # (16 Nov 2026: copies from Ubuntu 24.04 needed glibc 2.38, so the archive failed on 22.04 and Debian 12 servers).
+  LIBDIR="${BF_SERVER_LIB_DIR:-}"
+  for lib in libstdc++.so.6 libgcc_s.so.1; do
+    if [ -n "$LIBDIR" ]; then cp -L "$LIBDIR/$lib" "$T/lib/"; else cp -L "$(g++ -print-file-name=$lib)" "$T/lib/"; fi
+  done
   for lib in libX11-xcb.so.1 libX11.so.6 libxcb.so.1 libwayland-client.so.0 libXau.so.6 libXdmcp.so.6 libffi.so.8 libbsd.so.0 libmd.so.0; do
-    f="$(ldconfig -p | awk -v l="$lib" '$1==l && /x86-64/ && !seen {print $NF; seen=1}')"
+    if [ -n "$LIBDIR" ]; then f="$LIBDIR/$lib"; [ -e "$f" ] || f=""
+    else f="$(ldconfig -p | awk -v l="$lib" '$1==l && /x86-64/ && !seen {print $NF; seen=1}')"; fi
     [ -n "$f" ] || { echo "error: $lib is not on this system" >&2; exit 1; }
     cp -L "$f" "$T/lib/desktop/"
   done
@@ -55,6 +65,10 @@ stage() {
   for f in "$T/bin/bf1943" "$T"/bin/*.so*; do
     LD_LIBRARY_PATH="$T/bin:$T/lib/desktop:$T/lib" ldd "$f" 2>/dev/null | grep "not found" | sed "s|^|$(basename "$f"): |"
   done || true
+  echo "== The newest glibc each file needs (the archive's README says 2.35 when built from the Ubuntu 22.04 root)"
+  for f in "$T/bin/bf1943" "$T"/bin/*.so* "$T"/lib/*.so* "$T"/lib/desktop/*.so*; do
+    echo "  $(basename "$f"): $(objdump -T "$f" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -t. -k2,2n -k3,3n -u | tail -1)"
+  done
   echo "== No Windows or game files, no key"
   if find "$T" \( -iname "*.dll" -o -iname "*.exe" -o -iname "default.xex" -o -iname "*.key" -o -iname "*.fbrb" \) | grep .; then
     echo "error: the files above must not ship" >&2; exit 1
@@ -69,22 +83,26 @@ tarball() {
 }
 
 # The Python the AppImage carries: this system interpreter, its library (no tests, no Tk, no installers) and the
-# shared libraries its modules load that are not part of the C library.
+# shared libraries its modules load that are not part of the C library. BF_SERVER_PYTHON_ROOT: the one of the system
+# the game was built on instead (the Ubuntu 22.04 root, /srv/jammy: Python 3.10 for glibc 2.35; this system's Python
+# needs its newer glibc), its libraries found inside that root (chroot, as root).
 python_into() {
-  local P="$1" PY LIBDIR V
-  PY="$(readlink -f "$(command -v python3)")"
-  LIBDIR="$(python3 -c "import sysconfig; print(sysconfig.get_path('stdlib'))")"
-  V="$(basename "$LIBDIR")"  # python3.12
+  local P="$1" R="${BF_SERVER_PYTHON_ROOT:-}" PY LIBDIR V
+  in_root() { if [ -n "$R" ]; then chroot "$R" "$@"; else "$@"; fi; }
+  PY="$(in_root readlink -f /usr/bin/python3)"
+  [ -n "$R" ] || PY="$(readlink -f "$(command -v python3)")"
+  LIBDIR="$(in_root "$PY" -c "import sysconfig; print(sysconfig.get_path('stdlib'))")"
+  V="$(basename "$LIBDIR")"  # python3.12, or python3.10 from the 22.04 root
   mkdir -p "$P/bin" "$P/lib/$V"
-  cp -L "$PY" "$P/bin/python3"
+  cp -L "$R$PY" "$P/bin/python3"
   rsync -a --exclude test --exclude tests --exclude idle_test --exclude tkinter --exclude idlelib --exclude turtledemo \
     --exclude ensurepip --exclude lib2to3 --exclude pydoc_data --exclude venv --exclude sqlite3 --exclude unittest \
     --exclude __pycache__ --exclude "config-*" --exclude sitecustomize.py --exclude dist-packages --exclude site-packages \
-    "$LIBDIR/" "$P/lib/$V/"
-  { ldd "$P/bin/python3"; for m in "$P/lib/$V/lib-dynload"/*.so; do ldd "$m"; done; } 2>/dev/null |
+    "$R$LIBDIR/" "$P/lib/$V/"
+  { in_root ldd "$PY"; for m in "$R$LIBDIR/lib-dynload"/*.so; do in_root ldd "${m#"$R"}"; done; } 2>/dev/null |
     awk '/=> \// {print $3}' | sort -u |
     { grep -Ev "/(libc|libm|libdl|libpthread|librt|libutil|libresolv|libnsl|ld-linux[^/]*)\.so" || true; } |
-    while read -r f; do cp -L "$f" "$P/lib/"; done
+    while read -r f; do cp -L "$R$f" "$P/lib/"; done
   LD_LIBRARY_PATH="$P/lib" "$P/bin/python3" -c "import ssl, json, asyncio, zipfile, tarfile, http.server, ctypes, hashlib, lzma, bz2, sys; print('bundled Python', sys.version.split()[0], ssl.OPENSSL_VERSION, sys.prefix)"
 }
 
