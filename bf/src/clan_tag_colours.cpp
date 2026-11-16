@@ -2,8 +2,8 @@
 // the username in launcher and in game and on the scoreboard it takes inspiration from call of duty world at wars
 // custom clan tags ... like world at wars cycl clan tag"). Our pages draw it themselves (clan_tags.cpp DrawTagged);
 // this does the same in everything the game draws with its own text: the kill feed, the name tags over soldiers and
-// its scoreboard show "[Dev]Name" (clan_tags.cpp GameNamesTick writes it), and its letters, the tag and the name
-// ("the full clan tag and user name not just the clan tag"), run through the colours.
+// its scoreboard show "[Dev]Name" (clan_tags.cpp GameNamesTick writes it), and all its letters, the tag and the name
+// ("the full clan tag and user name not just the clan tag"), scroll through the colours (clan_tags.cpp DevColour).
 //
 // How the game draws text (its Flash runtime's text renderer, found 16 Nov 2026 from the recompiled code):
 //   sub_826ABAC0 (vtable 0x82048644 [1]) packs a text run's colour into the renderer at +192 (0xAABBGGRR as one word:
@@ -36,7 +36,7 @@
 
 REXCVAR_DECLARE(bool, server);
 REXCVAR_DEFINE_BOOL(bf_dev_tag_colours, true, "BF1943/Online",
-                    "The Dev clan tag's letters cycle through the colours in the game's own text (kill feed, name tags)");
+                    "The Dev clan tag and its name cycle through the colours in the game's own text (kill feed, name tags)");
 
 REX_EXTERN(__imp__sub_826AB588);  // a text run's lines
 REX_EXTERN(__imp__sub_826AB240);  // one glyph

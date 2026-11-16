@@ -10,8 +10,9 @@
 // game grows as needed (begin, end, capacity), so a long name with its tag is never cut.
 //
 // The developers' tag, Dev (the team names of server/plasma.py TEAM_OWNERS: TekRantGaming and ZALIAS): the whole
-// "[Dev]Name" cycles through the colours letter by letter, on our pages (DrawDevText) and in the game's own text
-// (clan_tag_colours.cpp) (TekRantGaming: like World at War's "cycl" clan tag, "the full clan tag and user name").
+// "[Dev]Name" is one colour at a time, each new colour sweeping in from left to right, on our pages (DrawDevText) and
+// in the game's own text (clan_tag_colours.cpp) (TekRantGaming: like World at War's "cycl" clan tag, "the full clan
+// tag and user name"; 16 Nov 2026 it moved from a rainbow along the letters to this).
 #pragma once
 
 #include <cstdint>
@@ -51,12 +52,12 @@ void GameNamesTick(void* ctx, uint8_t* base, bool level_loaded);
 float DrawTagged(ImDrawList* d, ImFont* font, float size, const ImVec2& at, unsigned ink, const std::string& name,
                  const std::string& tag, unsigned tag_ink, float alpha = 1.0f);
 float TaggedWidth(ImFont* font, float size, const std::string& name, const std::string& tag);
-// A developer's whole tagged name ("[Dev]Name") in the Dev colours, letter by letter (with a drop shadow for the
-// chat over the match). Returns the width drawn.
+// A developer's whole tagged name ("[Dev]Name") in the Dev colours of the moment, letter by letter (with a drop
+// shadow for the chat over the match). Returns the width drawn.
 float DrawDevText(ImDrawList* d, ImFont* font, float size, const ImVec2& at, const std::string& text, float alpha,
                   bool shadow);
-// The colour of letter `i` of a developer's tagged name now (World at War's "cycl": the letters run through the colours, one after
-// another).
+// The colour of letter `i` of a developer's tagged name now (World at War's "cycl": the whole name one colour, the
+// next one travelling over it from left to right, a new one every second).
 unsigned DevColour(int i, double seconds, float alpha = 1.0f);
 bool IsDevTag(const std::string& tag);
 

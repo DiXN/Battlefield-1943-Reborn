@@ -338,13 +338,25 @@ void GameNamesTick(void* ctx, uint8_t* base, bool level_loaded) {
 
 // ---- drawing
 unsigned DevColour(int i, double seconds, float alpha) {
-  // World at War's "cycl": the letters of a developer's tagged name run through the colours, each a step behind the
-  // one before, so the colours seem to travel along it. A hue turn every 2 s, the letters 0.06 of a turn apart (a
-  // 20 letter "[Dev]Name" spans a little more than one turn).
-  const double hue = std::fmod(seconds * 0.5 - i * 0.06 + 100.0, 1.0);
-  float r, g, b;
-  ImGui::ColorConvertHSVtoRGB(float(hue), 0.75f, 1.0f, r, g, b);
-  return IM_COL32(int(r * 255), int(g * 255), int(b * 255), int(std::clamp(alpha, 0.0f, 1.0f) * 255));
+  // World at War's "cycl" (TekRantGaming, 16 Nov 2026: "the colors in your clan tag scroll and cycle continuously from
+  // left to right", not a rainbow; his four frames of a World at War scoreboard): the whole "[Dev]Name" is one colour,
+  // and the next one comes in at the left and travels to the right over it, the old colour left on the letters it has
+  // not reached yet (green over orange, yellow over green, lilac over yellow), its front a soft edge two letters wide.
+  // A new colour every second at 20 letters a second, so a full "[Dev]Name" (20 letters at most) is nearly always
+  // in its sweep, as in his frames. The colours are the frames' soft ones, in their order.
+  static constexpr unsigned char kColours[][3] = {{255, 155, 70},  {120, 230, 100}, {250, 230, 100},
+                                                   {175, 145, 255}, {255, 150, 205}, {120, 220, 245}};
+  constexpr long long kCount = sizeof(kColours) / sizeof(kColours[0]);
+  constexpr double kPeriod = 1.0, kLettersPerSecond = 20.0, kEdge = 2.0;
+  const double t = std::max(seconds, 0.0);
+  const long long cycle = static_cast<long long>(t / kPeriod);
+  const double front = (t - double(cycle) * kPeriod) * kLettersPerSecond;  // letters the new colour has reached
+  const float mix = float(std::clamp((front - double(i)) / kEdge, 0.0, 1.0));  // 1 the new colour, 0 the old
+  const unsigned char* now = kColours[cycle % kCount];
+  const unsigned char* before = kColours[(cycle + kCount - 1) % kCount];
+  auto blend = [mix](unsigned char a, unsigned char b) { return int(float(a) + (float(b) - float(a)) * mix + 0.5f); };
+  return IM_COL32(blend(before[0], now[0]), blend(before[1], now[1]), blend(before[2], now[2]),
+                  int(std::clamp(alpha, 0.0f, 1.0f) * 255));
 }
 
 float TaggedWidth(ImFont* font, float size, const std::string& name, const std::string& tag) {

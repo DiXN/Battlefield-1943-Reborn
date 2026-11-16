@@ -58,8 +58,8 @@ names, so only they can show it. Nobody else can type Dev or a lookalike.
 ## Where it shows
 
 - **Our pages** draw "[TAG]Name" themselves (clan_tags.cpp DrawTagged): Home's name box, the pause's scoreboard, the
-  leaderboards, the friends list, and the chat and the names of who is talking (comms_ui.cpp). The tag is gold; the Dev
-  tag's letters cycle through the colours.
+  leaderboards, the friends list, and the chat and the names of who is talking (comms_ui.cpp). The tag is gold; the
+  whole "[Dev]Name" scrolls through the colours (below).
 - **In a match** (the kill feed, the name tags over soldiers, the game's own scoreboard): the game's name stays the 15
   character gamertag it signed in with (the server's roster finds each player by it), and each player's name in this
   game's own player list (the player manager at 0x82AF3AE4, +0x98 to +0x9C; a player's name at +8, a string the game
@@ -72,11 +72,20 @@ names, so only they can show it. Nobody else can type Dev or a lookalike.
   clan_tag_colours.cpp hooks the run (sub_826AB588: its lines are a circular list whose head, r5, sits in the text
   command) and, in a run holding "[Dev]", draws the glyphs so far and changes that colour before each letter of the
   whole "[Dev]Name" (the tag and the name after it, up to 15 letters, digits or underscores; his word: "the full
-  clan tag and user name not just the clan tag"), then puts the run's own colour back: the letters cycle through the
-  colours, a step apart, with the run's own alpha (fades). Our pages and the chat draw the whole "[Dev]Name" the same
+  clan tag and user name not just the clan tag"), then puts the run's own colour back, with the run's own alpha
+  (fades). Our pages and the chat draw the whole "[Dev]Name" the same
   way (clan_tags.cpp DrawDevText). Runs without "[Dev]" are not touched (and nothing is allocated for them). bf_dev_tag_colours=false
   turns it off. Found with a read only search of the recompiled code (16 Nov 2026); BF_DEV_TEXTLOG=1 logs the first
   60 texts drawn.
+
+The Dev colours (clan_tags.cpp DevColour): World at War's "cycl" (TekRantGaming: "the colors in your clan tag scroll
+and cycle continuously from left to right", not a rainbow; he sent four frames of a World at War scoreboard). The whole
+"[Dev]Name" is one colour, and the next one comes in at the left and travels to the right over it, the old colour
+left on the letters it has not reached yet (green over orange, yellow over green, lilac over yellow, as in his
+frames), its front a soft edge two letters wide. A new colour every second at 20 letters a second, so a full
+"[Dev]Name" is nearly always in its sweep. The colours are the frames' soft ones in their order: orange, green,
+yellow, lilac, pink, sky blue. Until 16 Nov 2026 it was a rainbow running along the letters (World at War's "rain");
+he asked for "cycl" in its place (one look for every game, no setting).
 
 Why not raise the 15 character limit or put the tag in the gamertag: the gamertag is the name the server's roster
 matches (a game that finds another name than the backend's crashes joining, live_layers.cpp), the Xbox name buffers
