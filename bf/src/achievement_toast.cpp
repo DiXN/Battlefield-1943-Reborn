@@ -213,7 +213,27 @@ std::map<uint32_t, uint64_t> ReadUnlockFile() {
   return out;
 }
 
-// Once a run, when the game has its catalog: the copy written (only when it changed), for the next start's Home.
+// One of the game's pictures (an image of its title data, a PNG) written to <file>; empty when it was, else why not.
+const char* WriteTitlePicture(rex::system::KernelState* k, uint32_t image_id, const fs::path& file) {
+  const auto db = k->title_xdbf();
+  if (!db.is_valid()) return "the game's title data is not there";
+  const auto block = db.GetEntry(rex::system::util::XdbfSection::kImage, image_id);
+  if (!block.buffer || block.size < 8) return "not in the title data";
+  if (std::memcmp(block.buffer, "\x89PNG", 4)) return "not a PNG";
+  std::error_code ec;
+  fs::create_directories(file.parent_path(), ec);
+  {
+    std::ofstream png(file.string() + ".tmp", std::ios::binary | std::ios::trunc);
+    png.write(reinterpret_cast<const char*>(block.buffer), std::streamsize(block.size));
+  }
+  fs::rename(file.string() + ".tmp", file, ec);
+  return ec ? "the file could not be written" : nullptr;
+}
+
+// Once a run, when the game has its catalog: the copy written (only when it changed), and every picture of the game's
+// that is not in the cache yet, for the next start's Home. The game runs hidden behind the shader page on a first start
+// and after an update, then Home shows without it: the pictures are written here, not only when a page asks for one
+// while the game runs (TekRantGaming, 16 Nov 2026: "achievement icons missing on main menu").
 void NoteAchievementCatalog() {
   static bool done = false;
   if (done) return;
@@ -221,23 +241,39 @@ void NoteAchievementCatalog() {
   if (!k) return;
   std::string text = "# The game's achievements as its title data has them (achievement_toast.cpp), for our menus "
                      "before the game runs.\n";
+  std::set<uint32_t> images;
   int n = 0;
   for (const auto& a : k->achievements().ListAchievements()) {
     if (reborn_achievements::IsOurs(a.id)) continue;
     text += fmt::format("{}\t{}\t{}\t{}\t{}\t{}\t{}\n", a.id, a.gamerscore, a.image_id, a.flags, OneLine(a.label),
                         OneLine(a.description), OneLine(a.unachieved_description));
+    images.insert(a.image_id);
     ++n;
   }
   if (!n) return;
   done = true;
   const fs::path dir = AchievementCacheDir();
   if (dir.empty()) return;
+  std::error_code ec;
+  int written = 0, there = 0;
+  std::string failed;
+  for (uint32_t image_id : images) {
+    const fs::path file = dir / (std::to_string(image_id) + ".png");
+    if (fs::exists(file, ec)) {
+      ++there;
+      continue;
+    }
+    if (const char* why = WriteTitlePicture(k, image_id, file)) failed += fmt::format("{}{}: {}", failed.empty() ? "" : ", ", image_id, why);
+    else ++written;
+  }
+  if (written || !failed.empty())
+    REXLOG_INFO("BF achievements: {} of the game's {} pictures written for the menus before the game runs ({} already "
+                "there){}{} ({})", written, images.size(), there, failed.empty() ? "" : "; not written: ", failed, dir.string());
   {
     std::ifstream in(dir / "catalog.txt", std::ios::binary);
     const std::string old((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (old == text) return;
   }
-  std::error_code ec;
   fs::create_directories(dir, ec);
   {
     std::ofstream out((dir / "catalog.txt").string() + ".tmp", std::ios::binary | std::ios::trunc);
@@ -372,18 +408,7 @@ fs::path AchievementIconFile(uint32_t image_id) {
   };
   auto* k = REX_KERNEL_STATE();
   if (!k) return fail("the game is not running yet");
-  const auto db = k->title_xdbf();
-  if (!db.is_valid()) return fail("the game's title data is not there");
-  const auto block = db.GetEntry(rex::system::util::XdbfSection::kImage, image_id);
-  if (!block.buffer || block.size < 8) return fail("not in the title data");
-  if (std::memcmp(block.buffer, "\x89PNG", 4)) return fail("not a PNG");
-  fs::create_directories(file.parent_path(), ec);
-  {
-    std::ofstream png(file.string() + ".tmp", std::ios::binary | std::ios::trunc);
-    png.write(reinterpret_cast<const char*>(block.buffer), std::streamsize(block.size));
-  }
-  fs::rename(file.string() + ".tmp", file, ec);
-  if (ec) return fail("the file could not be written");
+  if (const char* why = WriteTitlePicture(k, image_id, file)) return fail(why);
   REXLOG_INFO("BF achievements: picture {} from the game's title data", image_id);
   return file;
 }
