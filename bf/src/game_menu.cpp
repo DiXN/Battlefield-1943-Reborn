@@ -2364,6 +2364,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // 0.4.6.3 (TekRantGaming, 14 Nov 2026): the official US Central servers play test a new server build; before one is
   // joined (any way: the browser, Home, Quick Play, Favourites, Direct connect) the player is warned in his words, with
   // Connect locked for 5 s and Cancel, in the same pop-up.
+  // 0.4.7.1 (TekRantGaming, 16 Nov 2026, his pick of three wordings): a promoted community server (server_list.h
+  // promoted: someone else's machine listed with ours) is introduced before it is joined, any way: whose it is, that it
+  // is in good standing, and where to report problems, with the server's own description (often its owner's Discord).
+  // No lock; "Don't show this again" (X, F) remembers the server (settings promoted_seen, by address).
+  bool exp_promo_ = false;
+  bool promo_dont_show_ = false;
+  std::string promo_accepted_address_;  // the promoted server the player connected to this run
+  bool PromoSeen(const std::string& address) const {
+    const std::string seen = " " + settings_.Get("promoted_seen", "") + " ";
+    return !address.empty() && seen.find(" " + address + " ") != std::string::npos;
+  }
   bool exp_popup_ = false;
   bool exp_us_ = false;               // the pop-up is the US Central play test's warning, not the tick rate's
   ServerInfo exp_popup_server_;
@@ -2374,14 +2385,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool ExperimentalWarned(const ServerInfo& sv) {
     // 0.4.2: 60 Hz is no longer experimental (the default); the warning is for 75 and 100.
     const bool us = UsPlaytest(sv) && us_accepted_address_ != sv.address;
+    const bool promo = sv.promoted && promo_accepted_address_ != sv.address && !PromoSeen(sv.address);
     const bool tick = sv.Tick() > 60 && exp_accepted_address_ != sv.address;
-    if (!us && !tick) return true;
+    if (!us && !promo && !tick) return true;
 #if defined(BF_DEV_TOOLS)
     // Test joins: nobody to read it (BF_DEV_JOIN_WARNINGS=1: shown anyway, for the pop-up's own tests).
     if (std::getenv("BF_AUTO_JOIN") && !std::getenv("BF_DEV_JOIN_WARNINGS")) return true;
 #endif
-    exp_popup_ = true, exp_us_ = us, exp_popup_server_ = sv, exp_popup_at_ = ImGui::GetTime(), popup_row_ = 0;
+    exp_popup_ = true, exp_us_ = us, exp_promo_ = !us && promo, exp_popup_server_ = sv, exp_popup_at_ = ImGui::GetTime();
+    popup_row_ = exp_promo_ ? 1 : 0, promo_dont_show_ = false;  // a promoted server's box starts on Connect
     if (us) REXLOG_INFO("BF join: {} is a US Central play test server: warned before joining", sv.name);
+    else if (exp_promo_) REXLOG_INFO("BF join: {} is a promoted community server: introduced before joining", sv.name);
     else REXLOG_INFO("BF join: {} runs at an experimental {} Hz: warned before joining", sv.name, sv.Tick());
     return false;
   }
@@ -2393,7 +2407,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const std::string first = fmt::format("You are connecting to an experimental server currently testing a {}Hz server tick rate.",
                                           exp_popup_server_.Tick());
     std::vector<const char*> paragraphs;
-    if (exp_us_) {
+    const std::string promo_from = exp_popup_server_.description.empty() ? std::string()
+                                   : "From the server: " + exp_popup_server_.description;
+    if (exp_promo_) {
+      paragraphs = {"This server is run by a member of our community. It's in good standing, so we've promoted it to "
+                    "the Reborn list.",
+                    "If you run into any problems, let the server's owner know, or tell us on Discord."};
+      if (!promo_from.empty()) paragraphs.push_back(promo_from.c_str());
+    } else if (exp_us_) {
       paragraphs = {"US Central servers are currently playtesting a new server build. You may experience issues on this "
                     "version.",
                     "It is recommended you stick to the EU servers if you're looking to have a stable experience. However, "
@@ -2414,7 +2435,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       kit::Paper(d, a, b, st.u);
       kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
       kit::Heading(d, st(36), ImVec2(a.x + st(30), a.y + st(26)), kit::kInk,
-                   exp_us_ ? "US CENTRAL PLAYTEST" : "EXPERIMENTAL SERVER", st(1.5f), st(620));
+                   exp_promo_ ? "COMMUNITY SERVER" : exp_us_ ? "US CENTRAL PLAYTEST" : "EXPERIMENTAL SERVER", st(1.5f),
+                   st(620));
       kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), a.y + st(72)), kit::kStamp,
                   fmt::format("{} \xC2\xB7 {} HZ", exp_popup_server_.name, exp_popup_server_.Tick()), st(1.5f));
       float y = a.y + st(98);
@@ -2423,16 +2445,31 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         y += kit::WrappedHeight(f.ui, st(16), para, st(620)) + st(12);
       }
     }
-    // Close, and Connect anyway: locked for its first 5 s (it counts down), then like any button.
-    const double left = 5.0 - (ImGui::GetTime() - exp_popup_at_);
+    // A promoted server's "Don't show this again", above the buttons: X (F on a keyboard) or a click.
+    if (exp_promo_) {
+      const ImVec2 box0(a.x + st(30), b.y - st(108)), box1(box0.x + st(22), box0.y + st(22));
+      const char* label = "Don't show this again for this server";
+      const ImVec2 hit1(box1.x + st(12) + kit::TextWidth(f.ui, st(16), label), box1.y);
+      d->AddRectFilled(box0, box1, kit::kPaperCard);
+      d->AddRect(box0, box1, kit::kInk, 0, 0, st(2));
+      if (promo_dont_show_) d->AddRectFilled(ImVec2(box0.x + st(5), box0.y + st(5)), ImVec2(box1.x - st(5), box1.y - st(5)), kit::kGreen);
+      d->AddText(f.ui, st(16), ImVec2(box1.x + st(12), box0.y + st(1)), kit::kInkSoft, label);
+      const float gx = hit1.x + st(14);
+      kit::Glyph(d, PromptStyle(), kit::Button::kX, KeyFor(kit::Button::kX), ImVec2(gx + st(11), (box0.y + box1.y) * 0.5f), st(22));
+      if (in.x || (ImGui::IsMouseHoveringRect(box0, hit1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)))
+        promo_dont_show_ = !promo_dont_show_;
+    }
+    // Close, and Connect anyway: locked for its first 5 s (it counts down), then like any button. A promoted server's
+    // Connect is never locked.
+    const double left = exp_promo_ ? 0.0 : 5.0 - (ImGui::GetTime() - exp_popup_at_);
     const bool locked = left > 0;
     if (locked) popup_row_ = 0;
     else if (in.left || in.right || in.up || in.down) popup_row_ = 1 - popup_row_;
     int clicked = -1;
     float x = a.x + st(30);
     for (int i = 0; i < 2; ++i) {
-      const char* go = exp_us_ ? "Connect" : "Connect anyway";
-      const std::string label = i == 0 ? std::string(exp_us_ ? "Cancel" : "Close")
+      const char* go = exp_us_ || exp_promo_ ? "Connect" : "Connect anyway";
+      const std::string label = i == 0 ? std::string(exp_us_ || exp_promo_ ? "Cancel" : "Close")
                                        : locked ? fmt::format("{} ({})", go, int(std::ceil(left)))
                                                 : std::string(go);
       const ImVec2 c0(x, b.y - st(70)), c1(x + st(250), b.y - st(26));
@@ -2454,9 +2491,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (clicked < 0) return;
     exp_popup_ = false;
     if (clicked == 0) {
-      if (exp_us_) REXLOG_INFO("BF join: the US Central play test server {} not joined (cancelled)", exp_popup_server_.name);
+      if (exp_promo_) REXLOG_INFO("BF join: the promoted community server {} not joined (cancelled)", exp_popup_server_.name);
+      else if (exp_us_) REXLOG_INFO("BF join: the US Central play test server {} not joined (cancelled)", exp_popup_server_.name);
       else REXLOG_INFO("BF join: the experimental server {} not joined (closed)", exp_popup_server_.name);
       return;
+    }
+    if (exp_promo_) {
+      promo_accepted_address_ = exp_popup_server_.address;
+      if (promo_dont_show_ && !PromoSeen(exp_popup_server_.address)) {
+        const std::string seen = settings_.Get("promoted_seen", "");
+        settings_.values["promoted_seen"] = seen.empty() ? exp_popup_server_.address : seen + " " + exp_popup_server_.address;
+        settings_.Save();
+      }
+      REXLOG_INFO("BF join: {} joined after the promoted community server's box{}", exp_popup_server_.name,
+                  promo_dont_show_ ? " (not shown again for it)" : "");
+      return Join(exp_popup_server_);  // the tick rate's warning still comes after, if it has one
     }
     if (exp_us_) {
       REXLOG_INFO("BF join: {} joined after the US Central play test warning", exp_popup_server_.name);
