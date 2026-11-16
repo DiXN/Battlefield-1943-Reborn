@@ -1,5 +1,5 @@
-name: Server or connection
-description: Joining fails, lag, rubber banding, disconnects, or a server problem.
+name: "Server or connection"
+description: "Joining fails, lag, rubber banding, disconnects, or a server problem."
 title: "[Server or connection] "
 labels: ["server", "needs-triage"]
 body:

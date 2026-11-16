@@ -1,5 +1,5 @@
-name: Suggestion
-description: An idea to make the game better.
+name: "Suggestion"
+description: "An idea to make the game better."
 title: "[Suggestion] "
 labels: ["suggestion", "needs-triage"]
 body:
