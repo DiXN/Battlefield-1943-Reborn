@@ -12,11 +12,13 @@
   std::string tag_text_;       // the clan tag box
   bool tag_mode_ = false;      // the typing goes to the clan tag
   std::string tag_refusal_;    // the backend's words for a refused tag, kept for the page
+  bool box_menu_ = false;      // a box's right click menu is open (BoxMenu), at box_menu_at_
+  ImVec2 box_menu_at_;
 
   static bool TagChar(char c) { return static_cast<unsigned char>(c) < 128 && std::isalnum(static_cast<unsigned char>(c)); }
   void TagBegin() {
     tag_text_ = settings_.Get("clan_tag", "");
-    tag_mode_ = false;
+    tag_mode_ = false, box_menu_ = false;
     if (std::string r = clan::TakeRefusal(); !r.empty()) tag_refusal_ = r;
   }
   // A key of the on screen keys (in the case Capitals says), or one typed (`as_typed`: as the keyboard gave it).
@@ -97,6 +99,7 @@
   void NameFields(ImDrawList* d, const Stage& st, float x, float& y, float w) {
     const kit::Fonts& f = kit::GetFonts();
     const bool blink_on = std::fmod(ImGui::GetTime(), 1.0) < 0.6;
+    const bool menu_click = BoxMenu(st);  // a click the right click menu took is not a box's
     auto box = [&](float bx, float bw, const std::string& text, bool active, int max) {
       const ImVec2 n0(bx, y), n1(bx + bw, y + st(58));
       d->AddRectFilled(n0, n1, active ? kit::kPaperLight : kit::kPaperDim);
@@ -109,8 +112,15 @@
       const std::string count = std::to_string(text.size()) + " / " + std::to_string(max);
       d->AddText(f.typed, st(14), ImVec2(bx + bw - st(14) - kit::TextWidth(f.typed, st(14), count), y + st(22)),
                  kit::kInkFaint, count.c_str());
-      // A click on a box puts the typing there.
-      if (ImGui::IsMouseHoveringRect(n0, n1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) TagSwitch(&text == &tag_text_);
+      // A click on a box puts the typing there; a right click also opens the box's menu (PASTE, CLEAR).
+      if (ImGui::IsMouseHoveringRect(n0, n1) && !menu_click) {
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) TagSwitch(&text == &tag_text_);
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+          TagSwitch(&text == &tag_text_);
+          box_menu_ = true, box_menu_at_ = ImGui::GetIO().MousePos;
+          REXLOG_INFO("BF launcher: the name page's right click menu opened");
+        }
+      }
     };
     if (code_mode_) {
       kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "RECOVERY CODE", st(2));
@@ -132,6 +142,33 @@
     box(x, tw, tag_text_, tag_mode_, text_filter::kTagMax);
     box(nx, nw, name_text_, !tag_mode_, kNameMax);
     y += st(66);
+  }
+  // The right click menu of a name page box (TekRantGaming, 16 Nov 2026: "a right click did not give a context menu"):
+  // PASTE and CLEAR for the box with the typing, at the mouse, over everything. A click anywhere closes it. True when
+  // this frame's click was the menu's (an item, or closing it).
+  bool BoxMenu(const Stage& st) {
+    if (!box_menu_) return false;
+    ImDrawList* fd = ImGui::GetForegroundDrawList();
+    const kit::Fonts& f = kit::GetFonts();
+    static const char* const kItems[] = {"PASTE", "CLEAR"};
+    const float iw = st(180), ih = st(42);
+    const ImVec2 p0 = box_menu_at_, p1(p0.x + iw, p0.y + ih * 2);
+    fd->AddRectFilled(ImVec2(p0.x + st(4), p0.y + st(4)), ImVec2(p1.x + st(4), p1.y + st(4)), IM_COL32(0, 0, 0, 90));
+    int hit = -1;
+    for (int i = 0; i < 2; ++i) {
+      const ImVec2 a(p0.x, p0.y + ih * i), b(p1.x, p0.y + ih * (i + 1));
+      const bool hover = ImGui::IsMouseHoveringRect(a, b);
+      fd->AddRectFilled(a, b, hover ? kit::kPaperLight : kit::kPaperDim);
+      if (hover) fd->AddRectFilled(a, ImVec2(a.x + st(4), b.y), kit::kGreen);
+      kit::Spaced(fd, f.typed, st(16), ImVec2(a.x + st(16), a.y + st(12)), kit::kInk, kItems[i], st(2));
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) hit = i;
+    }
+    fd->AddRect(p0, p1, kit::kInk, 0, 0, st(1.5f));
+    if (hit == 0) NamePaste(paste::Text(), "menu");
+    if (hit == 1) NameClear();
+    const bool clicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right);
+    if (clicked) box_menu_ = false;
+    return clicked;
   }
   // The error line's words when nothing is wrong: what the box with the typing takes.
   const char* NameFieldHint() const {

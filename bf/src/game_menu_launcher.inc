@@ -944,6 +944,37 @@
     name_error_.clear();
     if (std::isalpha(static_cast<unsigned char>(c)) && name_caps_ && name_text_.size() == 1) name_caps_ = false;
   }
+  // The clipboard's text into the box with the typing, as the keyboard types (TekRantGaming, 16 Nov 2026: a recovery
+  // code could only be typed letter by letter). A recovery code replaces its box, spaces and dashes left out; from a
+  // copied "Recovery code: ..." line (or the whole key file) only the code.
+  void NamePaste(std::string text, const char* how) {
+    if (code_mode_) {
+      std::string lower;
+      for (char ch : text) lower += char(std::tolower(static_cast<unsigned char>(ch)));
+      if (const size_t at = lower.find("code:"); at != std::string::npos) {
+        text = text.substr(at + 5);
+        if (const size_t eol = text.find_first_of("\r\n"); eol != std::string::npos) text.resize(eol);
+      }
+      name_text_.clear();
+    }
+    int n = 0;
+    for (char ch : text) {
+      if (static_cast<unsigned char>(ch) >= 128 || ch == '\r' || ch == '\n') continue;
+      if (code_mode_) CodeType(ch);
+      else if (tag_mode_) TagType(ch, true);
+      else if (NameChar(ch) && int(name_text_.size()) < kNameMax) name_text_ += ch, name_error_.clear(), name_caps_ = false;
+      ++n;
+    }
+    name_keys_ = false;
+    REXLOG_INFO("BF launcher: {} characters pasted into the {} ({})", n,
+                code_mode_ ? "recovery code" : tag_mode_ ? "clan tag" : "soldier name", how);
+  }
+  // The box with the typing emptied (the right click menu's CLEAR).
+  void NameClear() {
+    if (tag_mode_ && !code_mode_) tag_text_.clear();
+    else name_text_.clear(), name_caps_ = true;
+    name_error_.clear(), tag_refusal_.clear();
+  }
   void NameDelete() {
     if (tag_mode_ && !code_mode_) return TagDelete();
     if (!name_text_.empty()) name_text_.pop_back();
@@ -1391,33 +1422,9 @@
         name_keys_ = false;  // a real keyboard types: the on screen keys close, so its Enter saves
       }
     }
-    // Ctrl+V or Shift+Insert: the clipboard into the box with the typing, as the keyboard types (TekRantGaming, 16 Nov
-    // 2026: a recovery code could only be typed letter by letter). A recovery code replaces the box, spaces and dashes
-    // left out; from a copied "Recovery code: ..." line (or the whole key file) only the code.
-    if ((ImGui::IsKeyPressed(ImGuiKey_V, false) && io.KeyCtrl) || (ImGui::IsKeyPressed(ImGuiKey_Insert, false) && io.KeyShift))
-      if (const char* clip = ImGui::GetClipboardText()) {
-        std::string text = clip;
-        if (code_mode_) {  // from a copied key file or line: the rest of the "Recovery code:" line
-          std::string lower;
-          for (char ch : text) lower += char(std::tolower(static_cast<unsigned char>(ch)));
-          if (const size_t at = lower.find("code:"); at != std::string::npos) {
-            text = text.substr(at + 5);
-            if (const size_t eol = text.find_first_of("\r\n"); eol != std::string::npos) text.resize(eol);
-          }
-          name_text_.clear();
-        }
-        int n = 0;
-        for (char ch : text) {
-          if (static_cast<unsigned char>(ch) >= 128 || ch == '\r' || ch == '\n') continue;
-          if (code_mode_) CodeType(ch);
-          else if (tag_mode_) TagType(ch, true);
-          else if (NameChar(ch) && int(name_text_.size()) < kNameMax) name_text_ += ch, name_error_.clear(), name_caps_ = false;
-          ++n;
-        }
-        name_keys_ = false;
-        REXLOG_INFO("BF launcher: {} characters pasted into the {}", n,
-                    code_mode_ ? "recovery code" : tag_mode_ ? "clan tag" : "soldier name");
-      }
+    // Ctrl+V or Shift+Insert (paste_keys.h): the clipboard into the box with the typing; a right click on a box offers
+    // PASTE and CLEAR (game_menu_clan.inc BoxMenu).
+    if (paste::Pressed()) NamePaste(paste::Text(), "keys");
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
     if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !code_mode_) NameRandom();
     // Protect your name: X (F2) protects the saved name or shows its recovery code; LB (F3) types a recovery code.

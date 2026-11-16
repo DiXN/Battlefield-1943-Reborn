@@ -20,6 +20,7 @@
 
 #include "clan_tags.h"
 #include "comms.h"
+#include "paste_keys.h"
 
 REXCVAR_DEFINE_STRING(keybind_chat_all, "T", "Input/Keybinds/Chat", "Text chat to everyone on the server");
 REXCVAR_DEFINE_STRING(keybind_chat_team, "Y", "Input/Keybinds/Chat", "Text chat to your team");
@@ -174,10 +175,9 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) PopUtf8(text_);
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl) {
-      if (const char* clip = ImGui::GetClipboardText())
-        for (const char* p = clip; *p && text_.size() < 120; ++p)
-          if (static_cast<unsigned char>(*p) >= 0x20) text_ += *p;
+    if (paste::Pressed()) {  // paste_keys.h: io.KeyCtrl alone never saw Ctrl
+      for (char c : paste::Text())
+        if (text_.size() < 120 && static_cast<unsigned char>(c) >= 0x20) text_ += c;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) channel_ = Channel((channel_ + 1) % 3);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) return Close();

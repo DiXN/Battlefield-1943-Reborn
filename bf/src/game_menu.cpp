@@ -66,6 +66,7 @@
 #include "changelog.h"
 #include "news.h"
 #include "news_video.h"
+#include "paste_keys.h"  // Ctrl+V and Shift+Insert, the clipboard (the name page, Direct connect)
 #include "report.h"  // Report an issue (game_menu_report.inc)
 #include "update.h"
 
@@ -2904,10 +2905,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (c < 128 && allowed(c) && direct_text_.size() < 64) direct_text_ += char(c), direct_keys_ = false;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl)
-      if (const char* clip = ImGui::GetClipboardText())
-        for (const char* c = clip; *c && direct_text_.size() < 64; ++c)
-          if (allowed(static_cast<unsigned char>(*c))) direct_text_ += *c;
+    if (paste::Pressed())  // paste_keys.h: io.KeyCtrl alone never saw Ctrl
+      for (char c : paste::Text())
+        if (direct_text_.size() < 64 && allowed(static_cast<unsigned char>(c))) direct_text_ += c;
     // The finished lookup.
     if (direct_job_ && direct_job_->load() != 0) {
       if (direct_job_->load() == 1) {
@@ -4708,14 +4708,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         }
       } else if (w.rfind("type/", 0) == 0) {
         ImGui::GetIO().AddInputCharactersUTF8(w.substr(5).c_str());
-      } else if (w.rfind("paste/", 0) == 0) {  // paste/<text>: the text on the clipboard, then Ctrl+V (the name page)
-        ImGui::SetClipboardText(w.substr(6).c_str());
+      } else if (w.rfind("clip/", 0) == 0) {  // clip/<text>: the clipboard's text for the next paste (paste_keys.h),
+        paste::TestText() = w.substr(5);     // never the PC's own clipboard
+      } else if (w.rfind("paste/", 0) == 0) {  // paste/<text>: that, then Ctrl+V as the SDK sends it (LeftCtrl, V)
+        paste::TestText() = w.substr(6);
         ImGuiIO& io = ImGui::GetIO();
-        io.AddKeyEvent(ImGuiMod_Ctrl, true), io.AddKeyEvent(ImGuiKey_LeftCtrl, true);
+        io.AddKeyEvent(ImGuiKey_LeftCtrl, true);
         io.AddKeyEvent(ImGuiKey_V, true), io.AddKeyEvent(ImGuiKey_V, false);
-        io.AddKeyEvent(ImGuiKey_LeftCtrl, false), io.AddKeyEvent(ImGuiMod_Ctrl, false);
-      } else if (w.rfind("move/", 0) == 0 || w.rfind("click/", 0) == 0 || w.rfind("mdown/", 0) == 0 || w.rfind("mup/", 0) == 0) {
+        io.AddKeyEvent(ImGuiKey_LeftCtrl, false);
+      } else if (w.rfind("move/", 0) == 0 || w.rfind("click/", 0) == 0 || w.rfind("mdown/", 0) == 0 || w.rfind("mup/", 0) == 0 ||
+                 w.rfind("rclick/", 0) == 0) {  // rclick/<x>/<y>: the right button's click there
         const bool click = w[0] == 'c', down = w.rfind("mdown/", 0) == 0, up = w.rfind("mup/", 0) == 0;
+        const bool rclick = w[0] == 'r';
         const size_t a = w.find('/'), b = w.find('/', a + 1);
         const float x = float(std::atof(w.substr(a + 1, b - a - 1).c_str())), y = float(std::atof(w.substr(b + 1).c_str()));
         const Stage st = StageOf(ImGui::GetIO());
@@ -4725,6 +4729,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         io.AddMousePosEvent(at.x, at.y);
         script_mouse_ = ImVec2(at.x - 2, at.y), script_mouse_to_ = at;  // a scripted test run's mouse (OnDraw)
         if (click) io.AddMouseButtonEvent(0, true), release_click_ = true;
+        if (rclick) io.AddMouseButtonEvent(1, true), io.AddMouseButtonEvent(1, false);
         if (down) io.AddMouseButtonEvent(0, true);
         if (up) io.AddMouseButtonEvent(0, false);
       }
