@@ -1,0 +1,6 @@
+{
+  "name": "bf-report-relay",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test --no-warnings=ExperimentalWarning bf_reports.test.js" }
+}

@@ -134,6 +134,9 @@ try {
     # empty --bf_pipelines_url stops the whole command line (CLI11: "1 required TEXT missing"), so the address is a
     # closed local port: any upload fails on this PC.
     if ($env:BF_TEST_PIPELINES -ne "1") { $launchArgs += @("--bf_share_pipelines=false", "--bf_pipelines_url=http://127.0.0.1:9/no-upload") }
+    # Test runs never file a real GitHub issue through the live report relay (bf\src\report.cpp): a closed local port.
+    # BF_REPORT_ENDPOINT (a local fake relay, or the live one for a test he has said yes to) still wins over it.
+    $launchArgs += "--bf_report_endpoint=http://127.0.0.1:9/no-report"
 # Test runs never ask GitHub for updates (its 60 an hour per address are shared with TekRantGaming): a closed local feed, or
 # BF_TEST_UPDATE_FEED (a local test feed, scratchpad update_feed).
 if (-not $Interactive) { $launchArgs += "--bf_update_feed=$(if ($env:BF_TEST_UPDATE_FEED) { $env:BF_TEST_UPDATE_FEED } else { 'http://127.0.0.1:9/no-feed' })" }

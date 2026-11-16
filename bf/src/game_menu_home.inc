@@ -272,9 +272,10 @@
         if (const int unseen = NewsUnseen(); unseen > 0) note = fmt::format("{} NEW", unseen), note_col = sel ? kit::kGreenDark : kit::kGreenBright;
       }
       else if (i == kRowHelp) note = "TUTORIAL, CONTROLS, CREDITS";
+      else if (i == kRowReport) note = ReportRowNote(), note_col = sel ? kit::kStamp : IM_COL32(255, 140, 120, 255);  // reports kept to send
       if (sel) {
         kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
-        if (!note.empty() && i != kRowUnlockables && i != kRowUpdate && i != kRowNews) note.clear();  // the glyph has the room
+        if (!note.empty() && i != kRowUnlockables && i != kRowUpdate && i != kRowNews && i != kRowReport) note.clear();  // the glyph has the room
       }
       if (!note.empty()) {
         const float nw = kit::SpacedWidth(f.typed, st(9.5f), note, st(1.5f));

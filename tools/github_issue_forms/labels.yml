@@ -1,0 +1,22 @@
+# The labels the issue forms and the report relay use (name, colour, description).
+- name: crash
+  color: b60205
+  description: The game closed, froze or stopped answering
+- name: bug
+  color: d73a4a
+  description: Something works wrong
+- name: performance
+  color: 5319e7
+  description: Frame rate, stutters, loading
+- name: server
+  color: 0e8a16
+  description: Joining, lag, disconnects, a server
+- name: suggestion
+  color: a2eeef
+  description: An idea for the game
+- name: from-game
+  color: ededed
+  description: Filed from the game's Report an issue page
+- name: needs-triage
+  color: fbca04
+  description: Not looked at yet

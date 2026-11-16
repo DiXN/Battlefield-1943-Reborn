@@ -21,6 +21,7 @@
 #include "gpu_preference.h"
 #include "game_install.h"
 #include "private_match.h"
+#include "report.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -237,6 +238,13 @@ class Bf1943App : public rex::ReXApp {
         rex::cvar::SetFlagByName("native_x_renderer_hitch_ms", "100");
     }
 #endif
+    // The last run's log kept as bf1943.previous.log before this one opens over it: a crash's report sends the log of
+    // the run that crashed (report.cpp, Report an issue).
+    if (!REXCVAR_GET(server)) {
+      std::filesystem::path log = rex::cvar::GetFlagByName("log_file");
+      if (log.empty() && !paths.user_data_root.empty()) log = paths.user_data_root / "bf1943.log";
+      bf1943::report::KeepPreviousLog(log);
+    }
     paths_ = paths;
   }
 

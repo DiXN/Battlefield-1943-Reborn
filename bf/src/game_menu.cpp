@@ -63,6 +63,7 @@
 #include "changelog.h"
 #include "news.h"
 #include "news_video.h"
+#include "report.h"  // Report an issue (game_menu_report.inc)
 #include "update.h"
 
 #if defined(_WIN32)
@@ -879,6 +880,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // takes it at the next pad read; only with the soldier in the world, as Start).
     if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !comms::TypingOrJustClosed())
       g_escape_press.store(true, std::memory_order_relaxed);  // not the chat box's Esc (comms_ui.cpp)
+    ReportShotTick(ImGui::GetForegroundDrawList(), io);  // F12: a screenshot for a report (game_menu_report.inc)
     UpdateWalk(io);
     if (hd_import_->turn_on.exchange(false)) SetCvar("native_x_renderer_hd_textures", "true");
     // D150: the GPU's speed, timed once (the log keeps it) after the stored pipelines are made and 3 s of steady
@@ -1126,6 +1128,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const bool typing = page_ == Page::kName || !capture_.empty() ||
                         (page_ == Page::kServers && (browser_typing_ || browser_tab_ == kTabDirect)) ||  // its search, an address
                         (page_ == Page::kPrivateMatch && PmTyping()) ||  // the match's name, its port, its password
+                        ReportTyping() ||  // Report an issue's fields
                         pw_popup_;  // a match's password
     if (!scripted) {
       key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
@@ -2508,6 +2511,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     SetJoinedServerNight(sv.night);
     joining_ = sv.name;
     joining_map_ = sv.map;
+    report::NoteLastMatch(UserDir(), sv.name, sv.official, sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
     presence_server_ = discord::ShownServerName(sv.name);  // Discord Rich Presence (NotePresence)
     presence_private_ = sv.player_hosted || pm_hosting_, presence_max_ = sv.max_players;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
@@ -4663,7 +4667,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         // press/<key>, hold/<key>, release/<key>: f6, f7, f8 and the arrows as ImGui sees them (the graphics panel)
         const std::string k = w.substr(w.find('/') + 1);
         // A single letter (the chat's T, Y, U and push to talk's B), enter, esc, tab, backspace: the chat box tests.
-        const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6
+        const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6 : k == "f12" ? ImGuiKey_F12
                              : k == "right" ? ImGuiKey_RightArrow : k == "left" ? ImGuiKey_LeftArrow
                              : k == "down" ? ImGuiKey_DownArrow : k == "up" ? ImGuiKey_UpArrow
                              : k == "enter" ? ImGuiKey_Enter : k == "esc" ? ImGuiKey_Escape : k == "tab" ? ImGuiKey_Tab
@@ -5275,6 +5279,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #include "game_menu_launcher.inc"
 #include "game_menu_home.inc"
 #include "game_menu_news.inc"
+#include "game_menu_report.inc"  // Report an issue, the form that files on GitHub
 #include "game_menu_browser.inc"
 #include "game_menu_settings.inc"
 #include "game_menu_setup.inc"

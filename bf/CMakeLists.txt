@@ -101,6 +101,7 @@ set(BF1943_SOURCES
     src/dev_player_scan.cpp
     src/modern_mode.cpp
     src/pipeline_upload.cpp
+    src/report.cpp
     src/game_options.cpp
     src/recoil.cpp
     src/game_install.cpp
@@ -297,6 +298,9 @@ const char* const kChangelogText = R\"BFCHANGELOG(@BF_CHANGELOG_TEXT@)BFCHANGELO
 "
      @ONLY)
 target_sources(bf1943 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/changelog_text.cpp")
+# Report an issue (src/report.cpp): the screenshots' JPEG from stb_image_write (static), Diligent's copy of stb.
+set_source_files_properties(src/report.cpp PROPERTIES INCLUDE_DIRECTORIES
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/native-x-renderer/thirdparty/diligent-core/ThirdParty/stb")
 # The version the graphics pipelines are sent with (src/pipeline_upload.cpp), on that file alone.
 set_source_files_properties(src/pipeline_upload.cpp PROPERTIES COMPILE_DEFINITIONS "BF_VERSION_STRING=\"${BF_VERSION}\"")
 
