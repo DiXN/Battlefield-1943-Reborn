@@ -695,17 +695,48 @@ void CleanUpAfterUpdate() {
 }
 
 bool PrepareShadersAfterUpdate(const fs::path& cache_root, const std::string& prepared_for) {
-  (void)cache_root;
   if (prepared_for.empty() || prepared_for == BfVersion()) return false;
-  // King Kong's rule exactly (TekRantGaming, 11 Nov 2026: "Copy Kong exactly"; its shader_prepared.h, launcher.cpp
-  // JobAtLauncherStart and shader_pack_service.cpp): after an update everything is made again in full, once, behind
-  // the shader page, and nothing is deleted. The preparation adds this version's list to the renderer's storage from
-  // the player's game files; the pipelines this PC learned in play stay; the driver's pipeline cache stays too (Vulkan
-  // ignores one made by another driver or device), so the page makes every stored pipeline again from it. A page left
-  // before its end leaves the old marker, so the next start is an update again and finishes the job.
-  REXLOG_INFO("BF update: shaders were prepared for v{}, this is v{}: the shader page makes every pipeline again, over "
-              "the cache (nothing deleted, as King Kong does)",
-              prepared_for, BfVersion());
+  // A fresh set after every update (TekRantGaming, 16 Nov 2026: "make sure if the game is updated it removes it shader
+  // chashe and builds a fresh batch of shaders with the same screen then you get dropped back into our main menu").
+  // Until v0.4.7 King Kong's rule kept the cache and made every pipeline again over it. Deleted here, at the start,
+  // before PrepareShaders writes this version's list and before the renderer opens its storage:
+  // - native_x_renderer: the renderer's storage (5841097E.pipelines: the shaders and pipelines of this version's list
+  //   and those learned in play) and DiligentCore's pipeline cache beside it (5841097E.vkcache, the driver's binaries);
+  // - shaders: the prepared shaders (shareable/5841097E.xsh and the preparation's marker, so they are prepared again).
+  // The shader page then compiles every pipeline of this version's list from nothing. A page left before its end keeps
+  // the old marker (shaders_prepared_for), so the next start is an update again; the cache is not deleted twice for one
+  // version (cleared-for.txt), so that start goes on over what was made.
+  const fs::path nxr = cache_root / "native_x_renderer";
+  const fs::path cleared = nxr / "cleared-for.txt";
+  std::error_code ec;
+  {
+    std::ifstream f(cleared);
+    std::string version;
+    if (std::getline(f, version) && version == BfVersion()) {
+      REXLOG_INFO("BF update: shaders were prepared for v{}, this is v{}: the cache was deleted for it at an earlier start "
+                  "whose shader page was left before its end; the shader page goes on",
+                  prepared_for, BfVersion());
+      return true;
+    }
+  }
+  uintmax_t files = 0, bytes = 0;
+  bool failed = false;
+  for (const fs::path& dir : {nxr, cache_root / "shaders"}) {
+    if (!fs::exists(dir, ec)) continue;
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+      if (it->is_regular_file(ec)) ++files, bytes += it->file_size(ec);
+    ec.clear();
+    if (fs::remove_all(dir, ec) == static_cast<uintmax_t>(-1) || ec) {
+      failed = true;
+      REXLOG_WARN("BF update: the old shader cache {} could not be deleted in full: {}", Utf8(dir), ec.message());
+      ec.clear();
+    }
+  }
+  fs::create_directories(nxr, ec);
+  std::ofstream(cleared, std::ios::trunc) << BfVersion() << "\n";
+  REXLOG_INFO("BF update: shaders were prepared for v{}, this is v{}: the old shader cache deleted ({} files, {} MB{}); "
+              "the shader page builds a fresh set",
+              prepared_for, BfVersion(), files, bytes >> 20, failed ? ", not all of it" : "");
   return true;
 }
 

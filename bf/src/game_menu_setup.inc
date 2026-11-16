@@ -1,16 +1,19 @@
 // The first start in the new look, Version A1 (TekRantGaming, 12 Nov 2026, 18:30: "fundamentally change the
 // onboarding and setup process ... a page that lets them know that voice chat is used in game ... open mic ... the
 // default ... push to talk with the keybind customizable ... both teams can hear each other ... directional audio ...
-// an advisory, saying that this is an early playtest"). Nine steps: 1 game files, 2 soldier name (their pages as
+// an advisory, saying that this is an early playtest"). Eight steps: 1 game files, 2 soldier name (their pages as
 // they were, game_menu_launcher.inc), then in this file's frame (the steps in a rail at the left, the page on paper at
 // the right): 3 Display, 4 Graphics, 5 Controls (the settings rows, game_menu_settings.inc), 6 button prompts, 7 voice
-// chat, 8 shaders (ShadersPage, game_menu_launcher.inc: the game starts behind it with the settings just chosen and
-// its pipelines are made, so no join ever shows a shader page; TekRantGaming, 13 Nov 2026), 9 ready. Until v0.4.0
+// chat, 8 ready. The shaders are no step of it since v0.4.7 (TekRantGaming, 16 Nov 2026: "the initial setup screen
+// when you give the game files right after it you should be in the full screen shader comp screen ... the actual
+// onboaring section when you go through settings should no longer include the shader part"): the full screen shader
+// page comes right after the game files (ShadersPage, game_menu_launcher.inc), then step 2. From v0.4.1 to v0.4.6
+// they were step 8, before Ready. Until v0.4.0
 // the shaders were step 2 in name only (made at the first join) and a Modern and Classic page stood before Ready:
 // Modern is gone ("we are dropping support for modern and going full in on classic being the default"). Included
 // inside GameMenu (game_menu.cpp) after game_menu_settings.inc.
 
-  static constexpr int kSetupSteps = 9;
+  static constexpr int kSetupSteps = 8;
   struct SetupStepRow {
     const char* name;
     const char* sub;
@@ -19,10 +22,9 @@
       {"GAME FILES", "YOUR COPY OF THE GAME"},    {"SOLDIER NAME", "WHAT PLAYERS SEE"},
       {"DISPLAY", "WINDOW, RESOLUTION, FRAME RATE"}, {"GRAPHICS", "PRESET, UPSCALING, LIGHTING"},
       {"CONTROLS", "MOUSE, KEYBOARD, CONTROLLER"}, {"BUTTON PROMPTS", "XBOX, PLAYSTATION, KEYBOARD"},
-      {"VOICE CHAT", "OPEN MIC OR PUSH TO TALK"}, {"SHADERS", "PREPARED ONCE, NOW"},
-      {"READY", "THE PLAYTEST, THEN PLAY"}};
+      {"VOICE CHAT", "OPEN MIC OR PUSH TO TALK"}, {"READY", "THE PLAYTEST, THEN PLAY"}};
   static constexpr const char* kSetupNext[kSetupSteps] = {"SOLDIER NAME", "DISPLAY", "GRAPHICS", "CONTROLS", "BUTTON PROMPTS",
-                                                          "VOICE CHAT", "SHADERS", "READY", ""};
+                                                          "VOICE CHAT", "READY", ""};
   int voice_choice_ = -1;  // 8: 0 open mic (the recommended one), 1 push to talk; -1 not looked at yet
 
   struct SetupPanel {
@@ -300,18 +302,18 @@
     if (in.back && capture_.empty()) SetupBack();
   }
 
-  // ---- 9: ready (the playtest's advisory, the communities, then the main menu)
+  // ---- 8: ready (the playtest's advisory, the communities, then the main menu)
   void ReadyPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("setup ready");
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    const SetupPanel p = SetupFrame(d, io, st, 9);
+    const SetupPanel p = SetupFrame(d, io, st, 8);
     const bool restart = RestartPending();
     Prompts(d, st, st.P(48, 662),
             {{kit::Button::kA, restart ? "FINISH AND RESTART" : "INTO THE MAIN MENU", "", true}, {kit::Button::kX, "JOIN OUR DISCORD"},
              {kit::Button::kY, steam_added_ ? "ADDED TO STEAM" : "ADD TO STEAM"}, {kit::Button::kB, "BACK"}},
             in, 15);
-    float y = SetupTitle(d, st, p, 9, "THANK YOU, " + Upper(settings_.Get("player_name", "SOLDIER")),
+    float y = SetupTitle(d, st, p, 8, "THANK YOU, " + Upper(settings_.Get("player_name", "SOLDIER")),
                          "You are in an early playtest of Battlefield 1943 Reborn. The menus you see are a placeholder; the game "
                          "behind them is what we are testing. What helps us most right now: how stable the servers and the game "
                          "are for you, and every bug you find. New content comes once that is solid.");

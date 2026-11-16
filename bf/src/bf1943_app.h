@@ -397,9 +397,8 @@ class Bf1943App : public rex::ReXApp {
   // Shaders from the player's game files into the runtime's storage, before the runtime opens it.
   void OnPostLoadXexImage() override {
     const auto cache = paths_.cache_root.empty() ? paths_.user_data_root / "cache" : paths_.cache_root;
-    // First, as King Kong does (shader_prepared.h), from the marker and the storage as they were: after an update the
-    // shader page makes every pipeline again (nothing deleted); a version already prepared shows no shader page
-    // (game_menu.cpp, update.cpp).
+    // First, from the marker and the storage as they were: after an update the old shader cache is deleted and the
+    // shader page builds a fresh set; a version already prepared shows no shader page (game_menu.cpp, update.cpp).
     if (!REXCVAR_GET(server)) bf1943::CheckShadersAfterUpdate(paths_.user_data_root, cache);
     bf1943::PrepareShaders(bf1943::ExecutableDir() / "data" / "shaders", paths_.game_data_root, cache);
     // The pipelines this game builds, for the next update's shader list (Settings > Gameplay > Share graphics data).

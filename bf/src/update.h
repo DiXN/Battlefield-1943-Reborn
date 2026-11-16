@@ -17,9 +17,9 @@
 // download over an older folder, an antivirus) are fetched by downloading this version's release again, and the
 // retired files are removed. A passed check is remembered in the user folder (update-check.txt).
 //
-// After an update (the version differs from the one the shaders were prepared for) the shader page makes every
-// pipeline again, once, over the existing cache: nothing is deleted, the pipelines learned in play stay
-// (PrepareShadersAfterUpdate; King Kong's rule exactly).
+// After an update (the version differs from the one the shaders were prepared for) the old shader and pipeline cache
+// is deleted and the shader page makes a fresh set of every pipeline, once (PrepareShadersAfterUpdate; TekRantGaming,
+// 16 Nov 2026, v0.4.7: until then King Kong's rule, the cache kept and every pipeline made again over it).
 //
 // Developer builds: BF_DEV_UPDATE_ZIP=<a release zip, or on Linux an AppImage, on this PC> is offered as version
 // BF_DEV_UPDATE_VERSION (default 9.9.9) and installed from that file (checked against a SHA256SUMS.txt beside it when
@@ -76,8 +76,10 @@ bool RelaunchSelf();
 bool RestartSelf();
 // At start: the .old files an update left (in use then) removed; on Linux a half written AppImage.
 void CleanUpAfterUpdate();
-// At start, before the renderer opens its storage: true when the shaders were last prepared for another version (an
-// update), so the shader page makes every pipeline again and says the game was updated. Nothing is deleted.
+// At start, before the shaders are prepared and the renderer opens its storage: true when the shaders were last
+// prepared for another version (an update), so the shader page makes every pipeline again and says the game was
+// updated. The old cache (cache_root's native_x_renderer and shaders folders) is deleted first, once a version: a page
+// left before its end goes on at the next start over what it had made by then.
 bool PrepareShadersAfterUpdate(const std::filesystem::path& cache_root, const std::string& prepared_for);
 // True when version a ("0.2.1") is newer than b. A version with a suffix comes before the same numbers without one
 // (0.2.0-preview < 0.2.0); suffixes with numbers count up (0.2.0-beta.2 < 0.2.0-beta.3). A hotfix is a fourth number:

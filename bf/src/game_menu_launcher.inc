@@ -118,12 +118,10 @@
 
   // After the shaders: the setup from its account page (until it was finished once), else Home. A setup closed half
   // way counts as done at the next start once a name was chosen (TekRantGaming's rule for King Kong, 26 Oct 2026).
+  // The first start's shaders come right after the game files, before the onboarding, and an update's before the main
+  // menu (AfterIntro; TekRantGaming, 16 Nov 2026).
   void AfterShaders() {
-    if (setup_shader_step_) {  // the first start's step 8 is done: Ready
-      setup_shader_step_ = false;
-      page_ = Page::kAllSet, allset_row_ = 0, row_ = 0, scroll_ = 0;
-      return;
-    }
+    just_installed_ = false;
     // Play started the game from the launcher: our Getting ready page stays while the game boots and signs in behind
     // it (its films, title and menus never show, TekRantGaming's 10 Nov brief); then our main menu (StartingPage).
     if (played_) {
@@ -168,10 +166,9 @@
         break;
       case Page::kPrompts: page_ = Page::kVoice; break;
       case Page::kVoice:
-        // Step 8, the shaders: prepared now, with the settings the pages before chose (PrepareShadersAtStart), then
-        // Ready. Already prepared (the setup run again over an install that has them): straight to Ready.
-        if (PrepareShadersAtStart("the first start's step 8")) setup_shader_step_ = true;
-        else page_ = Page::kAllSet, allset_row_ = 0;
+        // Ready. The shaders were prepared before the onboarding, right after the game files (AfterIntro): no shader
+        // step here since v0.4.7.
+        page_ = Page::kAllSet, allset_row_ = 0;
         break;
       case Page::kAllSet:
         settings_.values["launcher_setup"] = "done";
@@ -210,8 +207,7 @@
       case Page::kSetupSettings: return 3 + setup_tab_;
       case Page::kPrompts: return 6;
       case Page::kVoice: return 7;
-      case Page::kShaders: return 8;
-      case Page::kAllSet: return 9;
+      case Page::kAllSet: return 8;
       default: return 0;
     }
   }
@@ -649,7 +645,7 @@
       kit::Paper(d, a, b, st.u);
       const float x = a.x + st(44), w = st(892);
       float y = a.y + st(34);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 1 OF 9", st(2));
+      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 1 OF 8", st(2));
       y += st(24);
       kit::Heading(d, st(58), ImVec2(x, y), kit::kInk, "BRING YOUR OWN COPY", st(2), w);
       y += st(68);
@@ -815,23 +811,21 @@
     }
     if (ImGui::GetTime() < 0.6) return;  // nothing to show yet (a quick start draws no screen)
     NotePage("shaders");
+    if (!shaders_shown_)
+      REXLOG_INFO("BF shader screen: shown ({}); nothing else is drawn over it until it is done",
+                  shaders_update_ || ShadersAfterUpdate() ? "after an update, over a fresh cache"
+                                                          : "the first start, right after the game files");
     shaders_shown_ = true;
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    // The first start's step 8 is drawn in the setup's frame (game_menu_setup.inc: the steps' rail, the page on
-    // paper); after an update the page stands alone, as before.
-    const bool setup = setup_shader_step_;
+    // The full screen page on its own, on the first start (right after the game files, before the onboarding) and
+    // after an update (TekRantGaming, 16 Nov 2026: the setup's frame and its step 8 are gone). OnDraw draws no pop-up,
+    // toast or video over it.
     static const char* const kAbout = "Your graphics card is building every shader the game uses, once, so nothing stutters or pops "
                                       "in while you play. This happens after you install and after each update.";
     const bool full = std::atoi(Cvar("native_x_renderer_compile_threads").c_str()) > 0;
-    SetupPanel panel{};
-    if (setup) {
-      panel = SetupFrame(d, io, st, 8);
-      Prompts(d, st, st.P(48, 662), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 15);
-    } else {
-      Chrome(d, io, st, 0);
-      Prompts(d, st, st.P(40, 720 - 26 - 40), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 16);
-    }
+    Chrome(d, io, st, 0);
+    Prompts(d, st, st.P(40, 720 - 26 - 40), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 16);
     const float fraction = p.loading && p.queued ? std::clamp(float(p.done) / float(p.queued), 0.0f, 1.0f) : -1.0f;
     shader_bar_ = fraction < 0 ? 0 : std::max(shader_bar_, shader_bar_ + (fraction - shader_bar_) * 0.15f);
     if (fraction >= 0 && shader_started_ < 0) shader_started_ = ImGui::GetTime(), shader_started_done_ = p.done;
@@ -839,20 +833,18 @@
     int clicked = -1;
     {
       std::optional<kit::Turn> turn;
-      float x = a.x + st(44), w = st(712), y = a.y + st(34);
-      if (setup) {
-        x = panel.a.x + st(24), w = panel.b.x - panel.a.x - st(48);
-        y = SetupTitle(d, st, panel, 8, "PREPARING THE SHADERS", kAbout) + st(8);
-      } else {
-        turn.emplace(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), 0.4f);
-        kit::Paper(d, a, b, st.u, false);
-        kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                    ShadersAfterUpdate() ? "UPDATED TO VERSION " + std::string(BfVersion()) : "BEFORE YOU PLAY", st(2));
-        y += st(24);
-        kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "PREPARING THE SHADERS", st(2), w);
-        y += st(68);
-        y += kit::Wrapped(d, f.ui, st(19), ImVec2(x, y), kit::kInkSoft, kAbout, w) + st(20);
-      }
+      const float x = a.x + st(44), w = st(712);
+      float y = a.y + st(34);
+      turn.emplace(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), 0.4f);
+      kit::Paper(d, a, b, st.u, false);
+      // An update known from the menu's marker (PrepareShadersAtStart) before the game's own check has run.
+      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
+                  shaders_update_ || ShadersAfterUpdate() ? "UPDATED TO VERSION " + std::string(BfVersion()) : "BEFORE YOU PLAY",
+                  st(2));
+      y += st(24);
+      kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "PREPARING THE SHADERS", st(2), w);
+      y += st(68);
+      y += kit::Wrapped(d, f.ui, st(19), ImVec2(x, y), kit::kInkSoft, kAbout, w) + st(20);
       std::string count = "Checking", left;
       if (fraction >= 0) {
         count = std::to_string(p.done) + " of " + std::to_string(p.queued) + " pipelines";
@@ -902,7 +894,7 @@
                  "Uses every CPU core. Faster, but some PCs crash. From the next start.");
       if (ImGui::IsMouseHoveringRect(c0, c1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = 0;
     }
-    if (!setup) StampCorner(d, st);  // the setup's frame has its own
+    StampCorner(d, st);
     if (in.accept) clicked = 0;
     if (clicked == 0) {
       const unsigned all = std::max(4u, std::thread::hardware_concurrency());
@@ -1443,7 +1435,7 @@
       const float x = a.x + st(40), w = st(620);
       float y = a.y + st(32);
       kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                  name_setup_ ? "STEP 2 OF 9 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
+                  name_setup_ ? "STEP 2 OF 8 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
       y += st(24);
       kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, code_mode_ ? "USE A RECOVERY CODE" : "CHOOSE YOUR SOLDIER NAME", st(2), w);
       y += st(64);
@@ -1854,7 +1846,7 @@
       kit::Tape(d, ImVec2(b.x - st(110), a.y + st(4)), st(110), st(26), 3);
       const float x = a.x + st(44), w = st(892);
       float y = a.y + st(40);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 9 OF 9", st(2));
+      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 8 OF 8", st(2));
       y += st(24);
       kit::Heading(d, st(62), ImVec2(x, y), kit::kInk, "YOU'RE ALL SET, " + Upper(settings_.Get("player_name", "SOLDIER")),
                    st(2), w);

@@ -883,7 +883,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // takes it at the next pad read; only with the soldier in the world, as Start).
     if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !comms::TypingOrJustClosed())
       g_escape_press.store(true, std::memory_order_relaxed);  // not the chat box's Esc (comms_ui.cpp)
-    ReportShotTick(ImGui::GetForegroundDrawList(), io);  // F12: a screenshot for a report (game_menu_report.inc)
+    // F12: a screenshot for a report (game_menu_report.inc); not on the shader page, which nothing is drawn over.
+    if (!(open_ && page_ == Page::kShaders)) ReportShotTick(ImGui::GetForegroundDrawList(), io);
     UpdateWalk(io);
     if (hd_import_->turn_on.exchange(false)) SetCvar("native_x_renderer_hd_textures", "true");
     // D150: the GPU's speed, timed once (the log keeps it) after the stored pipelines are made and 3 s of steady
@@ -1187,45 +1188,56 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A pop-up over whatever page is up (the version gate's UPDATE NEEDED, AskToUpdate; What's new after an update,
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
+    // Never over the shader page (TekRantGaming, 16 Nov 2026: "make sure nothing overlays over the shaders it should be
+    // the only screen visable until its finished"): a pop-up raised meanwhile waits for the page after it, and the
+    // news' video (a window of its own) is hidden.
+    const bool shader_page = page_ == Page::kShaders;
+    if (shader_page && news_open_) news::VideoHide();
     const bool over_popup =
-        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_ ||
-        notice_popup_ || news_open_;
+        !shader_page && (update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ ||
+                         new_version_popup_ || notice_popup_ || news_open_);
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
     const float popup_wheel = io.MouseWheel;
     const SoundLook sound_before = LookForSound(popup_in);  // the original menus' sounds (MenuSounds)
     if (over_popup) in = {}, io.MouseDown[0] = false, io.MouseDelta = ImVec2(0, 0), io.MouseWheel = 0;
-    switch (page_) {
-      case Page::kIntro: IntroPage(d, io, in); break;
-      case Page::kStats: StatsPage(d, io, in); break;
-      case Page::kAchievements: AchievementsPage(d, io, in); break;
-      case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
-      case Page::kFriends: FriendsPage(d, io, in); break;
-      case Page::kScoreboard: ScoreboardPage(d, io, in); break;
-      case Page::kPrivateMatch: PrivateMatchPage(d, io, in); break;
-      case Page::kHelp: HelpPage(d, io, in); break;
-      case Page::kControls: ControlsPage(d, io, in); break;
-      case Page::kCredits: CreditsPage(d, io, in); break;
-      case Page::kSetup: FilesPage(d, io, in); break;
-      case Page::kName: AccountPage(d, io, in); break;
-      case Page::kShaders: ShadersPage(d, io, in); break;
-      case Page::kSetupSettings: SetupSettingsA1Page(d, io, in); break;
-      case Page::kPrompts: PromptsA1Page(d, io, in); break;
-      case Page::kVoice: VoicePage(d, io, in); break;
-      case Page::kAllSet: ReadyPage(d, io, in); break;
-      case Page::kHome: MenuPage(d, io, in); break;
-      case Page::kProjects: ProjectsPage(d, io, in); break;
-      case Page::kReport: ReportPage(d, io, in); break;
-      case Page::kStarting: StartingPage(d, io, in); break;
-      case Page::kUpdate: UpdatePage(d, io, in); break;
-      case Page::kMain: MenuPage(d, io, in); break;
-      case Page::kServers: BrowserPage(d, io, in); break;
-      case Page::kSettings: SettingsA1Page(d, io, in); break;
-      case Page::kJoining: JoiningPage(d, s, io, in); break;
-      case Page::kPause: PauseA1Page(d, io, in); break;
-      case Page::kLeaving: LeavingPage(d, s, io); break;
-    }
+    auto draw_page = [&](Input in) {
+      switch (page_) {
+        case Page::kIntro: IntroPage(d, io, in); break;
+        case Page::kStats: StatsPage(d, io, in); break;
+        case Page::kAchievements: AchievementsPage(d, io, in); break;
+        case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
+        case Page::kFriends: FriendsPage(d, io, in); break;
+        case Page::kScoreboard: ScoreboardPage(d, io, in); break;
+        case Page::kPrivateMatch: PrivateMatchPage(d, io, in); break;
+        case Page::kHelp: HelpPage(d, io, in); break;
+        case Page::kControls: ControlsPage(d, io, in); break;
+        case Page::kCredits: CreditsPage(d, io, in); break;
+        case Page::kSetup: FilesPage(d, io, in); break;
+        case Page::kName: AccountPage(d, io, in); break;
+        case Page::kShaders: ShadersPage(d, io, in); break;
+        case Page::kSetupSettings: SetupSettingsA1Page(d, io, in); break;
+        case Page::kPrompts: PromptsA1Page(d, io, in); break;
+        case Page::kVoice: VoicePage(d, io, in); break;
+        case Page::kAllSet: ReadyPage(d, io, in); break;
+        case Page::kHome: MenuPage(d, io, in); break;
+        case Page::kProjects: ProjectsPage(d, io, in); break;
+        case Page::kReport: ReportPage(d, io, in); break;
+        case Page::kStarting: StartingPage(d, io, in); break;
+        case Page::kUpdate: UpdatePage(d, io, in); break;
+        case Page::kMain: MenuPage(d, io, in); break;
+        case Page::kServers: BrowserPage(d, io, in); break;
+        case Page::kSettings: SettingsA1Page(d, io, in); break;
+        case Page::kJoining: JoiningPage(d, s, io, in); break;
+        case Page::kPause: PauseA1Page(d, io, in); break;
+        case Page::kLeaving: LeavingPage(d, s, io); break;
+      }
+    };
+    draw_page(in);
+    // The shader page done in this frame (it draws nothing then, AfterShaders): the page after it is drawn in the
+    // same frame, so no frame shows the game's own picture between the two (its LOADING screen, run shC_t3).
+    if (shader_page && page_ != Page::kShaders && LauncherPage(page_)) draw_page(Input{});
     if (over_popup) {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
@@ -1697,26 +1709,31 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // music, extracted from the player's files (shader_prep.cpp ExtractGameArt), played by us before anything else;
     // the setting Startup cards off (bf_startup_cards = false) skips them.
     const char* restarted = std::getenv("BF_RESTARTED");  // started again by itself: no startup cards twice
-    if (fs::exists(UserDir() / "cache" / "extracted" / "startup" / "card5.png") &&
+    // Just installed by the setup: no startup cards either, the shader page comes right after the game files
+    // (TekRantGaming, 16 Nov 2026; AfterIntro).
+    if (!just_installed_ && fs::exists(UserDir() / "cache" / "extracted" / "startup" / "card5.png") &&
         settings_.Get("bf_startup_cards", "true") != "false" && !(restarted && *restarted == '1')) {
       page_ = Page::kIntro, intro_at_ = -1;
       return;
     }
     AfterIntro();
   }
-  // The intro's end (or none): the setup, or Home.
+  // The intro's end (or none): the shaders when this version's are not prepared, then the setup or Home
+  // (AfterShaders). TekRantGaming, 16 Nov 2026: "the initial setup screen when you give the game files right after it
+  // you should be in the full screen shader comp screen ... the actual onboaring section when you go through settings
+  // should no longer include the shader part ... if the game is updated it removes it shader chashe and builds a fresh
+  // batch of shaders with the same screen then you get dropped back into our main menu". So the shader page comes
+  // first on the first start (right after the game files, before the soldier name), after an update (its cache
+  // deleted when the game starts behind the page, update.cpp), and at any start whose shaders were never finished.
   void AfterIntro() {
-    if (settings_.Get("launcher_setup", "") == "done" && settings_.Get("player_name_chosen", "") == "1") {
-      // The shaders first when this version's are not prepared (the first start after an update): then the menu.
-      if (PrepareShadersAtStart("at the start, before the main menu")) return;
-      page_ = Page::kHome, home_row_ = 0;
+    const bool setup_done = settings_.Get("launcher_setup", "") == "done" && settings_.Get("player_name_chosen", "") == "1";
+    const std::string prepared_for = settings_.Get("shaders_prepared_for", "");
+    if (PrepareShadersAtStart(just_installed_                                   ? "right after the game files, before the onboarding"
+                              : !prepared_for.empty() && prepared_for != BfVersion() ? "the first start after an update, before the main menu"
+                              : setup_done                                      ? "at the start, before the main menu"
+                                                                                : "before the onboarding (never finished before)"))
       return;
-    }
-    if (RenameRequired()) return;  // the saved name was refused (profanity): only a new name, not the whole setup
-    setup_active_ = true;
-    settings_.values["launcher_setup"] = "started";
-    settings_.Save();
-    BeginAccount(true);
+    AfterShaders();
   }
   // The startup cards (TekRantGaming, 10 Nov 2026): the game's rating notice, then the logo cards with the logo music, each
   // logo arriving on a bar's first beat (the music is in 4/4 at about 125 beats a minute, a bar every 1.9 s): EA,
@@ -1813,12 +1830,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
  private:
   void FinishSetup(const fs::path& game_dir) {
     REXLOG_INFO("BF setup: the game is in {}", game_dir.string());
-    page_ = Page::kShaders, row_ = 0;  // the game starts; its shaders next (AfterShaders without a shader screen)
+    page_ = Page::kShaders, row_ = 0;  // until the launcher takes over (done: BeginLauncher, then the shader page)
     pre_game_ = false;
+    just_installed_ = true;  // the shader page next, without the startup cards (BeginLauncher, AfterIntro)
     if (auto done = std::move(setup_done_)) done(game_dir);
   }
 
   bool pre_game_ = false;  // the first start's pages, before the game runs: our own pad reads (HostPad)
+  bool just_installed_ = false;  // the setup just installed the game: its shader page comes next (AfterIntro)
   bool launcher_first_ = false;  // the launcher showed before the game (BeginLauncher); BF signs in only after Play
   bool played_ = false;          // Play started the game: after its shaders the launcher closes
   std::function<void()> start_game_;
@@ -2553,17 +2572,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // The shaders prepared at the start, and only there (TekRantGaming, 13 Nov 2026, as above: "remember the same way
   // kong handles its shaders with them pre compiled we can use them whenever we don't need to recompile any other
   // time"). The renderer makes its pipelines only once the game runs, so when they are not prepared for this version
-  // (a first start: the setup's step 8, with the settings just chosen; the first start after an update, or a setup
-  // closed before that step: before the main menu) the game starts now, behind the shader page, which waits for every
-  // stored pipeline and then writes the marker (shaders_prepared_for). The game goes on starting behind our pages,
-  // silent (SetGameAudioMuted), and is at its menu when the player picks a server. Every other start shows no shader
-  // page: the game starts at the first join, its pipelines made from the driver's cache behind the Joining page.
-  // False when there is nothing to prepare (or the game runs already).
+  // (a first start: right after the game files, before the onboarding; the first start after an update, its cache
+  // deleted, or a start whose shader page was left before its end: before the main menu or the onboarding; AfterIntro)
+  // the game starts now, behind the shader page, which waits for every stored pipeline and then writes the marker
+  // (shaders_prepared_for). The game goes on starting behind our pages, silent (SetGameAudioMuted), and is at its menu
+  // when the player picks a server. Every other start shows no shader page: the game starts at the first join, its
+  // pipelines made from the driver's cache behind the Joining page. False when there is nothing to prepare (or the
+  // game runs already).
   bool PrepareShadersAtStart(const char* why) {
     if (!pre_game_ || !start_game_ || ShadersPreparedForPlay()) return false;
+    const std::string prepared_for = settings_.Get("shaders_prepared_for", "");
+    shaders_update_ = !prepared_for.empty() && prepared_for != BfVersion();  // the page's UPDATED TO VERSION
     REXLOG_INFO("BF shaders: not prepared for v{} (prepared for \"{}\"): prepared now, {}; the game starts behind the "
-                "shader page",
-                BfVersion(), settings_.Get("shaders_prepared_for", ""), why);
+                "shader page{}",
+                BfVersion(), prepared_for, why, shaders_update_ ? " (an update: its shader cache is deleted first)" : "");
     pre_game_ = false, started_from_launcher_ = true;
     NoteStartValues();  // the renderer takes its settings now
     shaders_prepared_hint_ = false;
@@ -5524,7 +5546,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   double shaders_behind_from_ = 0;
   bool shaders_prepared_hint_ = false;  // decided at Play (ShadersPreparedForPlay), before the game has loaded
   bool join_after_shaders_ = false;     // a server picked on Home: its join once the shader page is done
-  bool setup_shader_step_ = false;      // the first start's step 8 is up: Ready follows it (AfterShaders)
+  bool shaders_update_ = false;         // the shader page is an update's (PrepareShadersAtStart: another version's marker)
   double shaders_wait_from_ = -1;       // the game was started for the shader page: until its renderer is up (or 60 s)
 
   // King Kong's rule decided at Play: the start's own check (CheckShadersAfterUpdate) runs once the game has loaded,
@@ -6050,8 +6072,8 @@ fs::path MenuUserDir() { return g_menu ? g_menu->UserDir() : fs::path(); }
 // King Kong's rule exactly (its shader_prepared.h; TekRantGaming, 11 Nov 2026: shaders compile when the game files
 // are first given, then never again until the game updates, when they are all compiled again; "Copy Kong exactly").
 // At each start (bf1943_app.h, before the shaders are prepared and before the renderer opens its storage):
-// - shaders prepared for another version: an update; the shader page makes every pipeline again, over the cache
-//   (nothing deleted: update.cpp), "UPDATED TO VERSION";
+// - shaders prepared for another version: an update; the old shader and pipeline cache is deleted and the shader page
+//   builds a fresh set, "UPDATED TO VERSION", then the main menu (update.cpp; TekRantGaming, 16 Nov 2026, v0.4.7);
 // - prepared for this version (shaders_prepared_for, written once the page has compiled them all) and the renderer's
 //   storage still there: no shader page; the renderer makes its stored pipelines behind the menus, from the driver's
 //   cache (pipelines first met in play are kept in the storage and made the same way at the next start);
