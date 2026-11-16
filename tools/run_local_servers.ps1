@@ -45,7 +45,9 @@ if (Test-Path $data) { Remove-Item (Join-Path $bin "data") -Recurse -Force -Erro
 $env:SDL_WINDOW_ACTIVATE_WHEN_SHOWN = "0"  # server windows never take the focus
 $env:SDL_WINDOW_ACTIVATE_WHEN_RAISED = "0"
 $pids = @()
-$backend = Start-Process -FilePath $python -ArgumentList "-I", (Join-Path $root "server\plasma.py"), "--log", (Join-Path $dir "plasma.log") `
+# Each player's stats (server/player_stats.py): every local server counts, kept in this run's folder.
+$backend = Start-Process -FilePath $python -ArgumentList "-I", (Join-Path $root "server\plasma.py"), "--log", (Join-Path $dir "plasma.log"),
+    "--player-stats", (Join-Path $dir "player_stats.json"), "--player-stats-from", "all" `
     -WindowStyle Hidden -RedirectStandardOutput (Join-Path $dir "plasma.out") -PassThru
 $pids += "backend $($backend.Id)"
 Start-Sleep 1
@@ -60,13 +62,14 @@ foreach ($m in $Maps) {
     $env:BF_LOOPBACK_ADDR = $address
     $args = @("--game_data_root=`"$(Join-Path $root 'input\pkg')`"", "--user_data_root=`"$(Join-Path $sdir 'user')`"",
               "--log_file=`"$(Join-Path $sdir 'bf1943.log')`"", "--fullscreen=false", "--server",
-              "--cl=`"-dedicated -level $($map.Level)`"") + $ServerArgs
+              "--cl=`"-dedicated -level $($map.Level)`"", "--bf_stats_file=`"$(Join-Path $sdir 'stats.txt')`"") + $ServerArgs
     $server = Start-Process -FilePath (Join-Path $bin "bf1943.exe") -ArgumentList $args -WorkingDirectory $bin -WindowStyle Minimized `
         -RedirectStandardError (Join-Path $sdir "stderr.txt") -RedirectStandardOutput (Join-Path $sdir "stdout.txt") -PassThru
     Remove-Item Env:BF_LOOPBACK_ONLY, Env:BF_LOOPBACK_ADDR
     $hostArgs = @("-I", (Join-Path $root "server\gmhost.py"), "--backend", "127.0.0.1:18250",
         "--listen", $gateway, "--game-server", "$($address):1003", "--name", "`"$($map.Title) (local)`"",
-        "--map", "`"$(if ($map.Map) { $map.Map } else { $map.Title })`"", "--log", (Join-Path $sdir "gmhost.log"))
+        "--map", "`"$(if ($map.Map) { $map.Map } else { $map.Title })`"", "--log", (Join-Path $sdir "gmhost.log"),
+        "--stats-file", (Join-Path $sdir "stats.txt"))
     if ($NightMaps -contains $m -or $map.Night) { $hostArgs += "--night" }  # Start-Process takes no empty argument
     $host_ = Start-Process -FilePath $python -ArgumentList $hostArgs -WindowStyle Hidden -RedirectStandardOutput (Join-Path $sdir "gmhost.out") -PassThru
     $pids += "$m server $($server.Id)"

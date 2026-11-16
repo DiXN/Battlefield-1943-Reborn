@@ -668,7 +668,8 @@ class Manager:
                          '--accounts', os.path.join(DATA, 'accounts.json'),
                          '--leaderboard', os.path.join(DATA, 'leaderboard.json'),
                          # the website's totals (server/stats.py): players who joined a match, hours played
-                         '--stats', os.path.join(DATA, 'stats.json')]
+                         '--stats', os.path.join(DATA, 'stats.json'),
+                         '--player-stats', os.path.join(DATA, 'player_stats.json')]
                 if self.cfg['required_version']:
                     args += ['--required-version', self.cfg['required_version']]
                 elif self.cfg['version_gate']:
@@ -697,7 +698,9 @@ class Manager:
                  '--bf_balance_gap=%d' % s['balance_gap'], '--bf_balance_min_players=%d' % s['balance_min_players'],
                  '--bf_balance_delay=%d' % s['balance_delay'],
                  '--bf_balance_block_stacking=%s' % ('true' if s['balance_block_stacking'] else 'false'),
-                 '--bf_balance_events=' + os.path.join(directory, 'balance.txt')]
+                 '--bf_balance_events=' + os.path.join(directory, 'balance.txt'),
+                 # Each player's stats (server_stats.cpp), for the host to send to the backend.
+                 '--bf_stats_file=' + os.path.join(directory, 'stats.txt')]
         # The game simulates at the rate set here: the server's own, else the manager's.
         tick = s.get('tick') or self.cfg['tick']
         game.append('--bf_tick_rate=%d' % tick)
@@ -716,7 +719,8 @@ class Manager:
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
                 '--max-players', str(s['max_players']), '--tick', str(tick),
                 '--broadcast-file', os.path.join(directory, 'broadcast.json'),
-                '--balance-file', os.path.join(directory, 'balance.txt'), '--host-key-file', self.host_key()]
+                '--balance-file', os.path.join(directory, 'balance.txt'), '--host-key-file', self.host_key(),
+                '--stats-file', os.path.join(directory, 'stats.txt')]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]
         if s['description']:

@@ -51,6 +51,7 @@
 #include "clan_tags.h"
 #include "display_modes.h"
 #include "game_install.h"
+#include "achievement_toast.h"  // the achievement popup, the pictures (game_menu_progress.inc)
 #include "launcher_kit.h"
 #include "private_match.h"
 #include "regions.h"
@@ -1244,8 +1245,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     MenuSounds(sound_before, popup_in, popup_down, popup_delta);
     // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
     if (kit::WatermarkOn() && open_ &&
-        (page_ == Page::kStats ||
-         page_ == Page::kAchievements || page_ == Page::kLeaderboards || page_ == Page::kFriends ||
+        (page_ == Page::kFriends ||
          page_ == Page::kScoreboard || page_ == Page::kPrivateMatch || page_ == Page::kJoining || page_ == Page::kLeaving ||
          page_ == Page::kControls || page_ == Page::kCredits)) {  // the new look's pages stamp their own foot
       const Stage st = StageOf(io);
@@ -3859,6 +3859,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_menu_sounds"));
     rows.push_back(Slider("Menu", "Menu sound volume", "How loud the menu sounds are (with the master volume). Applies at once.",
                           "bf_menu_sounds_volume", 0, 100, 5, Percent, 100));
+    // The achievement popup and its chime (achievement_toast.h).
+    rows.push_back(Toggle("Achievements", "Achievement popups",
+                          "A note at the top right and a short chime when you unlock one of the game's achievements. "
+                          "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime.",
+                          "bf_achievement_popups"));
+    rows.push_back(Slider("Achievements", "Achievement sound volume", "How loud the achievement chime is. 0 is silent.",
+                          "bf_achievement_volume", 0, 100, 5, Percent, 80));
     // The rest of the game's own Sound page (its master, music and dialogue volumes are the rows above).
     rows.push_back(GameChoice("Game sound", "Sound system",
                               "What you listen on, as the game's own setting: it mixes its sound for that.",
@@ -5244,6 +5251,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #include "game_menu_news.inc"
 #include "game_menu_report.inc"  // Report an issue, the form that files on GitHub
 #include "game_menu_browser.inc"
+#include "game_menu_progress.inc"  // Stats & Rewards, Leaderboards, Achievements
 #include "game_menu_controls.inc"  // Settings > Controls by device: the choice, each device's rows and drawings
 #include "game_menu_settings.inc"
 #include "game_menu_setup.inc"

@@ -32,6 +32,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's folder out
 import gmhost  # noqa: E402
+import player_stats  # noqa: E402
 import stats  # noqa: E402
 import text_filter  # noqa: E402
 
@@ -52,6 +53,7 @@ MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'
 LEADERBOARD_FILE = None  # where it is kept (--leaderboard), loaded at the start
 # The website's totals (server/stats.py): players who joined a match, this month's, hours played. Kept in --stats.
 STATS = stats.Stats()
+PLAYER_STATS = player_stats.PlayerStats()  # each player's stats as the servers count them (player_stats.py)
 
 # ---- Protect your name (TekRantGaming, 15 Nov 2026: "a secure your username option ... prevents anyone else from
 # taking that name ... store long term progression tracking for the user", with no email and no setup from players).
@@ -1412,6 +1414,14 @@ class Registry:
       player:  {"op": "stats_put", signed "stats_put|nonce|name|score|seconds|captures|Label=events,points;...|1,7"}
                -> {"op": "stats_put", "ok"}  totals for the leaderboard and the account (unsigned stats for a protected
                name are refused)
+    Each player's stats as the servers count them (player_stats.py, server_stats.cpp):
+      server:  {"op": "player_stats", "rows": [{"name", "kills", "deaths", ...}]}  each player's new counts; kept only
+               from official servers (or every server with --player-stats-from all)
+      anyone:  {"op": "leaderboard", "sort", "period", "me"} -> {"op": "leaderboard", "rows", "total", "me"?}  a board
+               by score, kills, kd, captures, seconds, ... for all time, this month or this week (without sort, period
+               and me: the old reply, by score)
+      anyone:  {"op": "player_card", "name"} -> {"op": "player_card", "found", every count, "maps", "places", ...}
+      anyone:  {"op": "achievement_share"} -> {"op": "achievement_share", "players", "have": {id: count}}
     """
     ids = itertools.count(1)
 
@@ -1604,6 +1614,8 @@ class Registry:
             row['name'] = name
             LEADERBOARD[name.lower()] = row
             save_leaderboard()
+        if acct.get('name'):
+            PLAYER_STATS.rename(acct['name'], name)  # and the stats the servers counted
         self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
         acct['name'] = name
         ACCOUNT_NAMES[name.lower()] = key
@@ -1797,6 +1809,37 @@ class Registry:
                 elif op == 'stats':
                     # The website's totals (server/stats.py, read by its feed): counts only, nothing about anyone.
                     writer.write((json.dumps(dict(STATS.totals(), op='stats')) + '\n').encode())
+                elif op == 'player_stats' and gid in GAMES:
+                    # A dedicated server's counts (server_stats.cpp): only a server we trust counts (player_stats.py).
+                    trusted = GAMES[gid].get('official') or getattr(self.args, 'player_stats_from', '') == 'all'
+                    if trusted:
+                        PLAYER_STATS.add(m.get('rows'))
+                elif op == 'leaderboard' and ('sort' in m or 'period' in m or 'me' in m):
+                    # Leaderboards (game_menu_progress.inc): a board by any stat and period, with the asker's own row.
+                    board = PLAYER_STATS.board(str(m.get('sort', 'score')), str(m.get('period', 'all')), 50,
+                                               str(m.get('me', ''))[:15], LEADERBOARD)
+                    board['rows'] = with_tags(board['rows'])
+                    if 'me' in board:
+                        board['me'] = with_tags([board['me']])[0]
+                    writer.write((json.dumps(dict(board, op='leaderboard')) + '\n').encode())
+                elif op == 'achievement_share':
+                    # Achievements (game_menu_progress.inc): how many players with an account have each one. Counts
+                    # only: the accounts' progress (Protect your name), nothing about anyone.
+                    have, players = {}, 0
+                    for acct in ACCOUNTS.values():
+                        ids = (acct.get('progress') or {}).get('achievements') or []
+                        if not acct.get('name'):
+                            continue
+                        players += 1
+                        for i in set(ids):
+                            if type(i) is int and 0 < i < 1000:
+                                have[str(i)] = have.get(str(i), 0) + 1
+                    writer.write((json.dumps({'op': 'achievement_share', 'players': players, 'have': have}) +
+                                  '\n').encode())
+                elif op == 'player_card':
+                    # Stats & Rewards, and a leaderboard row's card: one player's record (counts only, by name).
+                    card = PLAYER_STATS.card(str(m.get('name', ''))[:15], LEADERBOARD)
+                    writer.write((json.dumps(dict(card, op='player_card')) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
                     writer.write((json.dumps({'op': 'leaderboard', 'rows': with_tags(rows), 'total': total}) +
@@ -2132,6 +2175,10 @@ async def main():
                          'new joins are refused with its text (maintenance_now)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
+    ap.add_argument('--player-stats', default='',
+                    help="a file keeping each player's stats as the servers count them (server/player_stats.py)")
+    ap.add_argument('--player-stats-from', default='official', choices=('official', 'all'),
+                    help="whose counts are kept: official servers only, or every server (a test backend)")
     ap.add_argument('--accounts', default='',
                     help="a file keeping the players' accounts (Protect your name: protected names and progress)")
     ap.add_argument('--team-names', default='',
@@ -2171,6 +2218,8 @@ async def main():
     keep_team_names()
     STATS.path = args.stats or None
     STATS.load()
+    global PLAYER_STATS
+    PLAYER_STATS = player_stats.PlayerStats(args.player_stats or None)
     for n, address in enumerate(args.game, 1):
         host, port = address.rsplit(':', 1)
         GAMES[str(n)] = {'GID': str(n), 'LID': '1', 'I': host, 'P': int(port), 'HU': n, 'HN': 'bf1943-server-%d' % n,
@@ -2218,6 +2267,11 @@ async def main():
             maintenance_now()
         accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
         stats_task = asyncio.ensure_future(keep_stats_saved(max(0.5, args.stats_save_every)))
+        async def keep_player_stats_saved():  # each player's stats (player_stats.py), when something changed
+            while True:
+                await asyncio.sleep(10)
+                PLAYER_STATS.save(force=True)
+        player_stats_task = asyncio.ensure_future(keep_player_stats_saved())
         log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
                                              ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
         log.write('%s team names: %s\n' % (time.strftime('%H:%M:%S'),
@@ -2243,8 +2297,10 @@ async def main():
             feed_task.cancel()
         accounts_task.cancel()
         stats_task.cancel()
+        player_stats_task.cancel()
         save_accounts()
         STATS.save()
+        PLAYER_STATS.save(force=True)
 
 
 if __name__ == '__main__':

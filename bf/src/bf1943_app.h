@@ -22,6 +22,7 @@
 #include "game_install.h"
 #include "private_match.h"
 #include "report.h"
+#include "achievement_toast.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -403,6 +404,14 @@ class Bf1943App : public rex::ReXApp {
     bf1943::PrepareShaders(bf1943::ExecutableDir() / "data" / "shaders", paths_.game_data_root, cache);
     // The pipelines this game builds, for the next update's shader list (Settings > Gameplay > Share graphics data).
     bf1943::StartPipelineUploads(paths_.user_data_root, cache);
+  }
+
+  // The achievement popup and its chime (achievement_toast.h, his pick M1 of 16 Nov 2026), in place of the SDK's toast.
+  // None on a dedicated server (no window).
+  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog() override {
+    if (REXCVAR_GET(server) || !imgui_drawer()) return nullptr;
+    bf1943::SetAchievementUserDir(paths_.user_data_root);
+    return std::make_unique<bf1943::AchievementToast>(imgui_drawer());
   }
 
   // Override virtual hooks for customization:

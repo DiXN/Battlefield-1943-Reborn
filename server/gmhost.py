@@ -989,6 +989,42 @@ async def serve(args):
             except Exception as e:  # a dead heartbeat left the list's players and map stale
                 host.note('heartbeat failed: %r' % e)
 
+        stats_at = [None]  # how far into --stats-file has been sent (None: not looked yet)
+
+        def stats_lines():
+            """Each player's stats from the game (server_stats.cpp, --bf_stats_file): the lines written since the last
+            look, each a "player_stats" message for the backend. What is there as the host starts is from an earlier
+            run; a file that shrank started again."""
+            if not args.stats_file:
+                return []
+            try:
+                size = os.path.getsize(args.stats_file)
+            except OSError:
+                if stats_at[0] is None:
+                    stats_at[0] = 0
+                return []
+            if stats_at[0] is None:
+                stats_at[0] = size
+                return []
+            if size < stats_at[0]:
+                stats_at[0] = 0
+            if size == stats_at[0]:
+                return []
+            with open(args.stats_file, 'rb') as f:
+                f.seek(stats_at[0])
+                data = f.read(min(size - stats_at[0], 1 << 20))
+            end = data.rfind(b'\n') + 1
+            stats_at[0] += end
+            out = []
+            for line in data[:end].splitlines():
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(m, dict) and m.get('op') == 'player_stats' and isinstance(m.get('rows'), list):
+                    out.append({'op': 'player_stats', 'rows': m['rows'][:64]})
+            return out
+
         async def beat_loop():
             while True:
                 # The map now running: the server's rotation writes it (server_rotation.cpp), else --map.
@@ -1008,6 +1044,8 @@ async def serve(args):
                       'names': host.player_names()})
                 write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
                                         names=host.player_names()))
+                for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
+                    send(m)
                 await writer.drain()
                 await asyncio.sleep(5)
 
@@ -1081,6 +1119,8 @@ def main():
     ap.add_argument('--broadcast-file', default='',
                     help='a JSON file the server manager writes to send a message to every player on the server: '
                          '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
+    ap.add_argument('--stats-file', default='',
+                    help="each player's stats from the game (its --bf_stats_file): every new line goes to the backend")
     ap.add_argument('--balance-file', default='',
                     help="the dedicated server's team balance events (its --bf_balance_events): players are told of "
                          'moves and refused team changes')

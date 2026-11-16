@@ -42,6 +42,8 @@ set(BF1943_SOURCES
     src/game_menu.cpp
     src/account_key.cpp
     src/launcher_kit.cpp
+    src/achievement_toast.cpp
+    src/server_stats.cpp
     src/steam_shortcut.cpp
     src/projects_art.cpp
     src/news.cpp
