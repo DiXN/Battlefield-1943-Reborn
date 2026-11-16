@@ -108,6 +108,10 @@
       ok = true;
       return where + "CONNECTING TO THE SERVERS";
     }
+    if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) {
+      ok = false;
+      return "SERVERS CLOSED \xC2\xB7 " + Upper(n.title.empty() ? std::string("MAINTENANCE") : n.title);
+    }
     if (!ok) return where + "SERVERS NOT REACHABLE";
     return where + fmt::format("{} {} ONLINE \xC2\xB7 {} {}", list_.players_online(), list_.players_online() == 1 ? "PLAYER" : "PLAYERS",
                                servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS");
@@ -162,6 +166,7 @@
       menu_error_ = "Looking for a server...", menu_error_at_ = ImGui::GetTime();
       return;
     }
+    if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) return ShowNotice(n, "Quick Play");
     if (QuickJoin()) return;
     menu_error_ = "No server has room right now. Try again in a moment, or open the server browser.";
     menu_error_at_ = ImGui::GetTime();

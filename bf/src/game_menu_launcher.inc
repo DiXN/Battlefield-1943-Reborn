@@ -1904,8 +1904,10 @@
     // Top right: the players and servers online (the backend's list, every 5 s).
     {
       const auto servers = list_.servers();
-      const bool up = list_.reachable();
-      const std::string t = up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
+      const ServerNotice notice = list_.notice();
+      const bool up = list_.reachable() && !notice.active();
+      const std::string t = notice.active() ? "SERVERS CLOSED \xC2\xB7 " + Upper(notice.title)
+                            : up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
                                              servers.size() == 1 ? "SERVER ONLINE" : "SERVERS ONLINE")
                         : !list_.asked() ? "CONNECTING"
                                : "SERVERS NOT REACHABLE";
@@ -3989,7 +3991,7 @@
     }
     if (version.empty() || !update::IsNewerVersion(version, BfVersion()) || version == new_version_shown_) return;
     if ((page_ != Page::kHome && page_ != Page::kMain) || quit_popup_ || update_popup_ || steam_ask_ || steam_job_ ||
-        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_)
+        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_ || notice_popup_)
       return;
     new_version_popup_ = true, new_version_shown_ = version, popup_row_ = 1;  // Update
     REXLOG_INFO("BF update: version {} found (this is {}): the new version pop-up", version, BfVersion());
@@ -4115,7 +4117,8 @@
   // notes since that version, the build counted as the changelog's newest one (a developer build's own version has
   // no notes).
   void WhatsNewTick() {
-    if (!whats_new_pending_ || whats_new_open_ || update_popup_ || quit_popup_ || steam_ask_ || steam_job_) return;
+    if (!whats_new_pending_ || whats_new_open_ || update_popup_ || quit_popup_ || steam_ask_ || steam_job_ || notice_popup_)
+      return;
     std::string current = BfVersion();
 #if defined(BF_DEV_TOOLS)
     const char* dev = std::getenv("BF_DEV_WHATS_NEW");
@@ -4286,6 +4289,54 @@
     const auto state = update::State(update::Get().state.load());
     if (state == update::State::kNone || state == update::State::kFailed) CheckForUpdate("Update now on the pop-up");
     page_ = Page::kUpdate;
+  }
+  // ---- The backend's words for a player it does not let in (server_list.h ServerNotice; TekRantGaming, 15 Nov 2026:
+  // maintenance periods players learn about in the game, not only on Discord): maintenance mode's notice, a full
+  // server, any refusal of a join with a message. Over the page that asked to join, one OK.
+  bool notice_popup_ = false;
+  ServerNotice notice_shown_;
+  void ShowNotice(const ServerNotice& n, const std::string& asked) {
+    notice_popup_ = true, notice_shown_ = n, popup_row_ = 0;
+    if (notice_shown_.title.empty()) notice_shown_.title = n.kind == "full" ? "SERVER FULL" : "COULD NOT JOIN";
+    REXLOG_INFO("BF join: {} refused by the backend ({}): {}: {}", asked.empty() ? "the join" : asked,
+                n.kind.empty() ? "maintenance" : n.kind, notice_shown_.title, n.text);
+  }
+  void NoticePopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const bool full = notice_shown_.kind == "full";
+    const std::string eyebrow = full ? "THE SERVER LIST \xC2\xB7 COULD NOT JOIN" : "THE SERVER LIST \xC2\xB7 SERVERS CLOSED";
+    const std::string foot = full ? "" : "New joins are closed for now. Players already in a match play on.";
+    const float w = st(560);
+    const float text_h = kit::WrappedHeight(f.ui, st(18), notice_shown_.text, w);
+    const float foot_h = foot.empty() ? 0 : kit::WrappedHeight(f.ui, st(14), foot, w) + st(12);
+    const float h = st(26) + st(22) + st(48) + text_h + st(16) + foot_h + st(70) + st(20);
+    const float top = std::max(st.P(0, 120).y, st.P(0, 360).y - h * 0.5f);
+    const ImVec2 a(st.P(330, 0).x, top), b(st.P(950, 0).x, top + h);
+    {
+      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
+      kit::Paper(d, a, b, st.u);
+      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
+      float y = a.y + st(26);
+      kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), y), kit::kStamp, eyebrow, st(1.5f));
+      y += st(22);
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), y), kit::kInk, Upper(notice_shown_.title), st(1.5f), w);
+      y += st(48);
+      kit::Wrapped(d, f.ui, st(18), ImVec2(a.x + st(30), y), kit::kInkSoft, notice_shown_.text, w);
+      y += text_h + st(16);
+      if (!foot.empty()) kit::Wrapped(d, f.ui, st(14), ImVec2(a.x + st(30), y), kit::kInkFaint, foot, w);
+    }
+    const ImVec2 c0(a.x + st(30), b.y - st(70)), c1(a.x + st(230), b.y - st(26));
+    const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+    d->AddRectFilled(ImVec2(c0.x, c0.y + st(4)), ImVec2(c1.x, c1.y + st(4)), kit::kGreenShadow);
+    d->AddRectFilled(c0, c1, kit::kGreen);
+    const float tw = kit::TextWidth(f.ui_bold, st(20), "OK");
+    d->AddText(f.ui_bold, st(20), ImVec2((c0.x + c1.x - tw) * 0.5f, c0.y + st(8)), IM_COL32(255, 255, 255, 255), "OK");
+    if (in.accept || in.back || (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left))) {
+      notice_popup_ = false;
+      REXLOG_INFO("BF join: the backend's notice closed");
+    }
   }
   void UpdatePage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("update");

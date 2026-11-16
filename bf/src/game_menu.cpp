@@ -1044,14 +1044,22 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (quick_waiting_ > 0) {
       if (list_.answers() > quick_asked_at_) {
         quick_waiting_ = 0;
-        if (!QuickJoin()) {
+        if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) {
+          menu_error_.clear();
+          ShowNotice(n, "Quick Play");
+        } else if (!QuickJoin()) {
           menu_error_ = list_.reachable() ? "No server has room right now. Try again in a moment, or open the server browser."
                                          : "The servers do not answer. Check your internet connection.";
           menu_error_at_ = ImGui::GetTime();
         }
       } else if (ImGui::GetTime() > quick_waiting_) {
         quick_waiting_ = 0;
-        menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = ImGui::GetTime();
+        if (const ServerNotice n = list_.notice(); n.active()) {  // the backend is down: the last notice known
+          menu_error_.clear();
+          ShowNotice(n, "Quick Play");
+        } else {
+          menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = ImGui::GetTime();
+        }
       }
     }
 
@@ -1161,7 +1169,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
     const bool over_popup =
-        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_;
+        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_ ||
+        notice_popup_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1200,6 +1209,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (over_popup) {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
+      else if (notice_popup_) NoticePopup(d, io, popup_in);
       else if (new_version_popup_) NewVersionPopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
       else if (exp_popup_) ExperimentalPopup(d, io, popup_in);
@@ -1960,7 +1970,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const auto servers = list_.servers();
     int players = 0;
     for (const auto& sv : servers) players += sv.players;
+    const ServerNotice notice = list_.notice();
     const std::string online = !list_.asked()       ? "CONNECTING"
+                               : notice.active()    ? "SERVERS CLOSED \xC2\xB7 " + Upper(notice.title)
                                : !list_.reachable() ? "SERVERS NOT REACHABLE"
                                : fmt::format("{} {}  /  {} {}", servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS",
                                              players, players == 1 ? "PLAYER" : "PLAYERS");
@@ -2281,6 +2293,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
   }
   void Join(const ServerInfo& sv) {
+    // Maintenance mode (server_list.h ServerNotice): the backend refuses every join; said at once, no round trip. On a
+    // LAN match's own backend the main one's notice says nothing.
+    if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) return ShowNotice(n, sv.name);
     if (sv.locked && pw_passed_ != sv.gid + "@" + sv.address) {
       pw_popup_ = true, pw_server_ = sv, pw_text_.clear(), pw_error_.clear();
       return;
@@ -2302,9 +2317,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (const char* v = std::getenv("BF_DEV_NO_GATE_PRECHECK"); v && *v == '1') needs.clear();
 #endif
     if (!needs.empty() && update::IsNewerVersion(needs, BfVersion())) return AskToUpdate(needs, sv.name);
-    switch (list_.Reserve(sv.gid, &needs)) {
+    ServerNotice refusal;
+    switch (list_.Reserve(sv.gid, &needs, &refusal)) {
       case ServerList::Reserved::kYes: break;
       case ServerList::Reserved::kOutdated: return AskToUpdate(needs, sv.name);
+      case ServerList::Reserved::kRefused: return ShowNotice(refusal, sv.name);
       case ServerList::Reserved::kNo:
         REXLOG_WARN("BF join: {} could not be reserved (no answer from the server list, or the server is gone)", sv.name);
         menu_error_ = "Could not join that server: the server list did not answer. Try again in a moment.";

@@ -260,8 +260,10 @@
     // ---- the title block
     {
       const int players = list_.players_online();
+      const ServerNotice notice = list_.notice();
       const std::string eyebrow =
-          !online_ok ? "PACIFIC THEATRE \xC2\xB7 THE SERVER LIST IS NOT REACHABLE RIGHT NOW"
+          notice.active() && !lan ? "PACIFIC THEATRE \xC2\xB7 SERVERS CLOSED \xC2\xB7 " + Upper(notice.title)
+          : !online_ok ? "PACIFIC THEATRE \xC2\xB7 THE SERVER LIST IS NOT REACHABLE RIGHT NOW"
                      : fmt::format("PACIFIC THEATRE \xC2\xB7 {} {} \xC2\xB7 {} {} ONLINE", all.size(),
                                    all.size() == 1 ? "SERVER" : "SERVERS", players, players == 1 ? "PLAYER" : "PLAYERS");
       kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), kit::kKhakiDim, eyebrow, st(2));
@@ -519,6 +521,18 @@
         why = fmt::format("No {} server right now. The list refreshes every 5 seconds.",
                           browser_tab_ == kTabOfficial ? "Reborn" : "community");
       kit::Wrapped(d, f.ui, st(13.75f), ImVec2(ta.x + st(20), top + st(20)), kit::kInkFaint, why, tb.x - ta.x - st(40));
+    }
+    // Maintenance mode (server_list.h ServerNotice): its words over the top of the list; the servers stay under it.
+    if (const ServerNotice notice = list_.notice(); notice.active() && !lan && own_backend_.empty()) {
+      const float nw = tb.x - ta.x - st(40);
+      const std::string title = "SERVERS CLOSED \xC2\xB7 " + Upper(notice.title);
+      const float th = kit::WrappedHeight(f.ui, st(14), notice.text, nw - st(24));
+      const ImVec2 n0(ta.x + st(20), top + st(10)), n1(tb.x - st(20), top + st(10) + st(18) + st(26) + th + st(16));
+      d->AddRectFilled(n0, n1, IM_COL32(244, 236, 214, 250));
+      d->AddRectFilled(n0, ImVec2(n0.x + st(5), n1.y), kit::kStamp);
+      d->AddRect(n0, n1, kit::kInk, 0, 0, st(1.5f));
+      kit::Spaced(d, f.ui_bold, st(14), ImVec2(n0.x + st(20), n0.y + st(16)), kit::kStamp, title, st(1.5f));
+      kit::Wrapped(d, f.ui, st(14), ImVec2(n0.x + st(20), n0.y + st(18) + st(26)), kit::kInk, notice.text, nw - st(24));
     }
     if (ImGui::GetTime() - browser_note_at_ < 2.5)
       kit::Spaced(d, f.typed, st(10), ImVec2(ta.x, tb.y + st(8)), kit::kKhakiText, browser_note_, st(2));
