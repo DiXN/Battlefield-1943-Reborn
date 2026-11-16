@@ -1,7 +1,7 @@
 // The achievement popup (TekRantGaming, 16 Nov 2026: "make it work like the king kong game had achievements with a
 // popup and a sound"; his pick M1 "Medal Case", runs/ui-designs/out/m1_popup.png): when the game unlocks one of its 12
-// achievements (the SDK's XGIUserWriteAchievements, AchievementManager), a paper dispatch slip slides in at the top
-// right with the achievement's own picture, its name in the game's headline font, its words and its gamerscore, and a
+// achievements (the SDK's XGIUserWriteAchievements, AchievementManager), or one of Reborn's own is unlocked
+// (reborn_achievements.h), a paper dispatch slip slides in at the top right with the achievement's own picture, its name in the game's headline font, its words and its gamerscore, and a
 // short chime plays. Several at once queue, one after the other. As King Kong Recompiled's toast (kk/src/toast.cpp),
 // in the Field Dispatch look.
 //

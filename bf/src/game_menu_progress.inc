@@ -196,6 +196,7 @@
     std::vector<AchRow> rows;
     auto* k = REX_KERNEL_STATE();
     if (!k) return rows;
+    reborn_achievements::Ensure();  // the game's 12 and Reborn's own 3
     const std::string default_state = test_profile_.Get("achievements", "actual");
     for (const auto& a : k->achievements().ListAchievements()) {
       AchRow r;
@@ -871,7 +872,11 @@
       const double fp = p->need ? double(p->have) / double(p->need) : -1, fq = q->need ? double(q->have) / double(q->need) : -1;
       return fp > fq;
     });
-    const int n = int(list.size()), per_col = 6;
+    // Two columns of six rows on screen; with more than 12 (the game's 12 and Reborn's own) each column is longer and
+    // scrolls: the chosen row is kept in sight, the mouse wheel scrolls too.
+    constexpr int kShown = 6;
+    const int n = int(list.size()), per_col = std::max(kShown, (n + 1) / 2);
+    const bool moved = in.up || in.down || in.left || in.right;
     if (n) {  // up and down within a column, left and right across
       if (in.up) ach_row_ = (ach_row_ + n - 1) % n;
       if (in.down) ach_row_ = (ach_row_ + 1) % n;
@@ -879,11 +884,19 @@
       if (in.right && ach_row_ + per_col < n) ach_row_ += per_col;
     }
     ach_row_ = std::clamp(ach_row_, 0, std::max(0, n - 1));
+    if (moved) {
+      const int k = ach_row_ % per_col;
+      if (k < ach_scroll_) ach_scroll_ = k;
+      if (k >= ach_scroll_ + kShown) ach_scroll_ = k - kShown + 1;
+    }
+    if (io.MouseWheel != 0 && ImGui::IsMouseHoveringRect(st.P(48, 237), st.P(1232, 640)))
+      ach_scroll_ -= io.MouseWheel > 0 ? 1 : -1;
+    ach_scroll_ = std::clamp(ach_scroll_, 0, per_col - kShown);
     if (in.y && n) TestAchievementPopup(list[size_t(ach_row_)]->info.id);
     kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), kit::kKhakiDim,
                 test_profile_active_ ? "BATTLEFIELD 1943 \xC2\xB7 TEST PROFILE"
-                : NameProtected()   ? "BATTLEFIELD 1943 \xC2\xB7 THE GAME'S OWN 12 \xC2\xB7 SAVED TO YOUR NAME"
-                                    : "BATTLEFIELD 1943 \xC2\xB7 THE GAME'S OWN 12 \xC2\xB7 SAVED ON THIS PC",
+                : NameProtected()   ? "BATTLEFIELD 1943 \xC2\xB7 THE GAME'S OWN 12 AND REBORN'S 3 \xC2\xB7 SAVED TO YOUR NAME"
+                                    : "BATTLEFIELD 1943 \xC2\xB7 THE GAME'S OWN 12 AND REBORN'S 3 \xC2\xB7 SAVED ON THIS PC",
                 st(2));
     kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "ACHIEVEMENTS");
     // ---- the summary strip
@@ -927,9 +940,9 @@
     for (int col = 0; col < 2; ++col) {
       const ImVec2 a = st.P(col ? 648 : 48, 237), b = st.P(col ? 1232 : 632, 640);
       kit::PaperArt(d, a, b);
-      for (int k = 0; k < per_col; ++k) {
-        const int i = col * per_col + k;
-        if (i >= n) break;
+      for (int k = 0; k < kShown; ++k) {
+        const int i = col * per_col + ach_scroll_ + k;
+        if (ach_scroll_ + k >= per_col || i >= n) break;
         const AchRow& r = *list[size_t(i)];
         const float y = a.y + float(k) * rh;
         const ImVec2 r0(a.x, y), r1(b.x, y + rh);
@@ -944,6 +957,9 @@
         const ImU32 ink = sel ? kit::kCream : r.got ? kit::kInk : kit::kInkSection;
         d->PushClipRect(ImVec2(tx, y), ImVec2(b.x - gw - st(8), y + rh), true);
         d->AddText(f.ui_bold, st(14), ImVec2(tx, y + st(7)), ink, r.info.label.c_str());
+        if (reborn_achievements::IsOurs(r.info.id))  // ours, beside the game's (reborn_achievements.h)
+          kit::Spaced(d, f.typed, st(7), ImVec2(tx + kit::TextWidth(f.ui_bold, st(14), r.info.label) + st(8), y + st(11)),
+                      sel ? kit::kCream : kit::kStamp, "REBORN", st(1.4f));
         const std::string& desc = r.got || r.info.unachieved_description.empty() ? r.info.description : r.info.unachieved_description;
         d->AddText(f.ui, st(10.5f), ImVec2(tx, y + st(26)), sel ? kit::kCream : kit::kInkFaint, desc.c_str());
         const ImU32 faint = sel ? kit::kCream : kit::kInkSection;
@@ -965,6 +981,16 @@
           kit::Spaced(d, f.typed, st(7), ImVec2(b.x - st(15) - kit::SpacedWidth(f.typed, st(7), h, st(1.4f)), y + st(38)), faint, h, st(1.4f));
         }
       }
+    }
+    if (per_col > kShown) {  // the scroll's place, at the right column's foot, with an arrow each way
+      const std::string where = fmt::format("ROWS {} TO {} OF {}", ach_scroll_ + 1, ach_scroll_ + kShown, per_col);
+      const float y = st.P(0, 640).y - st(14), x1 = st.P(1232, 0).x - st(15);
+      const float x0 = x1 - kit::SpacedWidth(f.typed, st(7), where, st(1.4f));
+      kit::Spaced(d, f.typed, st(7), ImVec2(x0, y), kit::kInkSection, where, st(1.4f));
+      const bool up = ach_scroll_ > 0, down = ach_scroll_ < per_col - kShown;
+      const float ax = x0 - st(30), ay = y + st(4.5f), s = st(4);
+      d->AddTriangleFilled(ImVec2(ax, ay + s * 0.6f), ImVec2(ax + s * 2, ay + s * 0.6f), ImVec2(ax + s, ay - s * 0.8f), up ? kit::kInk : kit::kRule);
+      d->AddTriangleFilled(ImVec2(ax + st(13), ay - s * 0.6f), ImVec2(ax + st(13) + s * 2, ay - s * 0.6f), ImVec2(ax + st(13) + s, ay + s * 0.8f), down ? kit::kInk : kit::kRule);
     }
     if (all.empty())
       kit::Wrapped(d, f.ui, st(13.75f), st.P(68, 257), kit::kInkFaint, "The game's achievements load with the game: open this page again in a moment.",

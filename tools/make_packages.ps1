@@ -130,6 +130,12 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
         if (-not (Test-Path $logo)) { throw "no TRG Studios logo in the build: $logo" }
         New-Item -ItemType Directory -Force (Join-Path $bin "data\startup") | Out-Null
         Copy-Item $logo (Join-Path $bin "data\startup")
+        # The pictures of Reborn's own achievements (bf\src\reborn_achievements.cpp), our own drawing
+        # (tools\make_reborn_achievements.py): 64 x 64 PNGs, one per achievement.
+        $ach = Join-Path $build "data\achievements"
+        if (-not (Get-ChildItem $ach -Filter *.png -ErrorAction SilentlyContinue)) { throw "no achievement pictures in the build: $ach" }
+        New-Item -ItemType Directory -Force (Join-Path $bin "data\achievements") | Out-Null
+        Get-ChildItem $ach -Filter *.png | Copy-Item -Destination (Join-Path $bin "data\achievements")
     }
     # The main backend players and servers use (bf_online_host): the official one, or this PC for tests.
     Set-Content (Join-Path $bin "bf1943.toml") -Encoding ascii -Value @"
@@ -260,11 +266,12 @@ if ($scripts) { throw "scripts in the player download: $($scripts.FullName -join
 if (-not (Test-Path (Join-Path $c "bf1943.exe"))) { throw "bf1943.exe is not at the top of the player download" }
 
 # No game file may be in a package.
-# No official key either, and nothing extracted from the game (pictures or sounds: our CC0 glyphs and the font only).
+# No official key either, and nothing extracted from the game (pictures or sounds: our CC0 glyphs, the font, the TRG
+# Studios logo and our own achievement pictures only).
 foreach ($dir in @($c) + $serverDirs) {
     $bad = Get-ChildItem $dir -Recurse -File | Where-Object { $_.Extension -in @('.xex', '.fbrb', '.zz', '.xpso', '.xmp', '.key', '.wav', '.res') -or
         $_.Length -gt 200MB -or ($_.Extension -eq '.png' -and $_.FullName -notlike '*\glyphs\*' -and
-        $_.FullName -notlike '*\data\startup\trg_studios.png') }
+        $_.FullName -notlike '*\data\startup\trg_studios.png' -and $_.FullName -notmatch '\\data\\achievements\\\d+\.png$') }
     if ($bad) { throw "not allowed in a package: $($bad.FullName -join ', ')" }
 }
 # The updater's lists (bf\src\update_files.h): every file of the player download with its hash (bf-files.txt), and the

@@ -111,7 +111,9 @@ later. Deaths, K/D and rounds won show a dash until the servers have counted the
 
 ### Achievements (M1)
 
-- The game's 12 achievements in two columns. Unlocked ones are first, with when they were unlocked.
+- The game's 12 achievements and Reborn's own 3 in two columns. Unlocked ones are first, with when they were unlocked.
+  With more than 12 the columns scroll (the chosen row stays in sight; the mouse wheel scrolls too). Ours are marked
+  REBORN.
 - Locked ones are grey with a padlock. Where our counts can tell, they show how far along you are. These are our own
   counts: the game decides the unlock.
 - Each one shows how many players have it.
@@ -135,6 +137,35 @@ There are two settings under Settings > Audio: Achievement popups (`bf_achieveme
 (`bf_achievement_volume`).
 
 A protected name already sends its unlocked ids with its signed stats, and a recovery code brings them back on a new PC.
+
+## Reborn's own achievements
+
+TekRantGaming asked on 16 Nov 2026 for achievements of our own, with gamerscore and pictures of their own. There are
+three, in f/src/reborn_achievements.cpp:
+
+| Id | Name | Gamerscore | Unlocked when |
+|---|---|---|---|
+| 101 | I am reborn | 10 G | you load into your first multiplayer match (any server, a custom match too) |
+| 102 | I am forever | 20 G | you load into a match on a community server |
+| 103 | I am inevitable | 30 G | you load into a custom match that you are hosting |
+
+With the game's 200 G the total is 260 G.
+
+- **Ids.** The game's title data has 1 to 12. Ours are 101 and up, so they never clash, and the backend already counts
+  every id from 1 to 999 (chievement_share), so it needs no change for them.
+- **Where they live.** They are put into the SDK's own catalog (AchievementManager::RegisterAchievement, which is made
+  for a recomp's own entries) once the game's 12 are loaded. So they work like the 12: the unlock is saved in the same
+  user/achievements/5841097E.toml, the popup and chime show it, the Achievements page and Stats & Rewards list it, a
+  protected name sends it with its signed stats, and the backend counts it for "how many players have it".
+- **Loading into.** Join notes what kind of match it is. The unlock comes once the level has loaded and the soldier
+  is in it (on foot or in a seat) for 1.5 s, so not when the join is picked and not on the deploy screen. A community
+  server is one that is not official, not this PC's own custom match, and not a LAN match. A friend's listed custom
+  match counts, as it is on the browser's Community tab. Your own custom match gives I am reborn and I am inevitable,
+  not I am forever.
+- **Pictures.** python tools/make_reborn_achievements.py draws them as 64 x 64 RGBA PNGs, the size and format of the
+  game's own pictures, into f/data/achievements/<id>.png. They ship next to the exe in data/achievements. They
+  are perforated stamps like the game's, but every scene is our own drawing: a phoenix rising from its flames, a
+  golden endless loop in laurel, and a command flag with a star planted on a hill by the sea.
 
 ## Tests
 

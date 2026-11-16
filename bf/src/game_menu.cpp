@@ -52,6 +52,7 @@
 #include "display_modes.h"
 #include "game_install.h"
 #include "achievement_toast.h"  // the achievement popup, the pictures (game_menu_progress.inc)
+#include "reborn_achievements.h"  // Reborn's own achievements (NoteRebornAchievements)
 #include "launcher_kit.h"
 #include "private_match.h"
 #include "regions.h"
@@ -955,6 +956,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       // Back at BF's online menu (the match over, or its join failed): no Night Ops server's night here. A map change
       // on the server never comes back here, so its next map stays at night.
       if (stage == 2 && last_stage_ > 2) SetJoinedServerNight(false);
+      // A join that never reached the level is no match for Reborn's own achievements (the tutorial is none either).
+      if (stage == 2 && last_stage_ > 2) ach_join_ = AchJoin::kNone;
       last_stage_ = stage;
     }
     if (page_ == Page::kJoining) {
@@ -1018,6 +1021,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
+    NoteRebornAchievements();  // Reborn's own achievements, once a joined match's level has the soldier
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
     if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
@@ -1433,6 +1437,32 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                IM_COL32(16, 18, 22, 60), IM_COL32(8, 10, 14, 0));
   }
   bool InMatch() const { return MenuDriverStage() == 5 && !(page_ == Page::kJoining); }
+
+  // Reborn's own achievements (reborn_achievements.h), for "loading into" a match: what the join was (Join), then
+  // the unlock once its level has loaded and the soldier is in it (on foot or seated) for a second and a half, not
+  // at the join's pick nor on the deploy screen. A community server is one not run by Reborn (not official), not this
+  // PC's own custom match and not a LAN match (the browser's Community tab: a friend's listed custom match is one).
+  enum class AchJoin { kNone, kOfficial, kCommunity, kOwnMatch, kLan };
+  AchJoin ach_join_ = AchJoin::kNone;
+  double ach_in_world_since_ = -1;
+  void NoteRebornAchievements() {
+    if (ach_join_ == AchJoin::kNone || REXCVAR_GET(server)) return;
+    const double now = ImGui::GetTime();
+    if (!(InMatch() && LevelLoaded() && comms::InWorld())) {
+      ach_in_world_since_ = -1;
+      return;
+    }
+    if (ach_in_world_since_ < 0) ach_in_world_since_ = now;
+    if (now - ach_in_world_since_ < 1.5) return;
+    static constexpr const char* kKinds[] = {"", "a Reborn server", "a community server", "this PC's own custom match", "a LAN match"};
+    const char* kind = kKinds[int(ach_join_)];
+    REXLOG_INFO("BF achievements: in the level of {} ({})", kind, joining_);
+    bool any = reborn_achievements::Unlock(reborn_achievements::kReborn, kind);
+    if (ach_join_ == AchJoin::kCommunity) any |= reborn_achievements::Unlock(reborn_achievements::kForever, kind);
+    if (ach_join_ == AchJoin::kOwnMatch) any |= reborn_achievements::Unlock(reborn_achievements::kInevitable, kind);
+    ach_join_ = AchJoin::kNone, ach_in_world_since_ = -1;
+    if (any) SendLeaderboard("an achievement");  // the account's awards, which the backend counts
+  }
 
   // Discord Rich Presence (discord_presence.cpp): what the player is doing, from the menus' own state, a few times a
   // second (the presence thread sends only changes, spaced out). Never an address or another player's name.
@@ -2150,7 +2180,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {"STATS & AWARDS", "Your service record: rank, awards and best rounds."},
         {"HELP & OPTIONS", "The game's controls, its own settings and how to play."},
         {"PC SETTINGS", "Display, graphics, audio, controls (the game's own options with them) and gameplay."},
-        {"ACHIEVEMENTS", "The game's achievements."},
+        {"ACHIEVEMENTS", "The game's achievements, and Reborn's own."},
         {"LEADERBOARDS", "Where you stand among every player."},
         {"HELP", "The game's tutorial on Wake Island, its controls on foot, in vehicles and in planes, and the credits."},
         {"RETURN TO GAME LIBRARY", "Close Battlefield 1943."}};
@@ -2537,6 +2567,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     report::NoteLastMatch(UserDir(), sv.name, sv.official, sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
     presence_server_ = discord::ShownServerName(sv.name);  // Discord Rich Presence (NotePresence)
     presence_private_ = sv.player_hosted || pm_hosting_, presence_max_ = sv.max_players;
+    // Reborn's own achievements (NoteRebornAchievements): this PC's custom match is joined through here as well.
+    ach_join_ = pm_hosting_ ? AchJoin::kOwnMatch : !own_backend_.empty() ? AchJoin::kLan
+              : sv.official ? AchJoin::kOfficial : AchJoin::kCommunity;
+    ach_in_world_since_ = -1;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
@@ -3885,7 +3919,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_menu_sounds_volume", 0, 100, 5, Percent, 100));
     // The achievement popup and its chime (achievement_toast.h).
     rows.push_back(Toggle("Achievements", "Achievement popups",
-                          "A note at the top right and a short chime when you unlock one of the game's achievements. "
+                          "A note at the top right and a short chime when you unlock an achievement. "
                           "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime.",
                           "bf_achievement_popups"));
     rows.push_back(Slider("Achievements", "Achievement sound volume", "How loud the achievement chime is. 0 is silent.",

@@ -22,6 +22,7 @@
 #include <rex/system/util/xdbf_utils.h>
 
 #include "launcher_kit.h"
+#include "reborn_achievements.h"
 
 // Settings > Audio: the popups and the chime's volume.
 REXCVAR_DEFINE_BOOL(bf_achievement_popups, true, "BF1943/Audio", "A popup and a chime when the game unlocks an achievement");
@@ -188,6 +189,15 @@ void PlayAchievementSound() {
 }
 
 fs::path AchievementIconFile(uint32_t image_id) {
+  // Reborn's own (reborn_achievements.h): our pictures, shipped next to the exe.
+  if (reborn_achievements::IsOurs(image_id)) {
+    std::error_code ec;
+    const fs::path ours = reborn_achievements::IconFile(image_id);
+    if (fs::exists(ours, ec)) return ours;
+    if (static std::set<uint32_t> said; said.insert(image_id).second)
+      REXLOG_WARN("BF achievements: no picture {} at {}", image_id, ours.string());
+    return {};
+  }
   // Beside the menu art (user\cache\extracted\achievements), made once from the game's title data.
   fs::path dir = kit::MenuArtDir().empty() ? fs::path() : kit::MenuArtDir().parent_path();
   if (dir.empty()) {
@@ -245,6 +255,7 @@ void AchievementToast::Push(const rex::system::AchievementEvent& event) {
 void TestAchievementPopup(uint32_t id) {
   auto* k = REX_KERNEL_STATE();
   if (!g_toast || !k) return;
+  reborn_achievements::Ensure();  // ours too
   for (const auto& a : k->achievements().ListAchievements()) {
     if (a.id != id) continue;
     rex::system::AchievementEvent e;
@@ -259,6 +270,7 @@ void TestAchievementPopup(uint32_t id) {
 void AchievementToast::OnDraw(ImGuiIO& io) {
   Toast toast;
   const double now = ImGui::GetTime();
+  reborn_achievements::Ensure();  // Reborn's own 3 in the catalog once the game's are (cheap)
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_ACHIEVEMENT_TEST="<s>:<id>[,<s>:<id>...]" (tests): a test popup for achievement <id> <s> seconds after the
   // window opened, as the page's Y does.

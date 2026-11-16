@@ -1026,6 +1026,7 @@ bool Camera(float pos[3], float right[3], float back[3]) {
   return true;
 }
 void NoteInWorld(bool in_world) { g_in_world.store(in_world, std::memory_order_relaxed); }
+bool InWorld() { return g_in_world.load(std::memory_order_relaxed); }
 void NoteTeam(int team, int squad) {
   g_team.store(std::clamp(team, 0, 255), std::memory_order_relaxed);
   g_squad.store(std::clamp(squad, 0, 255), std::memory_order_relaxed);

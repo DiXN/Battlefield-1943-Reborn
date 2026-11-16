@@ -13,12 +13,14 @@
 /bf/**/*.wav
 /bf/**/*.xma
 
-# Pictures in the game's folders: only our own (the button glyphs, the TRG Studios logo, the Linux icon).
+# Pictures in the game's folders: only our own (the button glyphs, the TRG Studios logo, the Linux icon, our own
+# achievements' pictures from tools/make_reborn_achievements.py).
 /bf/**/*.png
 /bf/**/*.jpg
 !/bf/glyphs/**/*.png
 !/bf/data/startup/trg_studios.png
 !/bf/data/linux/bf1943-reborn.png
+!/bf/data/achievements/*.png
 
 # Builds, test runs and tool output
 /bf/out/

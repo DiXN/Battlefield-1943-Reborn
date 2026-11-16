@@ -1173,6 +1173,7 @@
       if (n > on || pts > opts) settings_.values[key] = fmt::format("{},{}", std::max(n, on), std::max(pts, opts)), ++raised;
     }
     if (auto* k = REX_KERNEL_STATE()) {
+      reborn_achievements::Ensure();  // Reborn's own among the account's awards too
       for (size_t i = 0; i < parts[4].size();) {
         size_t end = parts[4].find(',', i);
         if (end == std::string::npos) end = parts[4].size();
@@ -2100,6 +2101,7 @@
       if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') name += c;
     if (name.empty()) return;
     const bool test = settings_.Get("test_progression", "") == "1";
+    reborn_achievements::Ensure();  // the awards below with Reborn's own
     std::string req = fmt::format(
         "{{\"op\": \"stats_put\", \"name\": \"{}\", \"score\": {:.0f}, \"seconds\": {:.0f}, \"captures\": {}", name,
         total, std::atof(settings_.Get("match_seconds", "0").c_str()), captures);

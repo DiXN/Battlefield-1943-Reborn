@@ -3,6 +3,7 @@ Checks: forbidden extensions, generated or input folders, and any file over 1 MB
 
     python -I tools/check_repo.py        (exit 1 and a list when something is wrong)
 """
+import re
 import subprocess
 import sys
 
@@ -28,6 +29,9 @@ def main():
             pass
         # The Linux AppImage's icon: drawn from text by tools/linux/make_icon.py (no game art).
         elif lower == 'bf/data/linux/bf1943-reborn.png':
+            pass
+        # Reborn's own achievement pictures: drawn by tools/make_reborn_achievements.py (no game art).
+        elif re.fullmatch(r'bf/data/achievements/\d+\.png', lower):
             pass
         # Microsoft's WebView2 SDK for the news window's video (TekRantGaming, 16 Nov 2026: "Allow it in git"): its
         # header (over 1 MB) and the loader DLL Microsoft signs, these two files only.
