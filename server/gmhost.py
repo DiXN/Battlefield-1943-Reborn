@@ -206,7 +206,7 @@ def read_key(path):
 # The public key community hosts check against: printed by "manager.py broadcast-key" on the official machine (it
 # reads official.key there). Until it is written here, community servers show no network broadcast at all; official
 # servers make it themselves from their own official.key. Tests only: BF_DEV_BROADCAST_KEY=<public key hex>.
-OFFICIAL_BROADCAST_KEYS = ()
+OFFICIAL_BROADCAST_KEYS = ('6884b20490087ce70141d7c944d7ded67ef10718bd5aaff3ad96b8bbf0811822',)
 NETWORK_SCOPES = ('official', 'everyone')
 NETWORK_TEXT_MAX = 200        # characters, as every broadcast
 NETWORK_LIFE = 60             # seconds a signed message is good for after it is made (the manager's)
