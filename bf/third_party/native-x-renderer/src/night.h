@@ -46,7 +46,6 @@ struct NightSettings {
   float lamps = 1.0f;       // D163: the lamps' light and glow; 0 none
   int debug = 0;            // D163, tests: 1 each pixel's place in the world, 2 the lights alone
   float sky = 1.0f;         // D169: the night sky's stars, Milky Way and moon; 0 none
-  float grade = 1.0f;       // D175: 1 the moonlit night (D162: grade, haze); 0 the scene as drawn, the lights only
 };
 
 // D163: a light chosen for this frame (Night::Apply takes kMaxLights): a point light, or a spot when `direction` is set.
@@ -137,7 +136,6 @@ class Night {
       k.counts[3] = float(s.debug);
       k.sky[0] = s.sky;
       k.sky[1] = f.sky_camera ? 1.0f : 0.0f;
-      k.sky[2] = std::clamp(s.grade, 0.0f, 1.0f);
       std::memcpy(k.sky_to_ndc, f.sky_to_ndc, sizeof(k.sky_to_ndc));
       for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c) k.sky_inverse[r][c] = f.sky_inverse[r][c];
@@ -298,7 +296,6 @@ layout(set = 0, binding = 0) uniform NightConstants {
   vec4 counts;  // x: lights, y: glows, z: the target's aspect, w: tests (1 the world's place, 2 the lights alone)
   vec4 glow2;   // x: the coarse mip the effects' lights are found in, y: their strength, z: 1 with them
   vec4 skyp;    // D169: x: the night sky's strength (stars, Milky Way, moon); 0 none; y: 1 with its directions
-                // D175: z: the moonlit grade's share (1 the old night look; 0 the scene as drawn, the lights only)
   vec4 sky0;    // D169: the sky's directions from clip x, y and w (rows), and its NDC from a texture coordinate
   vec4 sky1;
   vec4 sky2;
@@ -506,11 +503,7 @@ void main() {
     haze = 1.0 - exp(-dist / night.y);
   }
   vec3 sky = (vec3(0.004, 0.009, 0.024) + luma * 0.03 * vec3(0.6, 0.75, 1.0)) * night.x;
-  // D175: at the day and night cycle's night the cycle has darkened the scene already: it stays as drawn (no grade, no
-  // haze), and only the lights below are added.
-  float grade = skyp.z;
-  vec3 result = mix(lin, mix(moon, sky, haze), grade);
-  haze *= grade;
+  vec3 result = mix(moon, sky, haze);
   // D169: the night sky where the view shows the sky (nothing within 5 km), where the day sky was clear blue (its
   // clouds, grey or white, keep covering it), fading toward the horizon. The direction is taken for every pixel (the
   // pixel's angle needs its neighbours').

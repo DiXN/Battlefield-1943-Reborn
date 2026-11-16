@@ -5441,25 +5441,3 @@ mirror bound after a minute of play (164 MB on a Guadalcanal tour with the HD te
 of 836); screenshots of the same camera spots the same; no errors. Frame rates in interleaved runs, sparse against full:
 all cores 225.2 and 228.4 FPS against 218.2 and 229.3; two cores 170.7 and 175.0 against 172.6 and 171.1 (the same
 within noise).
-
-## D175 — Night: the lights follow the day and night cycle; the old night look only on request (2026-11-16, Claude for Battlefield 1943 Reborn)
-
-**Why:** pull request 32 (D-numbers in its own notes: the renderer's own sky, clouds, weather and the day and night
-cycle, `SkyLightAt`) darkens the game's light at night with a moon and stars of its own, so the separate night maps
-(D162's moonlit grade over the finished picture, D169's sky) are no longer wanted: TekRantGaming, 16 Nov 2026, the night
-maps removed, the lights kept, and Night Ops servers kept as the cycle held at night. The lights (D163: the levels'
-lamps, the effects' light, the models' lamps; D170: firelight, beams, lit buildings) ran only with
-`native_x_renderer_night`, which nothing turns on any more.
-
-**What:** `g_cycle_dark`, set with the outdoor light from the world's hour (`SkyLightAt`'s sun elevation): 0 by day,
-a smoothstep from 4 degrees up to 6 degrees under, 1 after; 0 when the world has no day and night. `NightLightsAmount`
-is 1 with `native_x_renderer_night` (the old look, kept for tests), else that darkness, and `NightPassOn` (above 0.01)
-replaces the cvar at every switch of the night pass: the world's depth copy, the effects' layer, the night camera,
-the models' lamps, the pass's arming and its log. The pass's new `NightSettings::grade` (the shader's `skyp.z`) is 1
-for the old look and 0 for the cycle: the scene stays as the cycle drew it (no moonlit grade, no haze, no D169 sky),
-and only the lamps, the lamp glows and the effects' light are added, their strengths times the darkness. D169's sky
-capture stays with the old look only.
-
-**Tested** (Battlefield 1943 Reborn dev build, local servers, Wake Island at the airfield): a Night Ops server's world
-held at 0 h, 24 lamps lit round the player and their bulbs glowing (run n175isl); a normal server at 18:45, the
-airfield's lamps lit (c175dusk); at noon no night pass at all (c175noon).

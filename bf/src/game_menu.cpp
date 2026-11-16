@@ -2401,11 +2401,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   int browser_tab_ = 0;  // 0 official, 1 community, 2 direct connect
   bool sort_by_ping_ = false;
 
-  // Night Ops (TekRantGaming, 11 Nov 2026): a night server's maps drawn at night. Since 16 Nov 2026 a Night Ops server
-  // keeps its night through its world (the day and night cycle held at midnight, server/gmhost.py's World), so the
-  // renderer's old night look (D162) is never switched on here; this keeps it off (a setting may have asked for it).
+  // Night Ops (TekRantGaming, 11 Nov 2026): a night server's maps drawn at night (NativeXRenderer D162), only while
+  // playing there: on at the join, off at another server's, at the match's end and in the tutorial.
   static void SetJoinedServerNight(bool night) {
-    night = false;  // the cycle draws a Night Ops server's night (NativeXRenderer D175); kNightOps still lists them
+    if (!kNightOps) night = false;  // night_ops.h: not in this build
     const std::string was = rex::cvar::GetFlagByName("native_x_renderer_night");
     if (was == (night ? "true" : "false")) return;
     const bool set = rex::cvar::SetFlagByName("native_x_renderer_night", night ? "true" : "false");

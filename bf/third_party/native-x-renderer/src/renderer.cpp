@@ -398,17 +398,6 @@ void ReportNightModelDraw(uint32_t index_count, const Mat4d& m) {
 }
 std::vector<NightLight> g_night_frame_lights;
 std::vector<NightSprite> g_night_frame_sprites;
-// D175: the night's lights at the sky's day and night (16 Nov 2026, TekRantGaming: the night maps gone, the day and night
-// cycle of pull request 32 in their place, the lights kept). How dark the cycle's hour is for them: 0 by day, rising as
-// the sun nears the horizon, 1 once it is 6 degrees down (set with the outdoor light, read on every draw: no lock).
-std::atomic<float> g_cycle_dark{0.0f};
-// The night's lights' strength: 1 with the old night look (native_x_renderer_night, D162), else the cycle's darkness.
-float NightLightsAmount() {
-  if (REXCVAR_GET(native_x_renderer_night)) return 1.0f;
-  return g_cycle_dark.load(std::memory_order_relaxed);
-}
-// The night pass runs (its depths, the effects' layer, the lamps' camera): the old night look, or the cycle's dark.
-bool NightPassOn() { return NightLightsAmount() > 0.01f; }
 bool NightLightsWanted();
 bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s);
 void BuildNightSky(NightFrame& f, float to_u, float to_v);
@@ -1397,15 +1386,6 @@ void ExecuteDraw(const Command& c) {
     g_fog_wanted = world.fog > 0.001f || world.ground_fog > 0.001f || world.weather > 0.45f || sky_debug == 4 || sky_debug == 5 ||
                    sky_debug == 6 || REXCVAR_GET(native_x_renderer_rain_lens) || REXCVAR_GET(native_x_renderer_wetness) ||
                    REXCVAR_GET(native_x_renderer_sky);  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
-    // D175: the night's lights come on as the cycle's sun sets (from 4 degrees up) and are full 6 degrees under.
-    {
-      float dark = 0.0f;
-      if (world.day_night) {
-        const float t = std::clamp((SkyLightAt(world.hour, world.weather).sun_elevation - 4.0f) / -10.0f, 0.0f, 1.0f);
-        dark = t * t * (3.0f - 2.0f * t);
-      }
-      g_cycle_dark.store(dark, std::memory_order_relaxed);
-    }
     if (world.day_night && REXCVAR_GET(native_x_renderer_sky_light)) {
       const SkyLight at = SkyLightAt(world.hour, world.weather);
       light.on = true;
@@ -1465,7 +1445,7 @@ void ExecuteDraw(const Command& c) {
                             ? &g_sky
                             : nullptr);
   // D163: the models with lamps (a jeep's headlights), at night.
-  g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && NightPassOn() &&
+  g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && REXCVAR_GET(native_x_renderer_night) &&
                                 REXCVAR_GET(native_x_renderer_night_lamps) > 0.0
                             ? &g_night_model_counts
                             : nullptr,
@@ -1499,15 +1479,10 @@ void ExecuteDraw(const Command& c) {
       // Each depth with its own share of its texture (with an upscaler the textures can differ from the target's).
       const float to_u = view_w > 0 ? float(desc.Width) / view_w : 1.0f;
       const float to_v = view_h > 0 ? float(desc.Height) / view_h : 1.0f;
-      // D175: with the old night look (D162) the moonlit grade, its haze and sky (D169); at the cycle's night the scene
-      // as the cycle drew it, with the lights only, as strong as the hour is dark.
-      const bool old_night = REXCVAR_GET(native_x_renderer_night);
-      const float amount = NightLightsAmount();
-      night.grade = old_night ? 1.0f : 0.0f;
-      night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0)) * amount;
-      night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0)) * amount;
+      night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0));
+      night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0));
       night.debug = REXCVAR_GET(native_x_renderer_night_debug);
-      night.sky = old_night ? float(std::clamp(REXCVAR_GET(native_x_renderer_night_sky), 0.0, 4.0)) : 0.0f;
+      night.sky = float(std::clamp(REXCVAR_GET(native_x_renderer_night_sky), 0.0, 4.0));
       NightFrame f;
       f.depth = depth ? g_night_depth.RawPtr() : nullptr;
       f.depth_uv[0] = to_u * g_night_depth_uv[0], f.depth_uv[1] = to_v * g_night_depth_uv[1];
@@ -1784,14 +1759,14 @@ void UpscaleScene();
 // D163: the night's lights need the camera: night on and lamps wanted (asked on every draw: no lock).
 bool NightLightsWanted() {
   return (g_night_lamps_present.load(std::memory_order_relaxed) || !g_night_model_counts.empty()) &&
-         NightPassOn() && REXCVAR_GET(native_x_renderer_night_lamps) > 0.0;
+         REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_lamps) > 0.0;
 }
 
 // D163: the terrain's camera kept for the night's lights (at the AO's moment, before the terrain's frame is reset): its
 // world-view-projection (the world in the level's own units), viewport and NDC transform, and the view's host size.
 void NoteNightCamera() {
   if (!g_device || !g_terrain.valid || g_night_camera.frame == g_device->frames_presented()) return;
-  if (!NightPassOn()) return;
+  if (!REXCVAR_GET(native_x_renderer_night)) return;
   std::memcpy(g_night_camera.wvp, g_terrain.wvp, sizeof(g_night_camera.wvp));
   g_night_camera.viewport = g_terrain.viewport;
   for (int i = 0; i < 3; ++i) {
@@ -2425,7 +2400,7 @@ void ExecuteResolve(const Command& c) {
   // D162: the world's depth for the night's haze, at the same depth copy (once a frame): the first person weapon's
   // draws clear the depth after it, so on foot the view's depth at its end held only the weapon and the night took
   // everything else for the far sky (run nightzip1). Copied into a float texture's red channel.
-  if (NightPassOn() && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
+  if (REXCVAR_GET(native_x_renderer_night) && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
       source->srv && source->texture && surface.width == g_profile->output_width &&
       surface.height == g_profile->output_height && g_night_world_frame != g_device->frames_presented()) {
     const TextureDesc& d = source->texture->GetDesc();
@@ -2621,7 +2596,7 @@ void ExecuteResolve(const Command& c) {
   // particles (muzzle flashes, tracers, fire, explosions: run nightrd2, its premultiplied draws then one draw over the
   // scene); its other half size pass, the sky's, draws without blending.
   // (Before the scene's copy: every copy goes through the scene copy's caller, the bloom chain's half size ones after it.)
-  if (NightPassOn() && REXCVAR_GET(native_x_renderer_night_glow) > 0.0 && !source->depth &&
+  if (REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_glow) > 0.0 && !source->depth &&
       !source->shadow && !scaled && source->samples == 1 && !g_night_pending && slice == 0 && !cube &&
       g_night_world_frame == g_device->frames_presented() && source->last_draw_blended &&
       copied.width * 2 == g_profile->output_width && copied.height * 2 == g_profile->output_height) {
@@ -2718,7 +2693,7 @@ void ExecuteResolve(const Command& c) {
   }
   // Night (D162): the scene's copy arms it; it runs after the game's composite (ExecuteDraw). Graded here, before the
   // bloom chain, the game's automatic exposure (its 1x1 luminance) brightened it back (runs night_wake2, night_gc2).
-  if (NightPassOn() && c.scene_caller && slice == 0 &&
+  if (REXCVAR_GET(native_x_renderer_night) && c.scene_caller && slice == 0 &&
       target->guest_width == g_profile->output_width && target->guest_height == g_profile->output_height) {
     g_night_pending = true;
   }
@@ -2984,7 +2959,7 @@ void UpscaleScene() {
   PromoteReduced(upscaled ? g_scene_color : nullptr);
   // D162: the view's depth for the night at the scene's copy, which follows in this frame.
   // D168: the picture in picture scope's too, to leave the first person weapon out of the view it remembers.
-  if ((NightPassOn() || g_scope_watch) && g_scene_depth && g_scene_depth->srv &&
+  if ((REXCVAR_GET(native_x_renderer_night) || g_scope_watch) && g_scene_depth && g_scene_depth->srv &&
       g_scene_depth->texture) {
     const TextureDesc& depth = g_scene_depth->texture->GetDesc();
     MsaaRead(g_scene_depth);
@@ -4473,7 +4448,7 @@ void ExecuteFrameEnd(const Command& c) {
                   frame, scoped, g_uploads.frames, g_scope_unzoomed);
       g_scope_unzoomed = 0;
     }
-    if (NightPassOn()) {
+    if (REXCVAR_GET(native_x_renderer_night)) {
       uint64_t world = 0, glow = 0, lights = 0, sprites = 0;
       const uint64_t applied = g_night.TakeApplied();
       g_night.TakeCounts(world, glow, lights, sprites);

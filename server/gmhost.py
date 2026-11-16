@@ -818,21 +818,12 @@ class World:
         self.seconds = self.evolve = 0.0
         self.at = time.monotonic()
         self.admins, self.key = set(), ''
-        self.night_ops = False
-
-    # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
-    # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
-    # this hour for the whole match; its admins may change the weather, never the time.
-    NIGHT_OPS_HOUR = 0.0  # midnight: the moon at its highest, the cycle's lightest night
 
     def configure(self, args):
         clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
-        self.night_ops = bool(getattr(args, 'night', False))
         self.day_night = bool(args.day_night)
         self.hour = clamp(args.time, 0, 24) % 24
         self.day_minutes = clamp(args.day_minutes, 0, 1440)
-        if self.night_ops:
-            self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
         self.cover, self.rate = clamp(args.cloud_cover, 0, 1), clamp(args.cloud_rate, 0, 1)
         self.weather = clamp(args.weather, 0, 1)
         self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
@@ -881,10 +872,9 @@ class World:
                 day_night = data[at] != 0
                 values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
                 before = self.said()
-                if not self.night_ops:  # a Night Ops server's clock stays at its night (configure)
-                    self.day_night = day_night
-                    self.hour = max(0.0, values[0]) % 24
-                    self.day_minutes = max(0.0, min(1440.0, values[1]))
+                self.day_night = day_night
+                self.hour = max(0.0, values[0]) % 24
+                self.day_minutes = max(0.0, min(1440.0, values[1]))
                 (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
                  self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
                 if len(data) >= at + 37:
@@ -1185,11 +1175,9 @@ def main():
     # registered as classic, which is what the game plays.
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
                     help='not used since v0.4.0: every server plays the original movement and aiming')
-    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list. Since 16 Nov 2026 the night
-    # is the server's world: the day and night cycle held at midnight for the whole match (World.NIGHT_OPS_HOUR), drawn
-    # by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time and --day-minutes are
-    # then not used.
-    ap.add_argument('--night', action='store_true', help='a night server: its world is held at midnight (Night Ops)')
+    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list; players' games draw it so
+    # (NativeXRenderer D162) while they play there.
+    ap.add_argument('--night', action='store_true', help='a night server: players see its maps at night')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.
