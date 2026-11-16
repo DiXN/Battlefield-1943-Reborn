@@ -7,3 +7,9 @@ kenney-LICENSE.txt beside this one.
 Only the pictures our prompts use are taken from the pack, trimmed and resized by
 tools/make_kenney_glyphs.py, with a thin dark rim added so they read on light paper.
 keyboard/WASD.png is laid out there from the pack's W, A, S and D keys.
+
+devices/ (the controllers, the keyboard and the mouse in Settings > Controls) are our own
+drawings, made by runs/ui-designs/build_devices.py for Battlefield 1943 Reborn. Each controller's
+outline and button places come from the controller silhouettes in Kenney's "Input Prompts" (CC0,
+https://kenney.nl/assets/input-prompts); no picture from any maker and no maker's logo.
+devices/anchors.txt gives each picture's button places.

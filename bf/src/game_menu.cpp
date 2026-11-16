@@ -1285,7 +1285,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     for (int v : {row_, tab_, pm_row_, pm_map_, direct_key_, popup_row_, pause_row_, home_row_, news_focus_,
                   news_first_card_, setup_tab_, prompts_row_, help_row_, ctl_tab_, browse_row_, browser_tab_,
                   preset_cursor_, voice_choice_, fr_row_, slot_cursor_, files_card_, allset_row_, name_key_,
-                  pm_edit_key_, project_, capture_slot_})
+                  pm_edit_key_, project_, capture_slot_, ctl_device_})  // ctl_device_: Settings > Controls' card
       HashIn(h, uint64_t(int64_t(v)));
     HashIn(h, pause_focus_panel_);
     l.selection = h;
@@ -3328,7 +3328,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       case kTabDisplay: return DisplayRows();
       case kTabGraphics: return GraphicsRows();
       case kTabAudio: return AudioRows();
-      case kTabControls: return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
+      case kTabControls:
+        // Settings > Controls: one device's page (game_menu_controls.inc); the first start's step keeps them all.
+        if (sub_ == kSubNone && page_ == Page::kSettings && ctl_device_ >= 0) return DeviceControlsRows(ctl_device_);
+        return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
+
       case kTabEnhancements: return EnhancementsRows();
       default: return GameplayRows();
     }
@@ -4093,65 +4097,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // vehicle the walk keys are the throttle and the brake and the zoom key the second weapon, input_settings.cpp).
   // Select a row, then press the key or mouse button for it.
   std::vector<SettingRow> KeyRows() {
-    static const std::pair<const char*, const char*> kBinds[] = {
-        {"keybind_lstick_up", "Move forward / throttle"},
-        {"keybind_lstick_down", "Move back / brake"},
-        {"keybind_lstick_left", "Move left / turn left"},
-        {"keybind_lstick_right", "Move right / turn right"},
-        {"keybind_right_trigger", "Fire"},
-        {"keybind_left_trigger", "Zoom / second weapon"},
-        {"keybind_a", "Jump / change seat"},
-        {"keybind_b", "Enter, use, pick up / exit"},
-        {"keybind_x", "Reload"},
-        {"keybind_y", "Draw knife"},
-        {"keybind_left_shoulder", "Grenade, explosives"},
-        {"keybind_right_shoulder", "Toggle weapon / second weapon"},
-        {"keybind_lstick_press", "Sprint"},
-        {"keybind_rstick_press", "Crouch"},
-        {"keybind_back", "Command (tap), score (hold)"},
-        {"keybind_start", "Game menu"},
-        {"keybind_dpad_up", "Vehicle camera (D-pad up)"},
-        {"keybind_dpad_down", "D-pad down"},
-        {"keybind_dpad_left", "D-pad left"},
-        {"keybind_dpad_right", "D-pad right"},
-        {"keybind_rstick_up", "Look up (mouse camera off)"},
-        {"keybind_rstick_down", "Look down (mouse camera off)"},
-        {"keybind_rstick_left", "Look left (mouse camera off)"},
-        {"keybind_rstick_right", "Look right (mouse camera off)"},
-        {"keybind_push_to_talk", "Push to talk (voice chat)"},
-        {"keybind_chat_all", "Chat to everyone"},
-        {"keybind_chat_team", "Chat to your team"},
-        {"keybind_chat_squad", "Chat to your squad"}};
+    static const auto& kBinds = kBindActions;  // the actions and buttons: game_menu_controls.inc (16 Nov 2026)
     // 13 Nov 2026 ("Mouse and Keyboard keybinds should be available for remapping any key (except mouse look) with a
     // primary and second key for both a keyboard column and a mouse column. Click on a bind and holding Escape
     // should clear that bind slot"): a binding is the SDK's list of keys, any of which presses it; here its first two
     // keyboard keys and its first two mouse buttons, each a slot of its own. The wheel's notches are mouse buttons
     // for the bindings that are a button (look.cpp WheelNotch); the first visit puts the wheel where it was, on Toggle
     // Weapon.
-    if (!REXCVAR_GET(bf_wheel_bindable)) {
-      bool named = false;
-      for (const auto& [cvar, label] : kBinds) named = named || Cvar(cvar).find("Wheel") != std::string::npos;
-      if (!named) {
-        const std::string now = Cvar("keybind_right_shoulder");
-        SetCvar("keybind_right_shoulder", now.empty() ? "WheelUp,WheelDown" : now + ",WheelUp,WheelDown");
-      }
-      SetCvar("bf_wheel_bindable", "true");
-    }
+    EnsureWheelBindable();
     // 0.4.2 ("combine the Keybinds and Remap Gamepad tabs into a single tab called Remap, and add a single column
     // for controller inputs to the left of the Keyboard columns"): the first slot is the controller's button for the
     // action, from the bf_remap_* settings (which say what each button presses) read the other way round. A click or
     // A on it takes the next button; the button it takes swaps actions with the one it had, so every action keeps
     // one button. The sticks' own actions have none to change.
-    static const std::pair<const char*, const char*> kPadOf[] = {
-        {"keybind_a", "a"}, {"keybind_b", "b"}, {"keybind_x", "x"}, {"keybind_y", "y"},
-        {"keybind_left_shoulder", "lb"}, {"keybind_right_shoulder", "rb"}, {"keybind_left_trigger", "lt"},
-        {"keybind_right_trigger", "rt"}, {"keybind_lstick_press", "ls"}, {"keybind_rstick_press", "rs"},
-        {"keybind_back", "back"}, {"keybind_start", "start"}, {"keybind_dpad_up", "up"}, {"keybind_dpad_down", "down"},
-        {"keybind_dpad_left", "left"}, {"keybind_dpad_right", "right"}};
-    static const std::pair<const char*, const char*> kPadNames[] = {
-        {"a", "A"}, {"b", "B"}, {"x", "X"}, {"y", "Y"}, {"lb", "LB"}, {"rb", "RB"}, {"lt", "LT"}, {"rt", "RT"},
-        {"ls", "LS"}, {"rs", "RS"}, {"back", "Back"}, {"start", "Start"}, {"up", "D-Up"}, {"down", "D-Down"},
-        {"left", "D-Left"}, {"right", "D-Right"}};
+    static const auto& kPadOf = kPadOfBind;
+    static const auto& kPadNames = kPadButtonNames;
     auto pad_action = [](const std::string& cvar) -> std::string {
       for (const auto& [bind, id] : kPadOf)
         if (cvar == bind) return id;
@@ -5281,6 +5241,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #include "game_menu_news.inc"
 #include "game_menu_report.inc"  // Report an issue, the form that files on GitHub
 #include "game_menu_browser.inc"
+#include "game_menu_controls.inc"  // Settings > Controls by device: the choice, each device's rows and drawings
 #include "game_menu_settings.inc"
 #include "game_menu_setup.inc"
 #include "game_menu_map.inc"
