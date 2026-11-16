@@ -870,6 +870,141 @@ class RemoteHost:
                                        'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
 
 
+class ServerCheck:
+    """Which community servers the server list shows (TekRantGaming, 16 Nov 2026: a community server listed through our
+    backend ran a modified build with bots; "go with option B": a server that is not an official build is hidden).
+    On with --check-servers (the official backend); LAN and private backends list every server as before.
+
+    A server registering (gmhost.py) says its package's version, platform and build digest (gmhost.build_report) and
+    signs that with its host key (gmhost.host_proof). It is listed only when the digest is the official one for that
+    version and platform: the manifests in the --check-servers folder (tools/build_manifest.py, one per release
+    package). Anything else (an older package with no report, a changed file, an unknown version, a blocked host) is
+    registered but not listed: Direct connect only, never in the list or Quick Match. Official servers (official.key)
+    are not checked.
+
+    --blocked-file: {"keys": [host keys], "addresses": [IP addresses], "names": [lower case parts of a name],
+    "digests": [build digests]}, read again when it changes; a blocked server is taken off the list within a minute,
+    even one listed before."""
+
+    def __init__(self, folder, blocked_file, note):
+        self.folder, self.blocked_file, self.note = folder, blocked_file, note
+        self.seen, self.official, self.blocked = None, {}, {}
+        self.blocked_stamp = None
+
+    def reload(self):
+        """The manifests and the block list again when a file of theirs changed."""
+        try:
+            names = sorted(n for n in os.listdir(self.folder) if n.endswith('.json'))
+        except OSError:
+            names = []
+        stamps = {}
+        for n in names:
+            try:
+                stamps[n] = os.path.getmtime(os.path.join(self.folder, n))
+            except OSError:
+                pass
+        if stamps != self.seen:
+            official = {}
+            for n in stamps:
+                try:
+                    with open(os.path.join(self.folder, n), encoding='utf-8') as f:
+                        m = json.load(f)
+                    files = {str(k): str(v) for k, v in m['files'].items()}
+                    official[(str(m['version']), str(m['platform']))] = gmhost.build_digest(files)
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                    self.note('server check: manifest %s not read (%s)' % (n, e))
+            self.seen, self.official = stamps, official
+            self.note('server check: official builds %s' % (', '.join('%s %s' % k for k in sorted(official)) or 'none'))
+        try:
+            stamp = os.path.getmtime(self.blocked_file) if self.blocked_file else None
+        except OSError:
+            stamp = None
+        if stamp != self.blocked_stamp:
+            blocked = {}
+            if stamp is not None:
+                try:
+                    with open(self.blocked_file, encoding='utf-8') as f:
+                        raw = json.load(f)
+                    for k in ('keys', 'addresses', 'names', 'digests'):
+                        blocked[k] = [str(x).strip().lower() for x in raw.get(k, []) if str(x).strip()]
+                except (OSError, ValueError, AttributeError) as e:
+                    self.note('server check: block list not read (%s): the last one stays' % e)
+                    self.blocked_stamp = stamp
+                    return
+            self.blocked_stamp, self.blocked = stamp, blocked
+            self.note('server check: block list %s' % (', '.join('%d %s' % (len(v), k) for k, v in blocked.items())
+                                                       or 'empty'))
+
+    def host_key(self, m, name, digest):
+        """The registration's host key when its signature checks (over this name and digest), else ''."""
+        import ed25519
+        h = m.get('host')
+        if not isinstance(h, dict):
+            return ''
+        key, text, sig = str(h.get('key', '')), str(h.get('text', '')), str(h.get('sig', ''))
+        parts = text.split('|')
+        if len(text) > 512 or len(parts) < 4 or parts[0] != 'bf1943-register' or parts[2] != digest or \
+                '|'.join(parts[3:]) != name:
+            return ''
+        try:
+            public, signature = bytes.fromhex(key), bytes.fromhex(sig)
+        except ValueError:
+            return ''
+        if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
+            return ''
+        return key.lower()
+
+    def block_reason(self, name, address, key, digest):
+        b = self.blocked
+        if key and key in b.get('keys', []):
+            return 'its host is blocked'
+        if address and address.lower() in b.get('addresses', []):
+            return 'its address is blocked'
+        if any(part in name.lower() for part in b.get('names', [])):
+            return 'its name is blocked'
+        if digest and digest in b.get('digests', []):
+            return 'its build is blocked'
+        return ''
+
+    def verdict(self, m, name, raw_name, address):
+        """(why it is hidden, or '' when it may be listed; its host key). raw_name: the name as the host signed it."""
+        self.reload()
+        build = m.get('build') if isinstance(m.get('build'), dict) else {}
+        digest = str(build.get('digest', '')).lower()
+        key = self.host_key(m, raw_name, digest) if digest else ''
+        blocked = self.block_reason(name, address, key, digest)
+        if blocked:
+            return blocked, key
+        if not build:
+            return 'an older server package with no build check', key
+        version, platform = str(build.get('version', ''))[:24], str(build.get('platform', ''))[:16]
+        want = self.official.get((version, platform))
+        if want is None:
+            return 'version %s (%s) is not an official server package' % (version, platform), key
+        if digest != want:
+            return 'its files are not those of the official %s package' % version, key
+        if not key:
+            return 'no valid host key', key
+        return '', key
+
+    async def watch(self, every=60):
+        """Takes a server that became blocked (the block list changed) off the list."""
+        while True:
+            await asyncio.sleep(every)
+            try:
+                self.reload()
+                for gid, g in list(GAMES.items()):
+                    if g.get('TYPE') != 'G' or g.get('official') or not g.get('listed', True):
+                        continue
+                    why = self.block_reason(g.get('N', ''), g.get('from', ''), g.get('host_key', ''),
+                                            g.get('build_digest', ''))
+                    if why:
+                        g['listed'], g['hidden'] = False, why
+                        self.note('server check: game %s "%s" taken off the list: %s' % (gid, g.get('N', ''), why))
+            except Exception as e:  # never let the watch end
+                self.note('server check: %r' % e)
+
+
 class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
@@ -927,6 +1062,9 @@ class Registry:
         if args and getattr(args, 'official_key_file', ''):
             self.key = gmhost.read_key(args.official_key_file)
         self.used = {}  # official codes taken (nonce -> time)
+        # The build check (ServerCheck): the official backend lists only official builds' community servers.
+        self.check = ServerCheck(args.check_servers, getattr(args, 'blocked_file', ''), self.note) \
+            if args and getattr(args, 'check_servers', '') else None
 
     def official(self, code, name):
         """An official code that checks: made with the official key, within two minutes, never seen before."""
@@ -1123,6 +1261,11 @@ class Registry:
                         self.note('%s refused: an official code that does not check' % peer)
                         await writer.drain()
                         break
+                    # The build check: a community server that is not an official build is not listed.
+                    hidden, host_key = '', ''
+                    if self.check and not official:
+                        hidden, host_key = self.check.verdict(m, name, str(m.get('name', 'Server')),
+                                                              writer.get_extra_info('peername')[0])
                     n = next(Registry.ids)
                     gid, uid, pid = str(200 + n), 900 + n, next(TheaterClient.pids)
                     local = False
@@ -1150,16 +1293,25 @@ class Registry:
                                   'description': ''.join(c for c in str(m.get('description', ''))
                                                          if c.isprintable())[:200],
                                   'maps': [str(x)[:32] for x in m.get('maps', []) if isinstance(x, str)][:8],
-                                  'next_map': '', 'official': official, 'listed': bool(m.get('listed', True)),
+                                  'next_map': '', 'official': official,
+                                  'listed': bool(m.get('listed', True)) and not hidden,
+                                  'hidden': hidden if m.get('listed', True) else '',
+                                  'from': writer.get_extra_info('peername')[0], 'host_key': host_key,
+                                  'build_digest': str((m.get('build') or {}).get('digest', ''))[:64].lower()
+                                  if isinstance(m.get('build'), dict) else '',
                                   'XNADDR': base64.b64encode(gmhost.xnaddr(host)).decode(),
                                   'XNKID': base64.b64encode(os.urandom(8)).decode(),
                                   'XNKEY': base64.b64encode(os.urandom(16)).decode()}
-                    writer.write((json.dumps({'op': 'registered', 'gid': gid, 'uid': uid, 'pid': pid,
-                                              'official': official, 'listed': GAMES[gid]['listed'],
-                                              'address': '%s:%d' % (host, int(port))}) + '\n').encode())
-                    self.note('%s registered "%s" at %s:%s as game %s%s%s' % (
+                    reply = {'op': 'registered', 'gid': gid, 'uid': uid, 'pid': pid, 'official': official,
+                             'listed': GAMES[gid]['listed'], 'address': '%s:%d' % (host, int(port))}
+                    if GAMES[gid]['hidden']:
+                        reply['hidden'] = GAMES[gid]['hidden']
+                    writer.write((json.dumps(reply) + '\n').encode())
+                    self.note('%s registered "%s" at %s:%s as game %s%s%s%s' % (
                         peer, name, host, port, gid, ' (official)' if official else '',
-                        '' if GAMES[gid]['listed'] else ' (not listed)'))
+                        '' if GAMES[gid]['listed'] else ' (not listed)',
+                        ': hidden, %s' % GAMES[gid]['hidden'] if GAMES[gid]['hidden'] else
+                        ' (host %s)' % host_key[:16] if host_key else ''))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
@@ -1373,7 +1525,7 @@ def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
             if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
-                         'server_version', 'local')}
+                         'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest')}
 
 
 async def http_client(reader, writer, log):
@@ -1420,6 +1572,10 @@ async def main():
                          "machine it can reach: the one it connected to when it is on this machine or network, "
                          "else --theater-host (the public address)")
     ap.add_argument('--theater-port', type=int, default=18246)
+    ap.add_argument('--check-servers', default='',
+                    help="the official builds' manifests (a folder of *.json): list only community servers that run "
+                         'one (ServerCheck); the others are Direct connect only')
+    ap.add_argument('--blocked-file', default='', help='with --check-servers: hosts never listed (ServerCheck)')
     ap.add_argument('--login-delay', type=float, default=2.0, help='seconds before the login reply')
     # Off by default: with our HTTP reply the client never finishes the ticker request (docs/01-online-flow.md).
     ap.add_argument('--http-port', type=int, default=0, help='HTTP port for the news ticker (0: off)')
@@ -1502,6 +1658,9 @@ async def main():
                                                       args.registry_port))
             log.write('%s server registry on %s:%d\n' % (time.strftime('%H:%M:%S'), args.registry_host or args.host,
                                                           args.registry_port))
+            if registry.check:
+                registry.check.reload()
+                asyncio.get_running_loop().create_task(registry.check.watch())
         if args.http_port:
             servers.append(await asyncio.start_server(lambda r, w: http_client(r, w, log), args.host, args.http_port))
             log.write('%s HTTP on %s:%d\n' % (time.strftime('%H:%M:%S'), args.host, args.http_port))

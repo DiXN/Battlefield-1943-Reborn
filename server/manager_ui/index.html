@@ -362,7 +362,7 @@ function render() {
 function renderServers() {
   const list = $('server-list');
   const limits = state.config.servers.map(x => x.max_players);
-  const shown = state.servers.map(sv => [sv.n, sv.name, sv.state, sv.players, sv.names, sv.map, sv.next_map, sv.why, sv.reachable, sv.port, sv.listed, sv.wanted]);
+  const shown = state.servers.map(sv => [sv.n, sv.name, sv.state, sv.players, sv.names, sv.map, sv.next_map, sv.why, sv.reachable, sv.port, sv.listed, sv.wanted, sv.hidden]);
   const ticks = state.config.servers.map(x => x.tick || 0);
   sync(list, [shown, limits, ticks, state.tick], () => state.servers.map(sv => {
     const facts = h('div', { class: 'facts' });
@@ -380,6 +380,7 @@ function renderServers() {
     if (sv.why) body.append(h('div', { class: 'warn', text: sv.why }));
     if (sv.state === 'running' && sv.reachable === false) body.append(h('div', { class: 'warn', text: 'Players outside your network cannot reach it yet: open UDP ' + sv.port + ' on your router.' }));
     if (sv.state === 'running' && sv.reachable === true) body.append(h('div', { class: 'warn ok', text: 'Players can reach it from the internet.' }));
+    if (sv.state === 'running' && sv.hidden) body.append(h('div', { class: 'warn', text: 'Not in the server list (' + sv.hidden + '). Only the official server package is listed: update it (Update now) or download it again. Players can still join by Direct connect.' }));
     const up = sv.wanted;
     const buttons = h('div', { class: 'row' },
       up ? h('button', { class: 'btn small', onclick: () => act('/api/restart', { n: sv.n }, 'Restarting ' + sv.name) }, 'Restart')

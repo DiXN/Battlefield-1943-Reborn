@@ -537,6 +537,18 @@ class Manager:
     def official_key(self):
         return os.path.join(DATA, 'official.key')
 
+    def host_key(self):
+        """This host's own key (gmhost.host_proof), made once: the main backend knows the host by it."""
+        path = os.path.join(DATA, 'host.key')
+        if not os.path.exists(path):
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as f:
+                    f.write(os.urandom(32).hex())
+            except FileExistsError:
+                pass
+        return path
+
     def own_backend(self):
         """'official', 'lan' or '': which backend of our own this package runs."""
         if self.flags['official']:
@@ -575,6 +587,10 @@ class Manager:
                     args += ['--required-version', self.cfg['required_version']]
                 elif self.cfg['version_gate']:
                     args += ['--version-feed', FEED]
+                # The build check (16 Nov 2026): only official builds' community servers are listed. The official
+                # builds' manifests (tools/build_manifest.py) go in the data folder's attest folder at each release.
+                args += ['--check-servers', os.path.join(DATA, 'attest'),
+                         '--blocked-file', os.path.join(DATA, 'blocked_servers.json')]
             self.backend = spawn(args, output=os.path.join(LOGS, 'backend.out'))
             self.backend_mode = mode
             self.note('the %s started (PID %d)' % ('main backend' if mode == 'official' else 'LAN backend', self.backend.pid))
@@ -607,7 +623,7 @@ class Manager:
                 '--map-file', os.path.join(directory, 'user', 'current_map.txt'),
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
                 '--max-players', str(s['max_players']), '--tick', str(tick),
-                '--broadcast-file', os.path.join(directory, 'broadcast.json')]
+                '--broadcast-file', os.path.join(directory, 'broadcast.json'), '--host-key-file', self.host_key()]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]
         if s['description']:
@@ -749,7 +765,7 @@ class Manager:
         out = {'n': n, 'name': s['name'], 'port': s['port'], 'wanted': bool(state.get('wanted')), 'state': 'stopped',
                'players': 0, 'names': [], 'map': '', 'next_map': '', 'why': state.get('why', ''), 'reachable': None,
                'reachable_local': None, 'address': '', 'since': state.get('since', 0), 'listed': s['listed'],
-               'official': False}
+               'official': False, 'hidden': ''}
         if state.get('wanted') and not (game_up and host_up):
             wait = state.get('wait_until', 0) - time.time()
             out['state'] = 'waiting' if wait > 0 else 'restarting'
@@ -765,7 +781,7 @@ class Manager:
             out['state'] = 'running'
         elif status.get('state') == 'refused':
             out['state'], out['why'] = 'refused', str(status.get('why', ''))
-        for key in ('players', 'map', 'next_map', 'reachable', 'reachable_local', 'address', 'official'):
+        for key in ('players', 'map', 'next_map', 'reachable', 'reachable_local', 'address', 'official', 'hidden'):
             if key in status:
                 out[key] = status[key]
         if isinstance(status.get('names'), list):

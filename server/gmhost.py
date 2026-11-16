@@ -102,6 +102,87 @@ def official_code(key, name, stamp=None, nonce=None):
     return {'stamp': stamp, 'nonce': nonce, 'mac': mac}
 
 
+# ---- The build check (16 Nov 2026: a community server listed through our backend ran a modified build with bots; the
+# backend now lists a community server only when the package it runs is an official build, else it is hidden from the
+# list and Quick Match and joined by Direct connect only). The server package's program files are hashed here and the
+# backend compares their digest with the official one for that version (tools/build_manifest.py writes it at a
+# release). Only our own files: never the player's game files. Official servers prove themselves with official.key.
+
+BUILD_FOLDERS = ('bin', 'server', 'python')
+# Files an older official package had and a later one dropped: an update in place leaves them, so they are not counted.
+RETIRED_FILES = ('bin/amd_fidelityfx_vk.dll',)
+
+
+def build_files(root):
+    """{path relative to the package: SHA-256} of every program file in the package (bin, server, python), without
+    Python's own caches (made while it runs)."""
+    import hashlib
+    files = {}
+    for sub in BUILD_FOLDERS:
+        for base, dirs, names in os.walk(os.path.join(root, sub)):
+            dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+            for n in sorted(names):
+                # Python's caches; an update's files moved aside while in use (manager.py, removed at a later start)
+                if n.endswith(('.pyc', '.pyo', '.old')):
+                    continue
+                path = os.path.join(base, n)
+                if os.path.relpath(path, root).replace(os.sep, '/') in RETIRED_FILES:
+                    continue
+                h = hashlib.sha256()
+                with open(path, 'rb') as f:
+                    for block in iter(lambda: f.read(1 << 20), b''):
+                        h.update(block)
+                files[os.path.relpath(path, root).replace(os.sep, '/')] = h.hexdigest()
+    return files
+
+
+def build_digest(files):
+    """One SHA-256 over every file's path and hash, in path order: the same from the package and from its manifest."""
+    import hashlib
+    h = hashlib.sha256()
+    for path in sorted(files):
+        h.update(('%s\0%s\n' % (path, files[path])).encode('utf-8'))
+    return h.hexdigest()
+
+
+def package_root():
+    return os.path.abspath(os.environ.get('BF_SERVER_ROOT') or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def build_report(root=None):
+    """What a registration says of its build: the package's version and platform and the digest of its files."""
+    root = root or package_root()
+    try:
+        with open(os.path.join(root, 'version.txt'), encoding='utf-8') as f:
+            version = (f.read().strip().splitlines() or [''])[0].strip()
+    except OSError:
+        version = ''
+    files = build_files(root)
+    return {'version': version, 'platform': 'windows' if os.name == 'nt' else 'linux', 'digest': build_digest(files),
+            'files': len(files)}
+
+
+def host_key_seed(path):
+    """This host's own key (32 random bytes, made once in the data folder by the manager): the backend knows a host
+    by it whatever its address. Never sent; the backend gets the public key and a signature."""
+    with open(path, 'rb') as f:
+        seed = bytes.fromhex(f.read().decode('ascii').strip())
+    if len(seed) != 32:
+        raise ValueError('the host key is not 32 bytes: %s' % path)
+    return seed
+
+
+def host_proof(seed, name, digest):
+    """The host key's signature over this registration's name and build digest, with a random value."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:  # python -I leaves the script's own folder out
+        sys.path.insert(0, here)
+    import ed25519
+    nonce = os.urandom(8).hex()
+    text = 'bf1943-register|%s|%s|%s' % (nonce, digest, name)
+    return {'key': ed25519.public_key(seed).hex(), 'text': text, 'sig': ed25519.sign(seed, text.encode('utf-8')).hex()}
+
+
 def read_key(path):
     with open(path, 'rb') as f:
         key = f.read().strip()
@@ -742,6 +823,20 @@ async def serve(args):
     listen = parse_address(args.listen)
     public = parse_address(args.public) if args.public else listen
     backend = parse_address(args.backend)
+    # The build check's report, once (hashing the package takes about a second); the host key when the manager gave one.
+    try:
+        build = build_report()
+        print('%s build %s (%s, %d files): %s' % (time.strftime('%H:%M:%S'), build['version'] or '?', build['platform'],
+                                                  build['files'], build['digest']), flush=True)
+    except OSError as e:
+        build = None
+        print('%s build check: the package could not be read (%s)' % (time.strftime('%H:%M:%S'), e), flush=True)
+    host_seed = None
+    if args.host_key_file:
+        try:
+            host_seed = host_key_seed(args.host_key_file)
+        except (OSError, ValueError) as e:
+            print('%s host key: %s' % (time.strftime('%H:%M:%S'), e), flush=True)
     while True:
         try:
             reader, writer = await asyncio.open_connection(*backend)
@@ -763,6 +858,13 @@ async def serve(args):
             reg['address'] = list(public)
         if args.official_key_file:
             reg['official'] = official_code(read_key(args.official_key_file), args.name)
+        if build is not None:
+            reg['build'] = build
+            if host_seed:
+                try:
+                    reg['host'] = host_proof(host_seed, args.name, build['digest'])
+                except Exception as e:  # never stop a server over it: the backend then lists it not
+                    print('%s host key: no signature (%r)' % (time.strftime('%H:%M:%S'), e), flush=True)
         # Listening before the backend is told: its reachability probe comes at once.
         sock = udp_socket(listen)
         send(reg)
@@ -781,8 +883,12 @@ async def serve(args):
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
+        if reply.get('hidden'):
+            host.note('not listed by the backend: %s. Only an official server package is listed; update the server '
+                      'package (its manager updates itself) or download it again.' % reply['hidden'])
         state = {'state': 'registered', 'gid': reply['gid'], 'official': bool(reply.get('official')),
-                 'listed': reply.get('listed', True), 'address': reply.get('address', ''), 'reachable': None}
+                 'listed': reply.get('listed', True), 'address': reply.get('address', ''), 'reachable': None,
+                 'hidden': str(reply.get('hidden', ''))}
         write_status(args, state)
 
         reported = [args.map]
@@ -892,6 +998,7 @@ def main():
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')
     ap.add_argument('--unlisted', action='store_true', help='registered but not listed: Direct connect only')
     ap.add_argument('--official-key-file', default='', help='official.key: the server shows as official')
+    ap.add_argument('--host-key-file', default='', help="this host's key (the manager makes it in the data folder)")
     ap.add_argument('--status-file', default='', help="this server's state for the package's window (JSON)")
     ap.add_argument('--log', default='')
     asyncio.run(serve(ap.parse_args()))
