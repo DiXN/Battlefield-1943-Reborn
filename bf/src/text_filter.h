@@ -214,4 +214,136 @@ inline bool NameAllowed(const std::string& name) {
   return !bad;
 }
 
+// ---- Clan tags (TekRantGaming, 16 Nov 2026: "can be left blank or can have custom text, shows up next to a username
+// ... like this [clan]Username. Ban the use of Devs and Dev clan tags and profanity like NOG"). A tag is 2 to 4
+// letters or digits (World at War's clan tags are 4; brackets, spaces and signs would let "D.E.V" or "[Dev]" through
+// and are drawn by us anyway). The backend (server/plasma.py, server/text_filter.py: the same rules in Python, kept
+// equal by tools/test_clan_tags.py) is the one that decides; the game checks first only to say why at once.
+// A tag is read several ways: lower case with digits as letters (0 o, 1 i, 2 z, 3 e, 4 a, 5 s, 6 g, 7 t, 8 b, 9 g), with
+// 1 and l both as i (n1g, nlg), with the digits dropped; each of those with held letters as one (ddeevv) and with
+// padding letters at either end dropped (xDevx, zDevz).
+inline constexpr int kTagMin = 2, kTagMax = 4;
+enum class TagProblem { kNone, kLength, kChars, kReserved, kProfanity, kWithName };
+namespace detail {
+// The developers' tag and staff lookalikes: found inside any reading ("dev": Devs, D3V, xDevx, DEVZ) or as a whole one.
+inline constexpr std::string_view kTagReservedAnywhere[] = {"dev", "adm"};
+inline constexpr std::string_view kTagReservedWhole[] = {"dv",   "dvs",  "dvz", "mod", "mods", "modz",
+                                                         "staf", "stff", "ea",  "dice"};
+// Short profanity and slurs a 4 letter tag can hold, on top of the name rules: inside any reading, or a whole one.
+inline constexpr std::string_view kTagAnywhere[] = {"nig", "nog", "ngr", "niga", "fag", "fgt", "kkk", "cunt",
+                                                    "fuck", "fuk", "fck", "shit", "jizz", "nazi", "heil", "porn",
+                                                    "rape", "kike", "spic", "gook", "coon", "paki", "wank", "twat"};
+inline constexpr std::string_view kTagWhole[] = {
+    "fu",  "fk",  "fuc", "fux", "fcuk", "stfu", "gtfo", "kys", "ss",   "hh",   "wp",   "wpww", "isis", "cum",
+    "tit", "tits", "dik", "dic", "dick", "cok", "coc",  "cock", "azz", "ass",  "arse", "pus",  "puss", "sex",
+    "sexy", "hoe", "hoes", "thot", "fap", "rtrd", "tard", "sieg", "ped", "pedo", "cnt",  "sht",  "btch", "bich",
+    "anal", "slut", "hore", "jap", "japs", "dyke", "homo", "lezz", "smd",  "kms",  "nga",  "ngga"};
+// As digits, before any reading: hate numbers.
+inline constexpr std::string_view kTagDigitsWhole[] = {"88", "h88", "1488"};
+inline constexpr std::string_view kTagDigitsAnywhere[] = {"1488"};
+
+inline char TagFold(char c, bool one_is_i) {
+  if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+  if (one_is_i && c == 'l') return 'i';
+  switch (c) {
+    case '0': return 'o';
+    case '1': return one_is_i ? 'i' : 'l';
+    case '2': return 'z';
+    case '3': return 'e';
+    case '4': return 'a';
+    case '5': return 's';
+    case '6': return 'g';
+    case '7': return 't';
+    case '8': return 'b';
+    case '9': return 'g';
+    default: return c;
+  }
+}
+inline std::string TagCollapse(const std::string& s) {
+  std::string out;
+  for (char c : s)
+    if (out.empty() || out.back() != c) out += c;
+  return out;
+}
+// Padding at both ends only ("xSSx"): a word that merely ends in x or z ("Fuzz") is left whole.
+inline std::string TagStrip(const std::string& s) {
+  auto pad = [](char c) { return c == 'x' || c == 'z'; };
+  if (s.size() < 3 || !pad(s.front()) || !pad(s.back())) return s;
+  size_t b = 0, e = s.size();
+  while (b < e && (s[b] == 'x' || s[b] == 'z')) ++b;
+  while (e > b && (s[e - 1] == 'x' || s[e - 1] == 'z')) --e;
+  return s.substr(b, e - b);
+}
+// Every reading of a tag (above), none empty.
+inline std::vector<std::string> TagReadings(std::string_view tag) {
+  std::string leet, leet_i, letters;
+  for (char c : tag) {
+    leet += TagFold(c, false);
+    leet_i += TagFold(c, true);
+    if (!(c >= '0' && c <= '9')) letters += TagFold(c, false);
+  }
+  std::vector<std::string> out;
+  for (const std::string& r : {leet, leet_i, letters})
+    for (const std::string& v : {r, TagCollapse(r), TagStrip(r), TagStrip(TagCollapse(r)), TagCollapse(TagStrip(r))})
+      if (!v.empty()) out.push_back(v);
+  return out;
+}
+inline bool TagHits(const std::vector<std::string>& readings, const std::string_view* anywhere, size_t anywhere_n,
+                    const std::string_view* whole, size_t whole_n) {
+  for (const std::string& r : readings) {
+    for (size_t i = 0; i < anywhere_n; ++i)
+      if (r.find(anywhere[i]) != std::string::npos) return true;
+    for (size_t i = 0; i < whole_n; ++i)
+      if (r == whole[i]) return true;
+  }
+  return false;
+}
+}  // namespace detail
+
+// What is wrong with a clan tag for this soldier name (kNone: it may be worn; an empty tag is no tag and always fine).
+inline TagProblem CheckTag(const std::string& tag, const std::string& name = std::string()) {
+  using namespace detail;
+  if (tag.empty()) return TagProblem::kNone;
+  if (int(tag.size()) < kTagMin || int(tag.size()) > kTagMax) return TagProblem::kLength;
+  for (char c : tag)
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return TagProblem::kChars;
+  const std::vector<std::string> readings = TagReadings(tag);
+  if (TagHits(readings, kTagReservedAnywhere, std::size(kTagReservedAnywhere), kTagReservedWhole,
+              std::size(kTagReservedWhole)))
+    return TagProblem::kReserved;
+  std::string lower;
+  for (char c : tag) lower += (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+  for (std::string_view d : kTagDigitsWhole)
+    if (lower == d) return TagProblem::kProfanity;
+  for (std::string_view d : kTagDigitsAnywhere)
+    if (lower.find(d) != std::string::npos) return TagProblem::kProfanity;
+  if (!NameAllowed(tag) ||
+      TagHits(readings, kTagAnywhere, std::size(kTagAnywhere), kTagWhole, std::size(kTagWhole)))
+    return TagProblem::kProfanity;
+  if (!name.empty() && !NameAllowed(tag + name)) return TagProblem::kWithName;
+  return TagProblem::kNone;
+}
+
+// The player's words for a problem (the launcher's name page; the backend's "why" codes are the same).
+inline const char* TagProblemText(TagProblem p) {
+  switch (p) {
+    case TagProblem::kLength:
+    case TagProblem::kChars: return "A clan tag needs 2 to 4 letters or numbers, or leave it blank.";
+    case TagProblem::kReserved: return "That tag is kept for the game's developers. Choose another one.";
+    case TagProblem::kProfanity: return "That clan tag is not allowed. Choose another one.";
+    case TagProblem::kWithName: return "That clan tag and your name together are not allowed.";
+    default: return "";
+  }
+}
+inline const char* TagProblemCode(TagProblem p) {
+  switch (p) {
+    case TagProblem::kLength: return "length";
+    case TagProblem::kChars: return "chars";
+    case TagProblem::kReserved: return "reserved";
+    case TagProblem::kProfanity: return "profanity";
+    case TagProblem::kWithName: return "with_name";
+    default: return "";
+  }
+}
+
 }  // namespace bf1943::text_filter

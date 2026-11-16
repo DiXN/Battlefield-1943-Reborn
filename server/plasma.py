@@ -33,6 +33,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's folder out
 import gmhost  # noqa: E402
 import stats  # noqa: E402
+import text_filter  # noqa: E402
 
 HEADER = 12
 MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client says fragmentSize=8096)
@@ -1389,6 +1390,12 @@ class Registry:
                joins that game; with the version gate a game older than the newest release (or one that says no
                version) gets {"op": "outdated", "required", "yours"} and no reservation
                a v0.4.0 or newer game says its "version" and "platform" ("windows", "linux") in list, find and reserve
+      player:  {"op": "tag", "name", "id", "tag"} -> {"op": "tag", "ok", "tag", "why"?, "text"?, "dev"?}  the
+               player's clan tag (put_tag): "" for none; why "not_yours" (the name is not held for this player),
+               "length", "chars", "reserved", "profanity", "with_name" (text_filter.py), with the player's words
+      player:  {"op": "tags", "gid"?, "names"?, "me"?} -> {"op": "tags", "tags": {name: tag}}  the clan tags of a
+               server's players and of the names asked about (tags_reply); scoreboard, players and leaderboard rows
+               carry "tag" too
       player:  {"op": "name", "name", "id"} -> {"op": "name", "name"}  before logging in: the player's name, or it
                with a number when another player has it (free_name); held for that player id for 10 minutes, and
                while they are online. "protected_by_other": true when the name is another player's protected name
@@ -1716,7 +1723,7 @@ class Registry:
                             continue
                         rows.append({'name': persona, 'gid': g['GID'] if g else '', 'server': g.get('N', '') if g else '',
                                      'map': g.get('map', '') if g else ''})
-                    writer.write((json.dumps({'op': 'players', 'rows': rows[:200]}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'players', 'rows': with_tags(rows[:200])}) + '\n').encode())
                 elif op == 'match_score' and str(m.get('gid', '')) in GAMES:
                     # The pause's Scoreboard: each player's game sends its score in this match.
                     name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
@@ -1738,7 +1745,17 @@ class Registry:
                         if n.lower() not in table:
                             rows.append({'name': n, 'score': 0, 'at': 0})
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
-                    writer.write((json.dumps({'op': 'scoreboard', 'rows': rows[:64]}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'scoreboard', 'rows': with_tags(rows[:64])}) + '\n').encode())
+                elif op == 'tag':  # clan tags (tag_for, above)
+                    reply = put_tag(m, address)
+                    self.note('%s %s the clan tag "%s" for %s%s' % (
+                        address, 'set' if reply.get('ok') else 'was refused', str(m.get('tag', ''))[:16],
+                        str(m.get('name', ''))[:15], (': wears "%s"' % reply.get('tag')) if reply.get('ok') and
+                        reply.get('tag') != str(m.get('tag', '')) else '' if reply.get('ok') else
+                        ' (%s)' % reply.get('why')))
+                    writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'tags':
+                    writer.write((json.dumps(tags_reply(m, address)) + '\n').encode())
                 elif op == 'stats_put' and 'signed' in m:
                     reply = self.signed_stats(m)
                     writer.write((json.dumps(reply) + '\n').encode())
@@ -1774,13 +1791,16 @@ class Registry:
                     else:
                         writer.write((json.dumps({'op': 'recover', 'ok': False}) + '\n').encode())
                 elif op == 'name' and 'signed' in m:
-                    writer.write((json.dumps(self.signed_name(m, address)) + '\n').encode())
+                    reply = self.signed_name(m, address)
+                    note_name_check(reply, str(m.get('signed', '')).rsplit('|', 1)[-1], address)  # clan tags
+                    writer.write((json.dumps(reply) + '\n').encode())
                 elif op == 'stats':
                     # The website's totals (server/stats.py, read by its feed): counts only, nothing about anyone.
                     writer.write((json.dumps(dict(STATS.totals(), op='stats')) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
-                    writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'leaderboard', 'rows': with_tags(rows), 'total': total}) +
+                                  '\n').encode())
                 elif op == 'reserve' and maintenance_now(address):
                     # Maintenance mode (maintenance_now): every join refused with its text, whatever server was picked.
                     notice = maintenance_now(address)
@@ -1828,7 +1848,8 @@ class Registry:
                     if not asked or not pid:
                         writer.write((json.dumps({'op': 'name', 'name': asked}) + '\n').encode())
                     else:
-                        writer.write((json.dumps(self.name_reply(asked, pid, address)) + '\n').encode())
+                        reply = note_name_check(self.name_reply(asked, pid, address), pid, address)  # clan tags
+                        writer.write((json.dumps(reply) + '\n').encode())
                 elif op == 'find':
                     want = (str(m.get('address', '')), int(m.get('port', 18300) or 18300))
                     games = [for_player(g, writer, self.args) for g in GAMES.values() if g.get('TYPE') == 'G']
@@ -1900,6 +1921,113 @@ def for_player(g, writer, args):
     if host == g['I']:
         return g
     return dict(g, I=host, XNADDR=base64.b64encode(gmhost.xnaddr(host)).decode())
+
+
+# ---- Clan tags (TekRantGaming, 16 Nov 2026: "can be left blank or can have custom text, shows up next to a username in
+# launcher, in game and in scoreboard like this [clan]Username. Ban the use of Devs and Dev clan tags and profanity
+# ... Developers TekRantGaming and ZALIAS are devs of this project and should have the clan tag of Dev."). The backend
+# decides who wears what: each game sends its player's tag here ({"op": "tag"}) and draws everyone's from what this
+# says ({"op": "tags"}, and "tag" in the scoreboard, players and leaderboard rows), never from what another game
+# claims. A tag is 2 to 4 letters or digits, checked by server/text_filter.py (the game's text_filter.h rules: Dev and
+# its lookalikes, staff tags, profanity and slurs, and the tag and name read together). It is worn while its player
+# holds the name (name_holder: the name check's hold, then the FESL login), and every game sends it again at its start
+# and with its match's tag requests, so nothing needs keeping on disk. The team names (TEAM_OWNERS, the developers'
+# accounts, which only their owners' signed games can hold) always wear Dev, whatever their game sends.
+TAGS = {}  # a name, lower case -> (tag, player id)
+NAME_FROM = {}  # a name, lower case -> (player id, address): the last name check that gave it (put_tag)
+DEV_TAG = 'Dev'
+
+
+def note_name_check(reply, pid, address):
+    """A name check's answer: which player and address it gave the name to, so only they set its tag."""
+    if isinstance(pid, str):
+        try:
+            pid = int(pid, 16) & 0xFFFFFFFF
+        except ValueError:
+            pid = 0
+    if isinstance(reply, dict) and reply.get('name') and pid:
+        if len(NAME_FROM) > 100000:
+            NAME_FROM.clear()
+        NAME_FROM[reply['name'].lower()] = (pid, address)
+    return reply
+
+
+def dev_name(name):
+    """Whether this is one of the developers' names (a team name of TEAM_OWNERS)."""
+    return bool(name) and team_owner(name) is not None
+
+
+def tag_for(name):
+    """The clan tag worn by the player under this name now ('' for none)."""
+    if not isinstance(name, str) or not name:
+        return ''
+    if dev_name(name):
+        return DEV_TAG
+    held = TAGS.get(name.lower())
+    if not held:
+        return ''
+    if name_holder(name) != held[1]:  # the name's hold ended, or another player has it now
+        TAGS.pop(name.lower(), None)
+        return ''
+    return held[0]
+
+
+def with_tags(rows):
+    """Rows of names ({'name': ...}) with each one's tag added where there is one (copies: the tables stay as kept)."""
+    out = []
+    for r in rows:
+        tag = tag_for(r.get('name', ''))
+        out.append(dict(r, tag=tag) if tag else r)
+    return out
+
+
+def put_tag(m, address):
+    """A game's {"op": "tag", "name", "id", "tag"}: its player's tag, worn from now on. Only the player holding the name
+    may set its tag (the same player id; for a protected name, the one signed in for it from this address)."""
+    name = str(m.get('name', ''))[:15]
+    tag = str(m.get('tag', '')).strip()[:16]
+    try:
+        pid = int(str(m.get('id', '')), 16) & 0xFFFFFFFF
+    except ValueError:
+        pid = 0
+    acct = protected_by(name) if name else None
+    if not name or not pid or name_holder(name) != pid or NAME_FROM.get(name.lower()) != (pid, address) or \
+            (acct and not signed_in_for(acct, pid, address)):
+        return {'op': 'tag', 'ok': False, 'why': 'not_yours', 'tag': tag_for(name),
+                'text': 'Your name is not signed in yet: your clan tag is used from your next start.'}
+    if dev_name(name):
+        return {'op': 'tag', 'ok': True, 'tag': DEV_TAG, 'dev': True}
+    why = text_filter.tag_problem(tag, name)
+    if why:
+        return {'op': 'tag', 'ok': False, 'why': why, 'text': text_filter.TAG_PROBLEM_TEXT[why], 'tag': tag_for(name)}
+    if len(TAGS) > 50000:
+        for k in [k for k, (_, p) in TAGS.items() if name_holder(k) != p]:
+            del TAGS[k]
+    if tag:
+        TAGS[name.lower()] = (tag, pid)
+    else:
+        TAGS.pop(name.lower(), None)
+    return {'op': 'tag', 'ok': True, 'tag': tag}
+
+
+def tags_reply(m, address):
+    """A game's {"op": "tags", "gid"?, "names"?, "me"?}: the tags of a server's players and of the names asked about
+    (64 at most), {name: tag} for those wearing one. "me" ({"name", "id", "tag"}) sets the asker's own first (put_tag),
+    so a tag is back at once after this backend restarts."""
+    if isinstance(m.get('me'), dict):
+        put_tag(m['me'], address)
+    names = []
+    g = GAMES.get(str(m.get('gid', '')))
+    if g:
+        names += g.get('names', [])
+    if isinstance(m.get('names'), list):
+        names += [str(n)[:15] for n in m['names'][:64]]
+    tags = {}
+    for n in names[:128]:
+        tag = tag_for(n)
+        if tag:
+            tags[n] = tag
+    return {'op': 'tags', 'tags': tags}
 
 
 def tick_of(value):

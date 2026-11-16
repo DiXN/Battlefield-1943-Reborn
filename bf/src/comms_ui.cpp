@@ -18,6 +18,7 @@
 #include <rex/cvar.h>
 #include <rex/ui/imgui_dialog.h>
 
+#include "clan_tags.h"
 #include "comms.h"
 
 REXCVAR_DEFINE_STRING(keybind_chat_all, "T", "Input/Keybinds/Chat", "Text chat to everyone on the server");
@@ -258,7 +259,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
         Laid d{&l, typing ? 1.0f : float(std::clamp(12.0 - age, 0.0, 2.0) / 2.0), line, x0, {}, {}, Printable(l.text)};
         if (!l.notice) {
           d.tag = std::string("[") + ChannelLabel(l.channel) + "] ";
-          d.who = Printable(l.name) + ": ";
+          d.who = clan::Tagged(Printable(l.name)) + ": ";  // [TAG]Name: the clan tag the backend says
           d.body_x = x0 + bold->CalcTextSizeA(size, FLT_MAX, 0, d.tag.c_str()).x +
                      bold->CalcTextSizeA(size, FLT_MAX, 0, d.who.c_str()).x;
         }
@@ -325,8 +326,9 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       }
       for (const std::string& name : speaking) {
         dl->AddCircleFilled(ImVec2(x + 6 * s, y + line * 0.5f), 5 * s, IM_COL32(130, 225, 120, 255));
-        shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), Printable(name), 1.0f);
-        x += 26 * s + bold->CalcTextSizeA(size, FLT_MAX, 0, name.c_str()).x;
+        const std::string shown = clan::Tagged(Printable(name));
+        shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), shown, 1.0f);
+        x += 26 * s + bold->CalcTextSizeA(size, FLT_MAX, 0, shown.c_str()).x;
         if (x > io.DisplaySize.x * 0.45f) break;
       }
     }

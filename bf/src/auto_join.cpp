@@ -34,6 +34,7 @@
 #include <rex/system/kernel_state.h>
 
 #include "capture_points.h"
+#include "clan_tags.h"
 #include "comms.h"
 #include "flash_spawn.h"
 
@@ -1363,6 +1364,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   bf1943::comms::ReadTeam(base, bf1943::LevelLoaded());  // team and squad chat (comms.cpp), the deploy screen too
   bf1943::CapturePointsTick(base, bf1943::LevelLoaded());  // the flags' letters and the pause menu's map
   bf1943::MapPlayersTick(base, bf1943::LevelLoaded());  // the pause menu's map: team mates and seen enemies
+  bf1943::clan::GameNamesTick(&ctx, base, bf1943::LevelLoaded());  // clan tags: "[TAG]Name" in the game's player list
 #if defined(BF_DEV_TOOLS)
   bf1943::DevTeamScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_TEAMSCAN (dev_team_scan.cpp)
   bf1943::DevPlayerScan(base, seated || bf1943::LocalOnFoot());  // BF_DEV_PLAYERSCAN (dev_player_scan.cpp)

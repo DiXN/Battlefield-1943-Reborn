@@ -48,6 +48,7 @@
 
 #include "account_key.h"
 #include "capture_points.h"
+#include "clan_tags.h"
 #include "display_modes.h"
 #include "game_install.h"
 #include "launcher_kit.h"
@@ -477,6 +478,7 @@ AccountNews TakeAccountNews();                                       // below: o
 bool SignedRegistryRequest(const std::string& code, const std::string& op, const std::string& fields,
                            std::string& reply);                      // below
 uint32_t OnlinePlayerId();                                           // live_layers.cpp
+const std::string& PlayerName();                                     // live_layers.cpp: the name played under
 bool ShadersAfterUpdate();                  // below: the shaders are prepared again after an update
 bool ShadersPreparedAtStart();              // below: this version's shaders were prepared before: no shader page
 const char* BfVersion();                    // pipeline_upload.cpp
@@ -5237,6 +5239,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
 #include "game_menu_launcher.inc"
+#include "game_menu_clan.inc"
 #include "game_menu_home.inc"
 #include "game_menu_news.inc"
 #include "game_menu_report.inc"  // Report an issue, the form that files on GitHub
@@ -5373,6 +5376,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         }
       }
     }
+    // Clan tags (clan_tags.h): the tags of this server's players every 10 s, and this player's own sent again.
+    if (MenuDriverStage() == 5 && !joined_gid_.empty()) clan::MatchTick(joined_gid_, PlayerName(), OnlinePlayerId());
     if (MenuDriverStage() == 5 && LevelLoaded()) {
       match_accum_ += io.DeltaTime;
       if (match_accum_ >= 60) {
@@ -5856,6 +5861,7 @@ void ApplyPlayerIdentity(const fs::path& user_dir) {
   }
   SetPlayerIdentity(name, id);
   SetAccount(settings.Get("account_code", ""), settings.Get("account_name", ""));
+  clan::SetSavedTag(settings.Get("clan_tag", ""));  // sent once the name check has the name (clan_tags.h)
   StartNameCheck(name, id);
 }
 
@@ -5963,10 +5969,13 @@ void StartNameCheck(const std::string& name, uint32_t player_id) {
       std::lock_guard lock(g_account_mutex);
       g_account_news = news;
     }
-    std::lock_guard lock(check->mutex);
-    check->answer = answer;
-    check->done = true;
-    check->done_cv.notify_all();
+    {
+      std::lock_guard lock(check->mutex);
+      check->answer = answer;
+      check->done = true;
+      check->done_cv.notify_all();
+    }
+    if (!answer.empty()) clan::SendOwnTag(answer, OnlinePlayerId());  // the clan tag, for the name the backend gave
   }).detach();
 }
 uint32_t PlayerId();  // live_layers.cpp

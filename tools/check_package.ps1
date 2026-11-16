@@ -106,7 +106,7 @@ if (!$serverZip) { Bad 'no community server package (BF1943-Reborn-Server-<versi
     $sz = [IO.Compression.ZipFile]::OpenRead($serverZip.FullName)
     try {
         $names = @($sz.Entries | ForEach-Object { ($_.FullName -replace '\\', '/') -replace '^[^/]+/', '' })
-        foreach ($r in 'server/manager.py', 'server/manager_ui/index.html', 'server/gmhost.py', 'server/plasma.py', 'server/ed25519.py', 'server/stats.py', 'python/python.exe',
+        foreach ($r in 'server/manager.py', 'server/manager_ui/index.html', 'server/gmhost.py', 'server/plasma.py', 'server/ed25519.py', 'server/stats.py', 'server/text_filter.py', 'python/python.exe',
                        'python/pythonw.exe', 'bin/bf1943.exe', 'bin/rexruntime.dll', 'version.txt', 'server.default.json', 'BF1943 Server.bat') {
             if ($names -notcontains $r) { Bad "the server package lacks $r" }
         }

@@ -70,7 +70,8 @@
     // The player's card.
     const std::string name = settings_.Get("player_name", "Soldier");
     const std::string rank = "RANK " + std::to_string(Rank()) + " \xC2\xB7 " + Upper(kRanks[Rank() - 1]);
-    const float nw = std::max(kit::TextWidth(f.ui_bold, st(14), name), kit::SpacedWidth(f.typed, st(10), rank, st(1.5f)));
+    const std::string tag = clan::OwnTag();  // [TAG]Name (clan_tags.h)
+    const float nw = std::max(clan::TaggedWidth(f.ui_bold, st(14), name, tag), kit::SpacedWidth(f.typed, st(10), rank, st(1.5f)));
     const float ew = kit::SpacedWidth(f.ui_bold, st(10.25f), "EDIT", st(1.5f));
     const float w = st(10) + st(30) + st(12) + nw + st(14) + ew + st(14);
     const ImVec2 a(st.P(1232, 0).x - w, st.P(0, 22).y), b(st.P(1232, 0).x, st.P(0, 70).y);
@@ -78,7 +79,7 @@
     kit::PaperArt(d, a, b);
     d->AddRect(a, b, kit::kBorder, 0, 0, 1.0f);
     RankInsignia(d, st, ImVec2(a.x + st(10) + st(15), (a.y + b.y) * 0.5f), st(30), Rank());
-    d->AddText(f.ui_bold, st(14), ImVec2(a.x + st(52), a.y + st(7)), kit::kInk, name.c_str());
+    clan::DrawTagged(d, f.ui_bold, st(14), ImVec2(a.x + st(52), a.y + st(7)), kit::kInk, name, tag, kit::kStamp);
     kit::Spaced(d, f.typed, st(10), ImVec2(a.x + st(52), a.y + st(29)), kit::kInkSection, rank, st(1.5f));
     d->AddRectFilled(ImVec2(b.x - ew - st(24), a.y + st(10)), ImVec2(b.x - ew - st(23), b.y - st(10)), kit::kRule);
     kit::Spaced(d, f.ui_bold, st(10.25f), ImVec2(b.x - ew - st(12), a.y + st(18)), hover ? kit::kStamp : kit::kInkSection, "EDIT",
@@ -347,7 +348,7 @@
       const float tx = a.x + st(131);
       kit::Spaced(d, f.typed, st(10), ImVec2(tx, a.y + st(18)), kit::kInkSection, "SERVICE RECORD", st(2));
       const std::string name = settings_.Get("player_name", "Soldier");
-      d->AddText(f.ui_bold, st(15), ImVec2(tx, a.y + st(32)), kit::kInk, name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(15), ImVec2(tx, a.y + st(32)), kit::kInk, name, clan::OwnTag(), kit::kStamp);
       const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
       const std::string l1 = fmt::format("{} \xC2\xB7 rank {} \xC2\xB7 Rifleman", kRanks[Rank() - 1], Rank());
       const std::string l2 = fmt::format("{:.0f} score \xC2\xB7 {} h {:02d} min in the field", ScoreTotal(), int(seconds / 3600),

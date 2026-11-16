@@ -34,7 +34,7 @@ stage() {
   cp -a "$S/bf1943" "$S"/*.so* "$T/bin/"
   if [ -d "$S/fonts" ]; then cp -a "$S/fonts" "$T/bin/"; fi
   if [ -d "$S/licences" ]; then cp -a "$S/licences" "$T/licences"; else echo "warning: no licences folder in $S"; fi
-  cp "$WT/server/manager.py" "$WT/server/gmhost.py" "$WT/server/plasma.py" "$WT/server/ed25519.py" "$WT/server/stats.py" "$T/server/"
+  cp "$WT/server/manager.py" "$WT/server/gmhost.py" "$WT/server/plasma.py" "$WT/server/ed25519.py" "$WT/server/stats.py" "$WT/server/text_filter.py" "$T/server/"
   cp "$WT/server/manager_ui/index.html" "$T/server/manager_ui/"
   cp "$WT/tools/linux/server/bf1943-server" "$T/bf1943-server"
   chmod +x "$T/bf1943-server" "$T/bin/bf1943"

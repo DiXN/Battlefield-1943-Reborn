@@ -923,6 +923,7 @@
     // With a controller in hand the keys start open (TekRantGaming, 9 Nov: the controller could not reach them).
     name_key_ = 10, name_keys_ = device_ == Device::kPad, name_caps_ = name_text_.empty();  // on Q
     name_error_.clear();
+    TagBegin();  // the clan tag box (game_menu_clan.inc)
     code_mode_ = false, acct_show_code_ = false;
     if (!acct_busy_.load()) acct_message_.clear();
     if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
@@ -943,6 +944,7 @@
   static bool NameChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
   void NameType(char c) {
     if (code_mode_) return CodeType(c);
+    if (tag_mode_) return TagType(c);
     if (int(name_text_.size()) >= kNameMax || !NameChar(c)) return;
     if (std::isalpha(static_cast<unsigned char>(c)))
       c = name_caps_ ? char(std::toupper(static_cast<unsigned char>(c))) : char(std::tolower(static_cast<unsigned char>(c)));
@@ -951,6 +953,7 @@
     if (std::isalpha(static_cast<unsigned char>(c)) && name_caps_ && name_text_.size() == 1) name_caps_ = false;
   }
   void NameDelete() {
+    if (tag_mode_ && !code_mode_) return TagDelete();
     if (!name_text_.empty()) name_text_.pop_back();
     if (name_text_.empty()) name_caps_ = true;
   }
@@ -976,12 +979,14 @@
       REXLOG_INFO("BF name: a name with profanity was refused on the name page");
       return false;
     }
+    if (!TagCheck(name)) return false;  // the clan tag with it (game_menu_clan.inc)
     const bool changed = name != settings_.Get("player_name", "") || settings_.Get("player_name_chosen", "") != "1";
     settings_.values["player_name"] = name;
     settings_.values["player_name_chosen"] = "1";
     settings_.values.erase("player_name_refused");
     name_required_ = false;
     settings_.Save();
+    TagSave();
     if (changed) REXLOG_INFO("BF name: the player chose {}", name);
     // Before BF signs in (the setup on a first start) the name is used at once; after, from the next start.
     if (!signed_in_once_) {
@@ -1377,6 +1382,10 @@
         if (ch < 128) CodeType(char(ch)), name_keys_ = false;
         continue;
       }
+      if (tag_mode_) {  // the clan tag box has the typing (game_menu_clan.inc)
+        if (ch < 128) TagType(char(ch), true), name_keys_ = false;
+        continue;
+      }
       if (ch < 128 && NameChar(char(ch)) && int(name_text_.size()) < kNameMax) {
         name_text_ += char(ch);
         name_error_.clear(), name_caps_ = false;
@@ -1416,6 +1425,7 @@
       prompts.push_back({kit::Button::kX, x_label, "F2"});
       if (!NameProtected()) prompts.push_back({kit::Button::kLB, "Recovery code", "F3"});
     }
+    if (!code_mode_) prompts.push_back({kit::Button::kRB, tag_mode_ ? "Soldier name" : "Clan tag", "F4"});
     Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
     // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
     // layout gives a controller's A as Enter too, which saved an empty name instead of opening the keys. With the on
@@ -1447,24 +1457,12 @@
                               "on a server already uses it, a number is added for that server.",
                         w) +
            st(20);
-      kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, code_mode_ ? "RECOVERY CODE" : "SOLDIER NAME", st(2));
-      y += st(22);
-      const ImVec2 n0(x, y), n1(x + w, y + st(58));
-      d->AddRectFilled(n0, n1, kit::kPaperLight);
-      d->AddRect(n0, n1, kit::kGreen, 0, 0, st(3));
-      d->AddText(f.typed, st(30), ImVec2(x + st(14), y + st(11)), kit::kInk, name_text_.c_str());
-      if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
-        const float cx = x + st(16) + kit::TextWidth(f.typed, st(30), name_text_);
-        d->AddRectFilled(ImVec2(cx, y + st(12)), ImVec2(cx + st(3), y + st(46)), kit::kInk);
+      NameFields(d, st, x, y, w);  // the clan tag and soldier name boxes, or the recovery code's (game_menu_clan.inc)
+      {
+        const std::string& error = !name_error_.empty() ? name_error_ : code_mode_ ? name_error_ : tag_refusal_;
+        d->AddText(f.typed, st(14), ImVec2(x, y), error.empty() ? kit::kInkFaint : kit::kRed,
+                   error.empty() ? NameFieldHint() : error.c_str());
       }
-      const std::string count = std::to_string(name_text_.size()) + " / " +
-                                std::to_string(code_mode_ ? account::kCodeLength : kNameMax);
-      d->AddText(f.typed, st(14), ImVec2(x + w - st(14) - kit::TextWidth(f.typed, st(14), count), y + st(22)),
-                 kit::kInkFaint, count.c_str());
-      y += st(66);
-      d->AddText(f.typed, st(14), ImVec2(x, y), name_error_.empty() ? kit::kInkFaint : kit::kRed,
-                 name_error_.empty() ? (code_mode_ ? "20 letters and numbers" : "3 to 15 letters, numbers or underscores")
-                                     : name_error_.c_str());
       y += st(30);
       if (!code_mode_) {
         d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
@@ -1501,6 +1499,7 @@
       }
     }
     if (!name_keys_ && in.y && !code_mode_) NameRandom();
+    if (!code_mode_ && (in.next_tab || ImGui::IsKeyPressed(ImGuiKey_F4, false))) TagSwitch(!tag_mode_);  // clan tag box
     if ((!name_keys_ && in.x) || protect_key) {
       if (code_mode_) {
       } else if (NameProtected() && name_text_ == settings_.Get("player_name", "")) {
@@ -1532,6 +1531,10 @@
       name_text_.clear();
       for (const char* c = v; *c; ++c)
         if (NameChar(*c)) name_text_ += *c;
+      if (const char* t = std::getenv("BF_DEV_TAG")) {  // BF_DEV_TAG=<tag>: the clan tag box too ("-": emptied)
+        tag_text_.clear();
+        for (const char* c = t; *c && *c != '-'; ++c) tag_text_ += *c;
+      }
       NameSave();
     }
 #endif
@@ -1946,7 +1949,8 @@
     {
       const std::string name = settings_.Get("player_name", "Soldier");
       const std::string rank = "RANK " + std::to_string(Rank()) + " \xC2\xB7 " + Upper(kRanks[Rank() - 1]);
-      const float nw = std::max(kit::TextWidth(f.ui_bold, st(22), name), kit::SpacedWidth(f.typed, st(13), rank, 0));
+      const std::string tag = clan::OwnTag();  // [TAG]Name (clan_tags.h)
+      const float nw = std::max(clan::TaggedWidth(f.ui_bold, st(22), name, tag), kit::SpacedWidth(f.typed, st(13), rank, 0));
       const std::vector<Cue> e = {{kit::Button::kBack, "Edit"}};
       const float ew = PromptsWidth(st, e, 14);
       const float w = st(12) + st(44) + st(14) + nw + st(18) + ew + st(10);
@@ -1954,7 +1958,7 @@
       d->AddRectFilled(a, b, IM_COL32(15, 17, 13, 214));
       d->AddRectFilled(a, ImVec2(a.x + st(4), b.y), kit::kStamp);
       RankBadge(d, st, ImVec2(a.x + st(14) + st(22), a.y + st(30)), Rank());
-      d->AddText(f.ui_bold, st(22), ImVec2(a.x + st(72), a.y + st(7)), kit::kCream, name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(22), ImVec2(a.x + st(72), a.y + st(7)), kit::kCream, name, tag, kit::kGold);
       d->AddText(f.typed, st(13), ImVec2(a.x + st(72), a.y + st(38)), kit::kKhakiText, rank.c_str());
       Input edit_in;
       Prompts(d, st, ImVec2(b.x - ew - st(8), a.y + st(18)), e, edit_in, 14);
@@ -2238,6 +2242,7 @@
   // on a worker while the page is open.
   struct LbRow {
     std::string name;
+    std::string tag;  // the clan tag the backend says (clan_tags.h)
     int score = 0, seconds = 0, captures = 0;
   };
   std::mutex lb_mutex_;
@@ -2438,7 +2443,7 @@
           if (a == std::string::npos || b == std::string::npos) break;
           const std::string obj = reply.substr(a, b - a + 1);
           FriendRow r{JsonField(obj, "name"), JsonField(obj, "gid"), JsonField(obj, "server"), JsonField(obj, "map")};
-          if (!r.name.empty()) rows.push_back(r);
+          if (!r.name.empty()) clan::Note(r.name, JsonField(obj, "tag")), rows.push_back(r);
           at = b + 1;
         }
         std::lock_guard lock(fr_mutex_);
@@ -2481,7 +2486,8 @@
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       d->AddRectFilled(a, b, IM_COL32(15, 17, 13, sel ? 236 : 200));
       if (sel) d->AddRectFilled(a, ImVec2(a.x + st(4), b.y), kit::kStamp);
-      d->AddText(f.ui_bold, st(21), ImVec2(a.x + st(24), a.y + st(10)), sel ? kit::kCream : kit::kKhakiText, r.name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(21), ImVec2(a.x + st(24), a.y + st(10)), sel ? kit::kCream : kit::kKhakiText, r.name,
+                       clan::TagOf(r.name), kit::kGold);
       const std::string where = r.gid.empty() ? (r.server.empty() ? "IN THE MENUS" : Upper(r.server))  // a private match
                                               : Upper(r.server) + (r.map.empty() ? "" : "  /  " + Upper(r.map));
       d->AddText(f.typed, st(15), ImVec2(b.x - st(24) - kit::TextWidth(f.typed, st(15), where), a.y + st(15)),
@@ -2528,7 +2534,8 @@
           LbRow r;
           r.name = JsonField(obj, "name");
           r.score = std::atoi(JsonField(obj, "score").c_str());
-          if (!r.name.empty()) rows.push_back(r);
+          r.tag = JsonField(obj, "tag");
+          if (!r.name.empty()) clan::Note(r.name, r.tag), r.tag = clan::TagOf(r.name), rows.push_back(r);
           at = b + 1;
         }
         std::lock_guard lock(sb_mutex_);
@@ -2559,7 +2566,7 @@
       if (me) d->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + st(4), y + st(40)), kit::kStamp);
       const ImU32 ink = me ? kit::kCream : kit::kKhakiText;
       d->AddText(f.typed, st(15), ImVec2(x0 + st(24), y + st(11)), ink, std::to_string(i + 1).c_str());
-      d->AddText(f.ui_bold, st(19), ImVec2(x0 + st(90), y + st(8)), ink, rows[i].name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(19), ImVec2(x0 + st(90), y + st(8)), ink, rows[i].name, rows[i].tag, kit::kGold);
       const std::string sc = std::to_string(rows[i].score);
       d->AddText(f.typed, st(16), ImVec2(x1 - st(24) - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
       y += st(44);
