@@ -676,11 +676,12 @@ class Engine {
           const std::string shown = text_filter::Censor(text);
           {
             std::lock_guard lock(g_mutex);
-            g_broadcast.text = shown, g_broadcast.kind = kind <= 2 ? kind : 0, g_broadcast.at = now;
+            g_broadcast.text = shown, g_broadcast.kind = kind <= 3 ? kind : 0, g_broadcast.at = now;  // 3 (v0.4.7): maintenance
             g_broadcast.seconds = std::clamp(double(seconds), 3.0, 30.0);
           }
           g_chime.fetch_add(1);
-          REXLOG_INFO("BF comms: server broadcast {} ({}): {}", id, kind == 1 ? "game update" : kind == 2 ? "restart" : "message", shown);
+          REXLOG_INFO("BF comms: server broadcast {} ({}): {}", id,
+                      kind == 1 ? "game update" : kind == 2 ? "restart" : kind == 3 ? "maintenance" : "message", shown);
           break;
         }
         case kVoiceRelay: {

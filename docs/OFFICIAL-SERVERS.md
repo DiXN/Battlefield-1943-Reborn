@@ -21,6 +21,11 @@ the player to restart the game, which updates itself at the start (0.2.0 to 0.3.
 
 The Project-Official Servers are updated by hand, on the owner's word, when a release changes what a server runs.
 
+## Messages and promoted servers
+
+The owner can send a message to every official server or to every server on the main backend, and can show chosen
+community servers on the Reborn tab, marked PROMOTED: [NETWORK-BROADCASTS-AND-PROMOTED-SERVERS.md](NETWORK-BROADCASTS-AND-PROMOTED-SERVERS.md).
+
 ## Ports
 
 TCP 18241, 18246 and 18250 (the main backend), and one UDP port for each server, 18300 and on.

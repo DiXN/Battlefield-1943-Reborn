@@ -2369,7 +2369,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   double exp_popup_at_ = 0;           // ImGui's time when it opened
   std::string exp_accepted_address_;  // the server the player chose to connect to anyway
   std::string us_accepted_address_;   // the US Central server the player chose to connect to after its warning
-  static bool UsPlaytest(const ServerInfo& sv) { return sv.official && sv.region == "us-central"; }
+  static bool UsPlaytest(const ServerInfo& sv) { return sv.Reborn() && sv.region == "us-central"; }
   bool ExperimentalWarned(const ServerInfo& sv) {
     // 0.4.2: 60 Hz is no longer experimental (the default); the warning is for 75 and 100.
     const bool us = UsPlaytest(sv) && us_accepted_address_ != sv.address;
@@ -2565,7 +2565,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     SetJoinedServerNight(sv.night);
     joining_ = sv.name;
     joining_map_ = sv.map;
-    report::NoteLastMatch(UserDir(), sv.name, sv.official, sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
+    report::NoteLastMatch(UserDir(), sv.name, sv.Reborn(), sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
     presence_server_ = discord::ShownServerName(sv.name);  // Discord Rich Presence (NotePresence)
     presence_private_ = sv.player_hosted || pm_hosting_, presence_max_ = sv.max_players;
     // Reborn's own achievements (NoteRebornAchievements): this PC's custom match is joined through here as well.

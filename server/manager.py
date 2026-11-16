@@ -14,6 +14,15 @@ updates, the game's files, the logs.
     manager.py start [n] | stop [n] | restart [n]
     manager.py broadcast --kind restart --minutes 5 [--server n] [--no-restart]
     manager.py broadcast --kind custom --text "Teams are balanced after this round"
+    manager.py broadcast --kind maintenance --minutes 15 --to official
+    manager.py broadcast --kind custom --text "..." --to everyone
+                                                 official packages: --to official through the main backend to every
+                                                 official server (here and on the other machines), --to everyone to
+                                                 every server registered with it, community ones too (network
+                                                 broadcasts: they tell the players, never restart a server)
+    manager.py community                         the community servers registered now, with their host keys
+    manager.py promote <host key> [--note TEXT]  that host's servers listed with the Reborn ones, marked PROMOTED
+    manager.py demote <host key> | promoted      back to the Community tab; the promoted list
     manager.py maintenance on --preset deploy [--minutes 15] [--allow ADDRESS]
     manager.py maintenance on --text "Back after the new maps are in" | off | status
                                                  maintenance mode on the machine that runs the main backend: new joins
@@ -98,7 +107,17 @@ FEED = 'https://api.github.com/repos/TekRantGaming/Battlefield-1943-Reborn/relea
 PRESETS = {
     'update': 'Game has updated to a new version server restarting in {time}',
     'restart': 'This server will restart in {time}',
+    'maintenance': 'This server goes down for maintenance in {time}',
 }
+# Network broadcasts (--to official, --to everyone): they reach servers of other machines that this one does not
+# restart, so their words say what happens to the Reborn servers, not "this server".
+NETWORK_PRESETS = {
+    'update': 'A new version of Battlefield 1943 Reborn is out. The Reborn servers update in {time}',
+    'restart': 'The Reborn servers restart in {time}',
+    'maintenance': 'The Reborn servers go down for maintenance in {time}',
+}
+KINDS = ('update', 'restart', 'maintenance', 'custom')
+NETWORK_SCOPES = ('official', 'everyone')
 ANNOUNCE_AT = (3600, 1800, 900, 600, 300, 120, 60, 30, 10)  # a countdown is said again with this many seconds left
 
 
@@ -152,6 +171,9 @@ STATE = os.path.join(LOGS, 'manager.json')  # the running manager: its pid, its 
 # maintenance_now). Kept in the data folder, so it holds through a restart of the backend or of the manager; a deploy
 # to a new folder copies it with server.json.
 MAINTENANCE_FILE = os.path.join(DATA, 'maintenance.json')
+# Promoted community servers (TekRantGaming, 16 Nov 2026): their host keys, read by our own main backend
+# (plasma.py --promoted-file, Promoted) within seconds of a change. manager.py promote, demote, promoted.
+PROMOTED_FILE = os.path.join(DATA, 'promoted_servers.json')
 
 
 def read_text(path, default=''):
@@ -233,6 +255,134 @@ def set_maintenance(on, kind='', text='', minutes=0.0, allow=()):
                'until': int(time.time() + minutes * 60) if minutes else 0, 'allow': allow, 'since': int(time.time())}
     write_atomic(MAINTENANCE_FILE, json.dumps(raw, indent=1) + '\n')
     return maintenance_words(raw)
+
+
+def host_module():
+    """gmhost.py, for the network broadcast's signing (sign_network, sign_admin)."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import gmhost
+    return gmhost
+
+
+def official_key_path():
+    return os.path.join(DATA, 'official.key')
+
+
+def backend_registry():
+    """Where this package's servers register: our own backend, or the main one (server.json backend)."""
+    flags = package_flags()
+    if flags['official'] and not flags['main_backend']:
+        cfg = load_config()
+        return (cfg.get('backend') or MAIN_BACKEND, 18250)
+    return (BACKEND_BIND or '127.0.0.1', 18250)
+
+
+def ask_backend(obj, timeout=10):
+    """One request to the main backend's registry (one JSON line each way)."""
+    address = backend_registry()
+    try:
+        with socket.create_connection(address, timeout=timeout) as s:
+            s.sendall((json.dumps(obj) + '\n').encode())
+            line = s.makefile('rb').readline()
+    except OSError as e:
+        raise RuntimeError('The main backend at %s:%d did not answer (%s).' % (address[0], address[1], e))
+    try:
+        return json.loads(line)
+    except ValueError:
+        raise RuntimeError('The main backend at %s:%d gave no answer.' % address)
+
+
+def official_key_or_fail(what):
+    if not package_flags()['official']:
+        raise RuntimeError('%s only works on the official server package (it needs official.key).' % what)
+    if not os.path.exists(official_key_path()):
+        raise RuntimeError('official.key is not in %s.' % DATA)
+    return host_module().read_key(official_key_path())
+
+
+def send_network(kind, text, scope):
+    """A network broadcast, signed here with official.key, through the main backend. Returns its reply."""
+    key = official_key_or_fail('A broadcast to other machines\' servers')
+    reply = ask_backend(host_module().sign_network(key, scope, kind, text))
+    if not reply.get('ok'):
+        raise RuntimeError('The main backend refused the network broadcast: %s.' % (reply.get('why') or 'no reason'))
+    return reply
+
+
+def community_hosts():
+    """The community servers registered with the main backend now, with their host keys (a signed question)."""
+    key = official_key_or_fail('The list of community servers')
+    reply = ask_backend(host_module().sign_admin(key, 'hosts'))
+    if not reply.get('ok'):
+        raise RuntimeError('The main backend refused the question: %s.' % (reply.get('why') or 'no reason'))
+    return reply.get('hosts') or []
+
+
+def read_promoted():
+    try:
+        raw = json.loads(read_text(PROMOTED_FILE, '') or '{}')
+    except ValueError:
+        raise RuntimeError('%s is not valid JSON: fix it or delete it first.' % PROMOTED_FILE)
+    rows = raw.get('servers') if isinstance(raw, dict) else None
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def write_promoted(rows):
+    write_atomic(PROMOTED_FILE, json.dumps({'servers': rows}, indent=1) + '\n')
+
+
+def pick_host(text, hosts):
+    """A host key from what was typed: the whole key, or the start of one of the registered servers' keys (8 or
+    more characters), or a registered server's game number."""
+    text = str(text).strip().lower()
+    if len(text) == 64 and all(c in '0123456789abcdef' for c in text):
+        return text
+    keys = sorted({h['host_key'] for h in hosts if h.get('host_key') and
+                   (h['host_key'].startswith(text) and len(text) >= 8 or str(h.get('gid')) == text)})
+    if len(keys) == 1:
+        return keys[0]
+    if not keys:
+        raise RuntimeError('No community server registered now has the host key %s (manager.py community lists them; '
+                           'a whole key of 64 characters is taken as it is).' % text)
+    raise RuntimeError('%s is the start of more than one host key: type more of it.' % text)
+
+
+def promote(text, note=''):
+    hosts = []
+    if not (len(text.strip()) == 64):
+        hosts = community_hosts()
+    else:
+        with contextlib.suppress(RuntimeError):
+            hosts = community_hosts()
+    key = pick_host(text, hosts)
+    names = sorted({h['name'] for h in hosts if h.get('host_key') == key})
+    rows = read_promoted()
+    if any(str(r.get('key', '')).lower() == key for r in rows):
+        return 'host %s is promoted already' % key[:16]
+    rows.append({'key': key, 'note': clean_text(note, 80) or ', '.join(names)[:80],
+                 'since': time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())})
+    write_promoted(rows)
+    live = [h for h in hosts if h.get('host_key') == key]
+    hidden = [h for h in live if h.get('hidden') or not h.get('listed')]
+    words = 'promoted host %s (%s)' % (key[:16], ', '.join(names) or 'not registered now')
+    if hidden:
+        words += '. Not shown while it fails the build check or is not listed: %s' % hidden[0].get('hidden', 'not listed')
+    return words + '. The backend lists it with the Reborn servers within a few seconds.'
+
+
+def demote(text):
+    rows = read_promoted()
+    text = str(text).strip().lower()
+    keep = [r for r in rows if not (str(r.get('key', '')).lower() == text or
+                                    len(text) >= 8 and str(r.get('key', '')).lower().startswith(text))]
+    gone = len(rows) - len(keep)
+    if gone == 0:
+        raise RuntimeError('No promoted host has the key %s (manager.py promoted lists them).' % text)
+    if gone > 1:
+        raise RuntimeError('%s is the start of more than one promoted key: type more of it.' % text)
+    write_promoted(keep)
+    return 'host %s is no longer promoted: back on the Community tab within a few seconds' % text[:16]
 
 
 def package_version(root=None):
@@ -677,7 +827,9 @@ class Manager:
                 # The build check (16 Nov 2026): only official builds' community servers are listed. The official
                 # builds' manifests (tools/build_manifest.py) go in the data folder's attest folder at each release.
                 args += ['--check-servers', os.path.join(DATA, 'attest'),
-                         '--blocked-file', os.path.join(DATA, 'blocked_servers.json')]
+                         '--blocked-file', os.path.join(DATA, 'blocked_servers.json'),
+                         # Promoted community servers (manager.py promote): on the Reborn tab, marked PROMOTED.
+                         '--promoted-file', PROMOTED_FILE]
             self.backend = spawn(args, output=os.path.join(LOGS, 'backend.out'))
             self.backend_mode = mode
             self.note('the %s started (PID %d)' % ('main backend' if mode == 'official' else 'LAN backend', self.backend.pid))
@@ -936,34 +1088,53 @@ class Manager:
         if not os.path.isdir(directory):
             return
         write_atomic(os.path.join(directory, 'broadcast.json'),
-                     json.dumps({'seq': seq, 'kind': kind if kind in ('update', 'restart') else 'custom', 'text': text,
+                     json.dumps({'seq': seq, 'kind': kind if kind in KINDS else 'custom', 'text': text,
                                  'seconds': 10}))
 
     def running_servers(self):
         with self.lock:
             return sorted(n for n, s in self.run.items() if s.get('wanted') and n <= len(self.cfg['servers']))
 
-    def broadcast(self, kind, seconds, text='', servers=None, restart=False, update=False):
+    def broadcast(self, kind, seconds, text='', servers=None, restart=False, update=False, network=''):
         """A message now; with a time, a countdown: said now, said again as the time runs out, and at its end the
-        servers are restarted (`restart`) or the update is installed (`update`)."""
-        kind = kind if kind in ('update', 'restart', 'custom') else 'custom'
-        targets = [n for n in (servers or self.running_servers()) if n in self.running_servers()]
-        template = PRESETS.get(kind) or clean_text(text, 200)
+        servers are restarted (`restart`) or the update is installed (`update`). network "official" or "everyone":
+        through the main backend to every official server, or to every server registered with it (send_network);
+        such a message only tells, it never restarts or updates anything."""
+        kind = kind if kind in KINDS else 'custom'
+        if network:
+            if network not in NETWORK_SCOPES:
+                raise RuntimeError('Send to "official" or "everyone".')
+            if servers:
+                raise RuntimeError('A network broadcast goes to every server: leave out the server number.')
+            official_key_or_fail('A broadcast to other machines\' servers')
+            restart = update = False
+        targets = [] if network else [n for n in (servers or self.running_servers()) if n in self.running_servers()]
+        template = (NETWORK_PRESETS if network else PRESETS).get(kind) or clean_text(text, 200)
         if not template:
             raise RuntimeError('Type the message first.')
-        if not targets and not update:
+        if kind == 'maintenance':
+            restart = False  # it only tells; the restart itself is yours
+        if not targets and not update and not network:
             raise RuntimeError('No server is running: there is nobody to tell.')
         seconds = max(0, min(24 * 3600, int(seconds)))
         if '{time}' not in template or seconds <= 0:
             if '{time}' in template:
                 raise RuntimeError('Pick how long until it happens.')
+            if network:
+                self.say_network(kind, template, network, raise_errors=True)
+                return None
             for n in targets:
                 self.say(n, kind, template)
             self.remember(kind, template, targets)
             return None
         countdown = {'id': secrets.token_hex(4), 'kind': kind, 'template': template, 'servers': targets,
                      'end': time.time() + seconds, 'restart': bool(restart), 'update': bool(update),
-                     'marks': [m for m in ANNOUNCE_AT if m < seconds], 'seconds': seconds}
+                     'marks': [m for m in ANNOUNCE_AT if m < seconds], 'seconds': seconds, 'network': network}
+        if network:  # the first one now, so a refusal is said at once and no countdown is left running
+            self.say_network(kind, template.replace('{time}', time_words(seconds)), network, raise_errors=True)
+            with self.lock:
+                self.countdowns.append(countdown)
+            return countdown['id']
         with self.lock:
             self.countdowns.append(countdown)
         self.announce(countdown, seconds)
@@ -971,14 +1142,35 @@ class Manager:
 
     def announce(self, countdown, left):
         text = countdown['template'].replace('{time}', time_words(left))
+        if countdown.get('network'):
+            self.say_network(countdown['kind'], text, countdown['network'])
+            return
         for n in countdown['servers']:
             self.say(n, countdown['kind'], text)
         self.remember(countdown['kind'], text, countdown['servers'])
 
-    def remember(self, kind, text, servers):
+    def say_network(self, kind, text, scope, raise_errors=False):
+        """One network broadcast (send_network), noted with what the backend says it reached."""
+        try:
+            reply = send_network(kind, text, scope)
+        except RuntimeError as e:
+            self.note('network message to %s NOT sent: %s (%s)' % (scope, e, text))
+            if raise_errors:
+                raise
+            return
+        sent = reply.get('sent') or {}
+        self.remember(kind, text, [], '%s: %d official and %d community servers' % (
+            'every official server' if scope == 'official' else 'everyone', sent.get('official', 0),
+            sent.get('community', 0)))
+
+    def remember(self, kind, text, servers, network=''):
         with self.lock:
-            self.sent.append({'at': int(time.time()), 'kind': kind, 'text': text, 'servers': list(servers)})
+            self.sent.append({'at': int(time.time()), 'kind': kind, 'text': text, 'servers': list(servers),
+                              'network': network})
             del self.sent[:-50]
+        if network:
+            self.note('network message to %s: %s' % (network, text))
+            return
         self.note('message to server%s %s: %s' % ('' if len(servers) == 1 else 's',
                                                    ', '.join(map(str, servers)) or '(none)', text))
 
@@ -1223,7 +1415,7 @@ class Manager:
             cfg['web_password'] = bool(cfg['web_password'])
             servers = [self.server_status(n) for n in range(1, len(self.cfg['servers']) + 1)]
             countdowns = [{'id': c['id'], 'kind': c['kind'], 'servers': c['servers'], 'left': max(0, int(c['end'] - time.time())),
-                           'restart': c['restart'], 'update': c['update'],
+                           'restart': c['restart'], 'update': c['update'], 'network': c.get('network', ''),
                            'text': c['template'].replace('{time}', time_words(max(0, c['end'] - time.time())))}
                           for c in self.countdowns]
             backend_up = bool(self.backend) and self.backend.poll() is None
@@ -1237,7 +1429,8 @@ class Manager:
                 'addresses': {'lan': lan_addresses(), 'public': self.public_address(), 'upnp': self.ports_note},
                 'regions': [{'code': c, 'name': n} for c, n, _ in REGIONS],
                 'maps': [{'key': k, 'title': t} for k, t, _ in MAPS],
-                'presets': PRESETS, 'tick': self.cfg['tick'], 'data': DATA, 'root': ROOT, 'max_servers': MAX_SERVERS,
+                'presets': PRESETS, 'network_presets': NETWORK_PRESETS,
+                'network': self.flags['official'] and os.path.exists(self.official_key()), 'tick': self.cfg['tick'], 'data': DATA, 'root': ROOT, 'max_servers': MAX_SERVERS,
                 'backend_ports': list(BACKEND_PORTS), 'now': int(time.time()),
                 'maintenance': self.maintenance_line(),
                 'autostart': autostart_enabled(),
@@ -1530,7 +1723,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/broadcast':
             servers = [int(x) for x in data.get('servers') or []]
             ident = m.broadcast(str(data.get('kind', 'custom')), int(data.get('seconds') or 0), str(data.get('text', '')),
-                                servers or None, bool(data.get('restart')))
+                                servers or None, bool(data.get('restart')), network=str(data.get('network') or ''))
             return {'countdown': ident}
         elif path == '/api/maintenance':
             if data.get('on') and not m.own_backend():
@@ -1797,11 +1990,22 @@ def main():
         p = sub.add_parser(name)
         p.add_argument('n', type=int, nargs='?', default=0, help='the server\'s number (default: every server)')
     b = sub.add_parser('broadcast', help='a message to the players')
-    b.add_argument('--kind', choices=['update', 'restart', 'custom'], default='custom')
+    b.add_argument('--kind', choices=list(KINDS), default='custom')
     b.add_argument('--minutes', type=float, default=0)
     b.add_argument('--text', default='')
     b.add_argument('--server', type=int, action='append', default=[])
     b.add_argument('--no-restart', action='store_true', help='a restart or update countdown that only tells the players')
+    b.add_argument('--to', choices=list(NETWORK_SCOPES), default='',
+                   help='official package only: through the main backend to every official server (official), or to '
+                        'every server registered with it, community ones too (everyone). Without it: this machine\'s '
+                        'own servers, as before')
+    pr = sub.add_parser('promote', help='a community host\'s servers listed with the Reborn ones, marked PROMOTED')
+    pr.add_argument('key', help='its host key (manager.py community lists them), or the start of it (8 or more)')
+    pr.add_argument('--note', default='', help='a note for you (default: its servers\' names)')
+    de = sub.add_parser('demote', help='a promoted host back to the Community tab')
+    de.add_argument('key', help='its host key, or the start of it (8 or more characters)')
+    sub.add_parser('promoted', help='the promoted hosts')
+    sub.add_parser('community', help='the community servers registered with the main backend now, with host keys')
     mt = sub.add_parser('maintenance', help='maintenance mode: new joins refused with a message the players see')
     mt.add_argument('action', choices=['on', 'off', 'status'], nargs='?', default='status')
     mt.add_argument('--preset', choices=['deploy', 'update', 'restart', 'emergency', 'custom'], default='',
@@ -1815,6 +2019,8 @@ def main():
     q = sub.add_parser('quit', help='stops the manager and its servers')
     q.add_argument('--keep-servers', action='store_true')
     sub.add_parser('where', help='the data folder (server.json, game, logs)')
+    sub.add_parser('broadcast-key', help='official package: the public key community servers check network '
+                                         'broadcasts with (for gmhost.py OFFICIAL_BROADCAST_KEYS)')
     sub.add_parser('open', help='the page in a browser; starts the manager in the background when it is not running')
     args = ap.parse_args()
     command = args.command or 'run'
@@ -1823,6 +2029,9 @@ def main():
             return run(args)
         if command == 'where':
             print(DATA)
+            return 0
+        if command == 'broadcast-key':
+            print(host_module().broadcast_public(official_key_or_fail('The broadcast key')))
             return 0
         if command == 'open':
             if not running_manager() and not start_in_background():
@@ -1846,9 +2055,48 @@ def main():
             print('%s: done' % command)
             return 0
         if command == 'broadcast':
-            ask('/api/broadcast', {'kind': args.kind, 'seconds': int(args.minutes * 60), 'text': args.text,
-                                   'servers': args.server, 'restart': args.kind == 'restart' and not args.no_restart})
-            print('sent')
+            reply = ask('/api/broadcast', {'kind': args.kind, 'seconds': int(args.minutes * 60), 'text': args.text,
+                                           'servers': args.server, 'network': args.to,
+                                           'restart': args.kind == 'restart' and not args.no_restart})
+            sent = [x for x in reply['state'].get('sent', []) if x.get('network')][:1] if args.to else []
+            print('sent' + (' to %s' % sent[0]['network'] if sent else '') +
+                  ('; the countdown runs in the manager' if reply.get('countdown') else ''))
+            return 0
+        if command == 'promote':
+            official_key_or_fail('Promotion')
+            print(promote(args.key, args.note))
+            return 0
+        if command == 'demote':
+            official_key_or_fail('Promotion')
+            print(demote(args.key))
+            return 0
+        if command == 'promoted':
+            rows = read_promoted()
+            live = {}
+            with contextlib.suppress(RuntimeError):
+                for h in community_hosts():
+                    live.setdefault(h.get('host_key'), []).append(h)
+            if not rows:
+                print('No community server is promoted (%s).' % PROMOTED_FILE)
+            for r in rows:
+                k = str(r.get('key', '')).lower()
+                now = live.get(k, [])
+                state = ('; now: ' + ', '.join('%s (%s)' % (h['name'], 'shown, PROMOTED' if h.get('promoted') else
+                                                            h.get('hidden') or 'not listed') for h in now)) if now \
+                    else '; not registered now'
+                print('%s  since %s  %s%s' % (k, r.get('since', '?'), r.get('note', ''), state))
+            return 0
+        if command == 'community':
+            hosts = community_hosts()
+            if not hosts:
+                print('No community server is registered with the main backend now.')
+            for h in hosts:
+                print('%-64s  game %-4s %-32s %s:%s  v%s  %d/%d  %s' % (
+                    h.get('host_key') or '(no host key: an older package)', h.get('gid'), h.get('name', '')[:32],
+                    h.get('from'), h.get('port'), h.get('version') or '?', h.get('players', 0), h.get('max_players', 0),
+                    'PROMOTED' if h.get('promoted') else 'promoted, not shown: %s' % (h.get('hidden') or 'not listed')
+                    if h.get('promoted_key') else 'hidden: %s' % h['hidden'] if h.get('hidden') else
+                    'listed' if h.get('listed') else 'not listed'))
             return 0
         if command == 'maintenance':
             if args.action == 'status':

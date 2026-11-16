@@ -86,6 +86,7 @@
   .preview b { font: 600 24px/1.25 var(--body); }
   .preview.update { border-left-color: #8fb34f; } .preview.update small { color: #8fb34f; }
   .preview.restart { border-left-color: var(--red); } .preview.restart small { color: var(--red); }
+  .preview.maintenance { border-left-color: #d9a03a; } .preview.maintenance small { color: #d9a03a; }
   progress { width: 100%; height: 14px; accent-color: var(--green); }
   .modal { position: fixed; inset: 0; background: rgba(8,10,6,.72); display: none; align-items: flex-start; justify-content: center; padding: 5vh 16px; overflow: auto; z-index: 20; }
   .modal.on { display: flex; }
@@ -163,6 +164,7 @@
           <label class="field"><span>Message</span><select id="msg-kind">
             <option value="update">Game update released</option>
             <option value="restart">Restart server</option>
+            <option value="maintenance">Maintenance</option>
             <option value="custom">Custom</option></select></label>
           <label class="field"><span>Time</span><select id="msg-time"></select></label>
           <label class="check" id="msg-restart-box" style="align-self:end;margin-bottom:22px"><input type="checkbox" id="msg-restart" checked><span id="msg-restart-label">Restart the server when the time is up</span></label>
@@ -170,6 +172,7 @@
         <label class="field" id="msg-text-box"><span>Your message <small id="msg-count" style="float:right"></small></span><textarea id="msg-text" maxlength="200" placeholder="Teams are balanced after this round"></textarea><small>Write {time} where the time left should be, to count a custom message down.</small></label>
         <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:6px">Players will see</span>
           <div class="preview" id="msg-preview"><small></small><b></b></div></div>
+        <p class="hint" id="msg-network-note" style="display:none">Through the main backend: every server registered with it gets it, on this machine and others. It only tells the players; no server is restarted. A community server shows it once its package is v0.4.7 or newer.</p>
         <div class="row"><button class="btn go" id="msg-send">Send message</button><span class="hint" id="msg-note"></span></div>
       </div>
       <div class="paper" id="countdown-box" style="display:none"><h3>Counting down</h3><div id="countdowns"></div></div>
@@ -424,24 +427,27 @@ function renderNetwork() {
 
 function renderMessages() {
   const s = state, target = $('msg-target'), keep = target.value;
-  if (sync(target, s.servers.map(x => [x.n, x.name, x.wanted]), () => [h('option', { value: '0', text: 'Every running server' }), ...s.servers.map(x => h('option', { value: x.n, text: x.name + (x.wanted ? '' : ' (stopped)') }))]))
+  const net = s.network ? [h('option', { value: 'net-official', text: 'Every official server (all machines)' }), h('option', { value: 'net-everyone', text: 'Everyone: official and community servers' })] : [];
+  if (sync(target, [s.network, ...s.servers.map(x => [x.n, x.name, x.wanted])], () => [h('option', { value: '0', text: 'Every running server here' }), ...s.servers.map(x => h('option', { value: x.n, text: x.name + (x.wanted ? '' : ' (stopped)') })), ...net]))
     target.value = keep && [...target.options].some(o => o.value === keep) ? keep : '0';
   $('countdown-box').style.display = s.countdowns.length ? '' : 'none';
   sync($('countdowns'), s.countdowns.map(cd => cd.id), () => s.countdowns.map(cd => h('div', { class: 'row', style: 'margin-bottom:8px' }, h('span', { id: 'cd-' + cd.id }), h('span', { class: 'spacer' }),
     h('button', { class: 'btn small', onclick: () => act('/api/broadcast/cancel', { id: cd.id }, 'Countdown cancelled') }, 'Cancel'))));
-  s.countdowns.forEach(cd => { const e = $('cd-' + cd.id); if (e) e.textContent = (cd.update ? 'Update' : cd.restart ? 'Restart' : 'Message') + ' in ' + (cd.left >= 120 ? Math.round(cd.left / 60) + ' minutes' : cd.left + ' seconds') + ', for ' + (cd.servers.length || 'no') + (cd.servers.length === 1 ? ' server' : ' servers'); });
-  sync($('sent'), s.sent.map(m => [m.at, m.text]), () => s.sent.length ? s.sent.map(m => h('div', { style: 'padding:5px 0;border-bottom:1px solid #d9cfae;color:#24251f' }, h('small', { class: 'mono', style: 'color:#6b6450', text: new Date(m.at * 1000).toLocaleTimeString() + '  ' }), m.text)) : 'Nothing sent yet.');
+  s.countdowns.forEach(cd => { const e = $('cd-' + cd.id); if (e) e.textContent = (cd.update ? 'Update' : cd.restart ? 'Restart' : 'Message') + ' in ' + (cd.left >= 120 ? Math.round(cd.left / 60) + ' minutes' : cd.left + ' seconds') + ', for ' + (cd.network === 'official' ? 'every official server' : cd.network === 'everyone' ? 'everyone' : (cd.servers.length || 'no') + (cd.servers.length === 1 ? ' server' : ' servers')); });
+  sync($('sent'), s.sent.map(m => [m.at, m.text]), () => s.sent.length ? s.sent.map(m => h('div', { style: 'padding:5px 0;border-bottom:1px solid #d9cfae;color:#24251f' }, h('small', { class: 'mono', style: 'color:#6b6450', text: new Date(m.at * 1000).toLocaleTimeString() + '  ' + (m.network ? '[' + m.network + ']  ' : '') }), m.text)) : 'Nothing sent yet.');
   previewMessage();
 }
 function previewMessage() {
   const kind = $('msg-kind').value, seconds = Number($('msg-time').value), custom = kind === 'custom';
+  const network = $('msg-target').value.startsWith('net-');
   $('msg-text-box').style.display = custom ? '' : 'none';
-  $('msg-restart-box').style.display = custom ? 'none' : '';
+  $('msg-restart-box').style.display = custom || network || kind === 'maintenance' ? 'none' : '';
+  $('msg-network-note').style.display = network ? '' : 'none';
   $('msg-restart-label').textContent = kind === 'update' ? 'Restart the server when the time is up' : 'Restart the server when the time is up';
-  const template = custom ? $('msg-text').value.trim() : (state ? state.presets[kind] : '');
+  const template = custom ? $('msg-text').value.trim() : (state ? (network ? state.network_presets : state.presets)[kind] : '');
   const text = template.replace('{time}', seconds ? words(seconds) : '...');
   const p = $('msg-preview'); p.className = 'preview ' + (custom ? '' : kind);
-  p.querySelector('small').textContent = kind === 'update' ? 'GAME UPDATE' : kind === 'restart' ? 'SERVER RESTART' : 'SERVER MESSAGE';
+  p.querySelector('small').textContent = kind === 'update' ? 'GAME UPDATE' : kind === 'restart' ? 'SERVER RESTART' : kind === 'maintenance' ? 'MAINTENANCE' : 'SERVER MESSAGE';
   p.querySelector('b').textContent = text || 'Your message';
   $('msg-count').textContent = custom ? $('msg-text').value.length + ' / 200' : '';
   const needsTime = template.includes('{time}');
@@ -592,11 +598,12 @@ $('save-network').onclick = async () => {
 $('firewall').onclick = () => act('/api/firewall', {}, 'Windows asks for permission on this machine\'s screen');
 
 // ---- messages
-['msg-kind', 'msg-time', 'msg-text'].forEach(id => $(id).addEventListener('input', previewMessage));
+['msg-kind', 'msg-time', 'msg-text', 'msg-target'].forEach(id => $(id).addEventListener('input', previewMessage));
 $('msg-kind').addEventListener('change', () => { $('msg-time').value = $('msg-kind').value === 'custom' ? 0 : 300; previewMessage(); });
 $('msg-send').onclick = async () => {
-  const kind = $('msg-kind').value, target = Number($('msg-target').value);
-  const r = await act('/api/broadcast', { kind: kind, seconds: Number($('msg-time').value), text: $('msg-text').value, servers: target ? [target] : [], restart: kind !== 'custom' && $('msg-restart').checked });
+  const kind = $('msg-kind').value, picked = $('msg-target').value, network = picked.startsWith('net-') ? picked.slice(4) : '', target = network ? 0 : Number(picked);
+  if (network === 'everyone' && !confirm('Send this to every server on the main backend, community servers too?')) return;
+  const r = await act('/api/broadcast', { kind: kind, seconds: Number($('msg-time').value), text: $('msg-text').value, servers: target ? [target] : [], network: network, restart: !network && (kind === 'update' || kind === 'restart') && $('msg-restart').checked });
   if (r) toast(r.countdown ? 'Sent. The countdown runs.' : 'Sent.');
 };
 

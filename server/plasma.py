@@ -1226,6 +1226,26 @@ class RemoteHost:
                                        'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
 
 
+def signed_host_key(m, name, digest):
+    """A registration's host key when its signature checks (over this name and digest), else ''."""
+    import ed25519
+    h = m.get('host')
+    if not isinstance(h, dict):
+        return ''
+    key, text, sig = str(h.get('key', '')), str(h.get('text', '')), str(h.get('sig', ''))
+    parts = text.split('|')
+    if len(text) > 512 or len(parts) < 4 or parts[0] != 'bf1943-register' or parts[2] != digest or \
+            '|'.join(parts[3:]) != name:
+        return ''
+    try:
+        public, signature = bytes.fromhex(key), bytes.fromhex(sig)
+    except ValueError:
+        return ''
+    if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
+        return ''
+    return key.lower()
+
+
 class ServerCheck:
     """Which community servers the server list shows (TekRantGaming, 16 Nov 2026: a community server listed through our
     backend ran a modified build with bots; "go with option B": a server that is not an official build is hidden).
@@ -1292,23 +1312,7 @@ class ServerCheck:
                                                        or 'empty'))
 
     def host_key(self, m, name, digest):
-        """The registration's host key when its signature checks (over this name and digest), else ''."""
-        import ed25519
-        h = m.get('host')
-        if not isinstance(h, dict):
-            return ''
-        key, text, sig = str(h.get('key', '')), str(h.get('text', '')), str(h.get('sig', ''))
-        parts = text.split('|')
-        if len(text) > 512 or len(parts) < 4 or parts[0] != 'bf1943-register' or parts[2] != digest or \
-                '|'.join(parts[3:]) != name:
-            return ''
-        try:
-            public, signature = bytes.fromhex(key), bytes.fromhex(sig)
-        except ValueError:
-            return ''
-        if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
-            return ''
-        return key.lower()
+        return signed_host_key(m, name, digest)
 
     def block_reason(self, name, address, key, digest):
         b = self.blocked
@@ -1359,6 +1363,56 @@ class ServerCheck:
                         self.note('server check: game %s "%s" taken off the list: %s' % (gid, g.get('N', ''), why))
             except Exception as e:  # never let the watch end
                 self.note('server check: %r' % e)
+
+
+class Promoted:
+    """Community servers TekRantGaming shows with the official ones (16 Nov 2026: "promote some community servers at my
+    leisure to become official, or at least show in the official. And at any time I can revoke that, and they can just
+    simply go back to showing on the community tab"). Known by their host key (gmhost.host_proof, checked at their
+    registration): an address or a name can be faked or change, the key cannot without the host's own key file. Every
+    server of that host is promoted.
+
+    --promoted-file: {"servers": [{"key": host key (64 hex), "note": "what it is", "since": "UTC time"}]}, written by
+    the manager (manager.py promote, demote), read again when it changes (looked at every few seconds). A promoted
+    server still has to pass the build check: one that is hidden or blocked is never listed, promoted or not. A
+    promoted server is listed with "official": true (every game puts it on the Reborn tab) and "promoted": true (a game
+    since v0.4.7 marks it PROMOTED, never as run by TRG Studios); inside the backend it stays a community server: its
+    players' stats do not count, and the official network broadcasts do not go to it."""
+
+    def __init__(self, path, note):
+        self.path, self.note = path, note
+        self.keys, self.stamp, self.looked = {}, None, 0.0
+
+    def reload(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.looked < 5:
+            return
+        self.looked = now
+        try:
+            stamp = os.path.getmtime(self.path)
+        except OSError:
+            stamp = None
+        if stamp == self.stamp:
+            return
+        keys = {}
+        if stamp is not None:
+            try:
+                with open(self.path, encoding='utf-8') as f:
+                    raw = json.load(f)
+                for e in raw.get('servers', []):
+                    k = str(e.get('key', '')).strip().lower() if isinstance(e, dict) else ''
+                    if len(k) == 64 and all(c in '0123456789abcdef' for c in k):
+                        keys[k] = str(e.get('note', ''))[:80]
+            except (OSError, ValueError, AttributeError) as err:
+                self.note('promoted servers: %s not read (%s): the last list stays' % (self.path, err))
+                self.stamp = stamp
+                return
+        self.stamp, self.keys = stamp, keys
+        self.note('promoted servers: %d host%s%s' % (len(keys), '' if len(keys) == 1 else 's',
+                                                     ' (%s)' % ', '.join(k[:16] for k in keys) if keys else ''))
+
+    def has(self, key):
+        return bool(key) and key in self.keys
 
 
 class Registry:
@@ -1437,6 +1491,69 @@ class Registry:
         # The build check (ServerCheck): the official backend lists only official builds' community servers.
         self.check = ServerCheck(args.check_servers, getattr(args, 'blocked_file', ''), self.note) \
             if args and getattr(args, 'check_servers', '') else None
+        # Promoted community servers (Promoted) and network broadcasts (gmhost.sign_network): both need official.key.
+        self.promoted = Promoted(args.promoted_file, self.note) if args and getattr(args, 'promoted_file', '') else None
+        trusted = gmhost.trusted_broadcast_keys(self.key) if self.key else []
+        self.network = gmhost.NetworkCheck(trusted)
+        self.admin = gmhost.NetworkCheck(trusted, per_minute=30)
+
+    def refresh_promoted(self):
+        """Each listed community server's promotion, from the promoted list as it is now (said in the log when it
+        changes)."""
+        if not self.promoted:
+            return
+        self.promoted.reload()
+        for gid, g in list(GAMES.items()):
+            if g.get('TYPE') != 'G':
+                continue
+            now = bool(not g.get('official') and g.get('listed', True) and not g.get('hidden')
+                       and self.promoted.has(g.get('host_key', '')))
+            if now != bool(g.get('promoted')):
+                g['promoted'] = now
+                self.note('game %s "%s" %s' % (gid, g.get('N', ''), 'promoted: listed with the Reborn servers (host %s)'
+                                               % g.get('host_key', '')[:16] if now else
+                                               'no longer promoted: back with the community servers'))
+
+    def relay(self, m, peer):
+        """A network broadcast from the official manager (gmhost.sign_network): checked, then passed to every
+        server registered here that it is for, over the server's own registry connection."""
+        why, b = self.network.broadcast(m)
+        if why:
+            self.note('%s network broadcast refused: %s' % (peer, why))
+            return {'op': 'network_broadcast', 'ok': False, 'why': why}
+        line = (json.dumps({'op': 'network_broadcast', 'signed': m['signed'], 'sig': m['sig']}) + '\n').encode()
+        sent = {'official': 0, 'community': 0}
+        for g in list(GAMES.values()):
+            host = g.get('gmhost')
+            if g.get('TYPE') != 'G' or not isinstance(host, RemoteHost):
+                continue
+            if b['scope'] == 'official' and not g.get('official'):
+                continue
+            try:
+                host.writer.write(line)
+            except (ConnectionError, RuntimeError, OSError):
+                continue
+            sent['official' if g.get('official') else 'community'] += 1
+        self.note('network broadcast %s (%s, to %s): %d official and %d community servers: %s' % (
+            b['id'], b['kind'], b['scope'], sent['official'], sent['community'], b['text']))
+        return {'op': 'network_broadcast', 'ok': True, 'id': b['id'], 'sent': sent}
+
+    def hosts(self):
+        """The community servers registered now, with their host keys (only for the official manager)."""
+        self.refresh_promoted()
+        rows = []
+        for g in GAMES.values():
+            if g.get('TYPE') != 'G' or g.get('official') or not isinstance(g.get('gmhost'), RemoteHost):
+                continue
+            rows.append({'gid': g['GID'], 'name': g.get('N', ''), 'host_key': g.get('host_key', ''),
+                         'from': g.get('from', ''), 'port': g.get('P', 0), 'version': g.get('server_version', ''),
+                         'players': g.get('AP', 0), 'max_players': g.get('MAX-PLAYERS', 0),
+                         'listed': bool(g.get('listed', True)), 'hidden': g.get('hidden', ''),
+                         'promoted': bool(g.get('promoted')),
+                         'promoted_key': bool(self.promoted and self.promoted.has(g.get('host_key', ''))),
+                         'region': g.get('region', '')})
+        rows.sort(key=lambda r: (r['host_key'] or '~', r['name'].lower()))
+        return rows
 
     def official(self, code, name):
         """An official code that checks: made with the official key, within two minutes, never seen before."""
@@ -1660,6 +1777,9 @@ class Registry:
                     if self.check and not official:
                         hidden, host_key = self.check.verdict(m, name, str(m.get('name', 'Server')),
                                                               writer.get_extra_info('peername')[0])
+                    elif self.promoted and not official and isinstance(m.get('build'), dict):
+                        host_key = signed_host_key(m, str(m.get('name', 'Server')),
+                                                   str(m['build'].get('digest', '')).lower())
                     n = next(Registry.ids)
                     gid, uid, pid = str(200 + n), 900 + n, next(TheaterClient.pids)
                     local = False
@@ -1707,6 +1827,7 @@ class Registry:
                         ': hidden, %s' % GAMES[gid]['hidden'] if GAMES[gid]['hidden'] else
                         ' (host %s)' % host_key[:16] if host_key else ''))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
+                    self.refresh_promoted()
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
                     STATS.status(gid, GAMES[gid]['AP'])  # the website's hours played (server/stats.py)
@@ -1806,6 +1927,19 @@ class Registry:
                     reply = self.signed_name(m, address)
                     note_name_check(reply, str(m.get('signed', '')).rsplit('|', 1)[-1], address)  # clan tags
                     writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'network_broadcast' and not gid:
+                    # The official manager's network broadcast (gmhost.sign_network), passed on to the servers.
+                    writer.write((json.dumps(self.relay(m, peer)) + '\n').encode())
+                elif op == 'admin' and not gid:
+                    # The official manager's questions (gmhost.sign_admin): the community servers' host keys, so
+                    # TekRantGaming can pick one to promote. Signed: the rows hold the hosts' addresses.
+                    why, what = self.admin.admin(m)
+                    if why or what != 'hosts':
+                        self.note('%s admin question refused: %s' % (peer, why or 'unknown'))
+                        writer.write((json.dumps({'op': 'admin', 'ok': False, 'why': why or 'unknown'}) +
+                                      '\n').encode())
+                    else:
+                        writer.write((json.dumps({'op': 'admin', 'ok': True, 'hosts': self.hosts()}) + '\n').encode())
                 elif op == 'stats':
                     # The website's totals (server/stats.py, read by its feed): counts only, nothing about anyone.
                     writer.write((json.dumps(dict(STATS.totals(), op='stats')) + '\n').encode())
@@ -1894,12 +2028,14 @@ class Registry:
                         reply = note_name_check(self.name_reply(asked, pid, address), pid, address)  # clan tags
                         writer.write((json.dumps(reply) + '\n').encode())
                 elif op == 'find':
+                    self.refresh_promoted()
                     want = (str(m.get('address', '')), int(m.get('port', 18300) or 18300))
                     games = [for_player(g, writer, self.args) for g in GAMES.values() if g.get('TYPE') == 'G']
                     hit = [g for g in games if (g['I'], g['P']) == want]
                     writer.write((json.dumps({'op': 'found', 'server': listing(hit[0]) if hit else None}) +
                                   '\n').encode())
                 elif op == 'list':
+                    self.refresh_promoted()
                     # The address goes to the game (its ping and its join need it); the browser never shows it.
                     servers = [listing(for_player(g, writer, self.args)) for g in GAMES.values()
                                if g.get('TYPE') == 'G' and g.get('listed', True)]
@@ -2086,7 +2222,8 @@ def listing(g):
     """A game as the server browser gets it."""
     return {'gid': g['GID'], 'name': g['N'], 'address': [g['I'], g['P']], 'map': g.get('map', ''),
             'players': g['AP'], 'max_players': g['MAX-PLAYERS'], 'mode': g.get('mode', 'classic'),
-            'description': g.get('description', ''), 'official': bool(g.get('official')),
+            'description': g.get('description', ''), 'official': bool(g.get('official') or g.get('promoted')),
+            'promoted': bool(g.get('promoted') and not g.get('official')),  # Promoted: on the Reborn tab, marked
             'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night')),
             'region': g.get('region', ''), 'tick': g.get('tick', 0)}
 
@@ -2095,7 +2232,7 @@ def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
             if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
-                         'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest')}
+                         'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest', 'promoted')}
 
 
 async def http_client(reader, writer, log):
@@ -2146,6 +2283,8 @@ async def main():
                     help="the official builds' manifests (a folder of *.json): list only community servers that run "
                          'one (ServerCheck); the others are Direct connect only')
     ap.add_argument('--blocked-file', default='', help='with --check-servers: hosts never listed (ServerCheck)')
+    ap.add_argument('--promoted-file', default='',
+                    help='community servers listed with the official ones, by host key (Promoted; manager.py promote)')
     ap.add_argument('--login-delay', type=float, default=2.0, help='seconds before the login reply')
     # Off by default: with our HTTP reply the client never finishes the ticker request (docs/01-online-flow.md).
     ap.add_argument('--http-port', type=int, default=0, help='HTTP port for the news ticker (0: off)')

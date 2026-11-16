@@ -27,7 +27,11 @@ its name, its map, its players, its region and its tick rate.
 4. **Servers**: each has its own name, description, maps (played in that order), players and port. **Start all**.
 5. **Network**: pick your region; players see it with its flag. Leave **Open the ports** on behind a home router.
    **LAN only** keeps your servers off the main list: players then join with Direct connect, by this PC's address.
-6. **Messages**: tell everyone on a server about an update or a restart, with a countdown, or type your own.
+6. **Messages**: tell everyone on a server about an update, a restart or maintenance, with a countdown, or type your
+   own. Your players also see the rare message the Reborn team sends to every server (from v0.4.7 on).
+
+The Reborn team can also show a community server on the **Reborn** tab, marked PROMOTED
+([how it works](NETWORK-BROADCASTS-AND-PROMOTED-SERVERS.md)); there is nothing to do for it on your side.
 
 The manager keeps running in the background, with no window, and starts a server again if it stops. **Stop
 servers.bat** ends everything. **Start servers (no window).bat** starts them with the saved settings, for a PC that

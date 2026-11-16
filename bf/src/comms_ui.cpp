@@ -206,7 +206,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     const float size = 42.0f * s, head = 20.0f * s, pad = 30.0f * s;
     const float max_w = io.DisplaySize.x * 0.66f, wrap = max_w - 2 * pad;
     const ImVec2 ts = bold->CalcTextSizeA(size, FLT_MAX, wrap, text.c_str());
-    const char* label = kind == 1 ? "GAME UPDATE" : kind == 2 ? "SERVER RESTART" : "SERVER MESSAGE";
+    const char* label = kind == 1 ? "GAME UPDATE" : kind == 2 ? "SERVER RESTART" : kind == 3 ? "MAINTENANCE" : "SERVER MESSAGE";
     const float w = std::max(std::max(ts.x, 520.0f * s) + 2 * pad, font->CalcTextSizeA(head, FLT_MAX, 0, label).x + 2 * pad);
     const float h = pad * 0.7f + head + 10.0f * s + ts.y + pad * 0.8f;
     const float in = float(std::clamp(age / 0.25, 0.0, 1.0)), out = float(std::clamp((seconds - age) / 0.5, 0.0, 1.0));
@@ -215,7 +215,8 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     // 1080 lines), so neither is hidden while the message is up.
     const float x0 = (io.DisplaySize.x - w) * 0.5f, y0 = 172.0f * s - (1.0f - in) * 30.0f * s;
     const ImU32 accent = kind == 2 ? IM_COL32(206, 62, 48, int(255 * alpha)) : kind == 1 ? IM_COL32(143, 179, 79, int(255 * alpha))
-                                                                                         : IM_COL32(201, 183, 122, int(255 * alpha));
+                         : kind == 3 ? IM_COL32(217, 160, 58, int(255 * alpha))  // maintenance: amber
+                                     : IM_COL32(201, 183, 122, int(255 * alpha));
     dl->AddRectFilled(ImVec2(x0 + 4 * s, y0 + 5 * s), ImVec2(x0 + w + 4 * s, y0 + h + 5 * s), IM_COL32(0, 0, 0, int(110 * alpha)), 4 * s);
     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(16, 18, 14, int(238 * alpha)), 4 * s);
     dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(241, 234, 211, int(70 * alpha)), 4 * s, 0, 1.5f * s);
