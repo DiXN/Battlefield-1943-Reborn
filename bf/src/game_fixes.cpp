@@ -17,6 +17,9 @@
 
 #include "bf1943_pch.h"
 
+#include <rex/system/kernel_state.h>
+#include <rex/system/xmemory.h>
+
 REX_EXTERN(__savegprlr_27);
 REX_EXTERN(__restgprlr_27);
 
@@ -170,7 +173,90 @@ REX_HOOK_RAW(sub_821E08D0) {
   __imp__sub_821E08D0(ctx, base);
 }
 
+// sub_821DC048(object, key, f1 value) and sub_821DC178 (the same shape): set a value in a table inside an object (at
+// +32), as the game does for its players and the like each tick. All Maps 3 (0.4.6.5) crashed at 19:12 UTC 15 Nov
+// 2026 and All Maps 1 on 14 Nov reading such a table in sub_821D8160 (its lookup) from these two, in the server's tick
+// (sub_824123F0): the object's memory had been released (a read of guest 1155ECE8, a page no longer committed), a
+// minute after players left. An object whose memory is not live (not committed, readable and writable) is passed
+// over: the setter returns 0 as it does for a locked object (+68), and nothing is written. Logged, the first 10 times.
+namespace {
+std::atomic<uint32_t> g_dead_objects{0};
+bool GuestLive(uint32_t address, uint32_t size) {
+  if (address < 0x10000) return false;
+  auto* state = rex::system::kernel_state();
+  rex::memory::Memory* memory = state ? state->memory() : nullptr;
+  if (!memory) return true;
+  for (uint32_t page = address & ~0xFFFu; page < address + size; page += 0x1000) {
+    rex::memory::BaseHeap* heap = memory->LookupHeap(page);
+    uint32_t protect = 0;
+    if (!heap || !heap->QueryProtect(page, &protect)) return false;
+    if (!(protect & rex::memory::kMemoryProtectRead) || !(protect & rex::memory::kMemoryProtectWrite)) return false;
+  }
+  return true;
+}
+void NoteDeadObject(const char* where, uint32_t object, uint32_t caller) {
+  const uint32_t n = ++g_dead_objects;
+  if (n <= 10)
+    REXLOG_WARN("BF game fix: {} on an object whose memory is released ({:08X}, called from {:08X}): passed over "
+                "instead of a crash (time {})",
+                where, object, caller, n);
+}
+}  // namespace
+
+REX_EXTERN(__imp__sub_821DC048);
+REX_HOOK_RAW(sub_821DC048) {
+  if (!GuestLive(ctx.r3.u32, 72)) {
+    NoteDeadObject("sub_821DC048", ctx.r3.u32, uint32_t(ctx.lr));
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_821DC048(ctx, base);
+}
+
+REX_EXTERN(__imp__sub_821DC178);
+REX_HOOK_RAW(sub_821DC178) {
+  if (!GuestLive(ctx.r3.u32, 72)) {
+    NoteDeadObject("sub_821DC178", ctx.r3.u32, uint32_t(ctx.lr));
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_821DC178(ctx, base);
+}
+
 namespace bf1943 {
+
+#if defined(BF_DEV_TOOLS)
+// BF_DEV_DEADOBJ_TEST=1 (dev builds): once, on the server's thread, a guest page allocated and released, then the
+// setter called on an object there (the 15 Nov 19:12 All Maps 3 crash). With the guard it is passed over and logged;
+// without, the read faults. The registers are put back after.
+void RunDeadObjectTest(PPCContext& ctx, uint8_t* base) {
+  static bool done = false;
+  const char* v = std::getenv("BF_DEV_DEADOBJ_TEST");
+  if (done || !v || *v != '1') return;
+  done = true;
+  rex::memory::Memory* memory = rex::system::kernel_state()->memory();
+  rex::memory::BaseHeap* heap = memory->LookupHeap(0x20000000);
+  uint32_t page = 0;
+  if (!heap || !heap->Alloc(0x1000, 0x1000, rex::memory::kMemoryAllocationReserve | rex::memory::kMemoryAllocationCommit,
+                            rex::memory::kMemoryProtectRead | rex::memory::kMemoryProtectWrite, false, &page)) {
+    REXLOG_WARN("BF game fix test: no guest page to release");
+    return;
+  }
+  const bool live_before = GuestLive(page + 0x100, 72);
+  heap->Release(page);
+  PPCContext saved;
+  std::memcpy(&saved, &ctx, sizeof(ctx));
+  ctx.r3.u64 = page + 0x100;
+  ctx.r4.u64 = 0x12345678;
+  ctx.f1.f64 = 1.0;
+  ctx.lr = 0x823F73E0;
+  ctx.r1.u64 = ((ctx.r1.u32 - 0x1000) & ~0xFFu);
+  sub_821DC048(ctx, base);
+  REXLOG_INFO("BF game fix test: the setter on a released object at {:08X} came back (r3 {}; live before release: {})",
+              page + 0x100, ctx.r3.u32, live_before);
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+}
+#endif
 
 #if defined(BF_DEV_TOOLS)
 // BF_DEV_FIX_TEST=1 (dev builds): once, from a hook on the game's thread, the guarded query over a list of three
@@ -197,6 +283,7 @@ void RunBadCallTest(PPCContext& ctx, uint8_t* base) {
 
 void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
   RunBadCallTest(ctx, base);
+  RunDeadObjectTest(ctx, base);
   static bool done = false;
   const char* v = std::getenv("BF_DEV_FIX_TEST");
   if (done || !v || *v != '1') return;
