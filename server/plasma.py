@@ -72,6 +72,47 @@ CLAIMS_AN_HOUR = 5
 NAME_UNUSED_DAYS = 180
 VERIFIED_FOR = 12 * 3600  # a sign in holds the name for the game's FESL login for this long (same id and address)
 
+# ---- Team names (TekRantGaming, 16 Nov 2026: "permanently secure TekRantGaming and ZALIAS names and all variations of
+# these names ... and provide a key for both users to keep that will allow them to use their names in the launcher").
+# Each owner's account is the public half of the key their recovery code makes (the codes are only with them). It holds
+# the owner's name, every name below and every lookalike of them (team_owner): nobody else can protect, sign in for or
+# log in under one (they get Soldier with a number), stats for them come only signed by the owner, they never expire
+# (account_active), and the owner plays under any of them with the same code (signed_name, claim). Lookalikes: any case,
+# underscores, leetspeak (0 o, 1 i, l i, 3 e, 4 a, @ a, 5 s, 7 t, 2 z), doubled letters, anything before or after a
+# "contains" stem, and up to "typos" edits of a stem once prefixes and suffixes (xX, The, Real, Its, digits, TV...) are
+# off. TekRantGaming's watchlist of variations is in "names", each entry with spaces,
+# dots and hyphens left out (names are 3 to 15 letters, digits and underscores). --team-names FILE replaces this list.
+TEAM_OWNERS = [
+    {'owner': 'TekRantGaming', 'key': 'a183dac812d9732ea9982188b799feb4eb2f8e074977568b3f8f690a9c63b18a',
+     'contains': ['TekRantGaming', 'TekRant', 'TekRG'], 'typos': {'TekRantGaming': 2},
+     'names': ['TekRantGaming', 'TekRant', 'TekRG', 'TekRantG', 'TekRantGame', 'TekRantGames', 'TekRantGamer',
+               'TekRantGamers', 'TekRantGamingTV', 'TekRantGamingOfficial', 'TekRantGamingUK', 'TekRantGamingDev',
+               'TekRantGamingProject', 'TekRantGamingTeam', 'TekRantGamingCommunity', 'TekRantGamingNetwork',
+               'TekRantGamingServer', 'TekRantGamingServers', 'TekRantGamingOrg', 'TekRantGamingCom',
+               'Tek_Rant_Gaming', 'TekRant_Gaming', 'TekRantGaming_', '_TekRantGaming', 'TekRantGaming1',
+               'TekRantGaming2', 'TekRantGaming01', 'TekRantGaming123', 'TekRantGamingX', 'xTekRantGaming',
+               'TheTekRantGaming', 'RealTekRantGaming', 'ItsTekRantGaming', 'ImTekRantGaming', 'OfficialTekRantGaming',
+               'TechRantGaming', 'TekRankGaming', 'TekRantGamng', 'TekRantGming', 'TekRantGamin', 'TekRantGamming',
+               'TekRantGamimg', 'TekRantGamig', 'TekRantGaiming', 'TekRantGmaing', 'TekRantGamingg', 'TekRanttGaming',
+               'TekkRantGaming', 'TekRanntGaming', 'TekRantGam1ng', 'TekRantG4ming', 'T3kRantGaming', 'TekR4ntGaming',
+               'TekR@ntGaming', 'T3kR4ntG4ming', 'TekRantG4m1ng', 'TekRantGm', 'TekRGaming', 'TekRantGamez',
+               'TekRantGmz', 'TekRantGng', 'TekRant_G', 'tekrantgamingcom', 'wwwtekrantgamingcom',
+               'chattekrantgamingcom', 'tek_rant']},
+    {'owner': 'ZALIAS', 'key': 'da315ef804e4b95c28113f41e930b9a9227a88b227f480dd43b52505193f3bfb',
+     'contains': ['ZALIAS'], 'typos': {'ZALIAS': 1},
+     'names': ['ZALIAS', 'ZAlias', 'ZALIAS_', '_ZALIAS', 'ZALIAS1', 'ZALIAS01', 'ZALIAS123', 'ZALIASX', 'TheZALIAS',
+               'ItsZALIAS', 'ImZALIAS', 'RealZALIAS', 'OfficialZALIAS', 'ZALIASOfficial', 'ZALIASGaming',
+               'ZALIASGamer', 'ZALIASDev', 'ZALIASTeam', 'ZALIASProject', 'ZALIASNetwork', 'Z_A_L_I_A_S', 'Zaliass',
+               'Zaliasss', 'Zallias', 'Zalais', 'Zaliasz', 'Zalials', 'Zalius', 'Zaleas', 'Zaleis', 'Zalies', 'Zalyas',
+               'Zalyass', 'Zaliash', 'Zalias2', 'Zalias3', 'ZaliasYT', 'ZaliasTV', 'ZaliasUK', 'ZaliasGames',
+               'ZaliasG', 'ZAL1AS', 'ZALlAS', 'Z4LIAS', 'Z@LIAS', 'Z4L1AS', 'ZALl4S', '2ALIAS', 'ZALIA5', 'ZALlA5',
+               'ZALIASSSS', 'ZALIAScom', 'wwwzaliascom', 'z_alias']},
+]
+# The watchlist's generic entries, left free for everyone (they would block normal players): TekRantGaming decides.
+TEAM_NAMES_LEFT_FREE = ['TRG', 'TRGaming', 'TRGGaming', 'TR_Gaming', 'TekGaming', 'Tek_Gaming', 'RantGaming', 'Rant',
+                        'Gaming', 'TechRant', 'Tech_Rant']
+TEAM = {'owners': [], 'by_key': {}, 'exact': {}, 'free': set(), 'cache': {}}  # set_team_names, below the accounts
+
 # ---- The version players need (TekRantGaming, 13 Nov 2026: "server version check for latest version and only to allow
 # latest version on and reject and prompt outdated clicnt connections give them a popup advising and a button to update
 # now or close"). The newest release, from the same feed the game's own updater reads (--version-feed, asked every few
@@ -384,6 +425,11 @@ def free_name(name, pid, address=None):
     name = name[:15]
     if name_free_for(name, pid, address):
         return name
+    owner = team_owner(name)
+    if owner and not signed_in_for(team_account(owner), pid, address):
+        name = 'Soldier'  # a team name with a number is the team's too (team_owner)
+        if name_free_for(name, pid, address):
+            return name
     for n in range(2, 1000):
         suffix = str(n)
         candidate = name[:15 - len(suffix)] + suffix
@@ -394,11 +440,17 @@ def free_name(name, pid, address=None):
 
 # ---- accounts (Protect your name, above)
 def account_active(acct, now=None):
+    if acct.get('key') in TEAM['by_key']:
+        return True  # team names never expire
     return (now or time.time()) - acct.get('seen', 0) < NAME_UNUSED_DAYS * 86400
 
 
 def protected_by(name):
-    """The account whose protected name this is, or None (none, or unused for NAME_UNUSED_DAYS)."""
+    """The account whose protected name this is, or None (none, or unused for NAME_UNUSED_DAYS). A team name (any of an
+    owner's, team_owner) is always its owner's account."""
+    owner = team_owner(name)
+    if owner:
+        return team_account(owner)
     acct = ACCOUNTS.get(ACCOUNT_NAMES.get(name.lower(), ''))
     if acct and acct.get('name', '').lower() == name.lower() and account_active(acct):
         return acct
@@ -426,6 +478,148 @@ def valid_name(name):
     """A name the game's name page allows: 3 to 15 letters, digits and underscores."""
     return isinstance(name, str) and 3 <= len(name) <= 15 and all(c.isascii() and (c.isalnum() or c == '_')
                                                                    for c in name)
+
+
+# ---- team names (TEAM_OWNERS, above)
+_LOOKALIKE = str.maketrans({'0': 'o', '1': 'i', 'l': 'i', '|': 'i', '!': 'i', '3': 'e', '4': 'a', '@': 'a', '5': 's',
+                            '$': 's', '7': 't', '2': 'z', '6': 'g', '9': 'g', '8': 'b'})
+_PREFIXES = ('official', 'real', 'the', 'its', 'iam', 'im', 'mr', 'og', 'ttv', 'yt', 'xx', 'x')
+_SUFFIXES = ('official', 'gaming', 'gamers', 'gamer', 'games', 'game', 'team', 'live', 'dev', 'ttv', 'tv', 'yt', 'uk',
+             'us', 'hd', 'pro', 'xx', 'x', 'g')
+
+
+def name_skeleton(text):
+    """What a name looks like with case, separators, leetspeak and doubled letters taken out: T3kRantGaminggg and
+    tek_rant_gaming are both tekrantgaming; Z4L1AS and Zallias are both zaias (l and i count as one letter)."""
+    s = ''.join(c for c in str(text).lower() if c.isalnum() or c in '@$!|').translate(_LOOKALIKE)
+    out = []
+    for c in s:
+        if not out or out[-1] != c:
+            out.append(c)
+    return ''.join(out)
+
+
+def _cores(raw):
+    """The name (lower case, separators out) with prefixes, suffixes and digits at either end taken off, in every
+    order: xXTheZaliusTVXx gives zalius among others. As skeletons."""
+    seen, todo = set(), [raw]
+    while todo:
+        s = todo.pop()
+        if not s or s in seen or len(seen) > 64:
+            continue
+        seen.add(s)
+        todo.append(s.strip('0123456789'))
+        todo.extend(s[len(p):] for p in _PREFIXES if s.startswith(p))
+        todo.extend(s[:-len(q)] for q in _SUFFIXES if s.endswith(q))
+    return {name_skeleton(s) for s in seen}
+
+
+def _edits(a, b, most):
+    """The edits (a letter added, dropped, changed, or two side by side swapped) from a to b, or most + 1 when more."""
+    if abs(len(a) - len(b)) > most:
+        return most + 1
+    prev2, prev = None, list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > most:
+            return most + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def set_team_names(owners, left_free):
+    """The team names in use: TEAM_OWNERS (or --team-names) indexed by skeleton."""
+    TEAM.update(owners=[], by_key={}, exact={}, free={name_skeleton(n) for n in left_free}, cache={})
+    for o in owners:
+        key = str(o['key']).lower()
+        if len(key) != 64:
+            raise ValueError('a team name owner needs a 64 hex digit key: %s' % o.get('owner'))
+        int(key, 16)
+        e = {'owner': str(o['owner']), 'key': key,
+             'contains': [name_skeleton(s) for s in o.get('contains', [])],
+             'typos': [(name_skeleton(s), int(n)) for s, n in o.get('typos', {}).items()]}
+        TEAM['owners'].append(e)
+        TEAM['by_key'][key] = e
+        for n in [o['owner']] + list(o.get('names', [])):
+            TEAM['exact'].setdefault(name_skeleton(n), e)
+
+
+def team_owner(name):
+    """The team owner (TEAM_OWNERS) whose name this is or looks like, or None."""
+    if not isinstance(name, str) or not name:
+        return None
+    raw = ''.join(c for c in name.lower()[:32] if c.isalnum() or c in '@$!|')
+    cache = TEAM['cache']
+    if raw in cache:
+        return cache[raw]
+    if len(cache) > 20000:
+        cache.clear()
+    cache[raw] = found = _team_owner(raw)
+    return found
+
+
+def _team_owner(raw):
+    skel = name_skeleton(raw)
+    if not skel or skel in TEAM['free']:
+        return None
+    if skel in TEAM['exact']:
+        return TEAM['exact'][skel]
+    for o in TEAM['owners']:
+        if any(stem in skel for stem in o['contains']):
+            return o
+    cores = None
+    for o in TEAM['owners']:
+        for stem, most in o['typos']:
+            if len(skel) < len(stem) - most:
+                continue
+            if cores is None:
+                cores = _cores(raw)
+            looks = set(cores)
+            if len(stem) >= 8:  # a long name: also with anything around it (MyTekRankGamingFan)
+                looks.update(skel[i:i + n] for n in range(len(stem) - most, len(stem) + most + 1)
+                             for i in range(0, len(skel) - n + 1))
+            # (Same first letter: Alias is not ZALIAS with a letter dropped. A short stem with no letter dropped
+            # either: Zalia is a name of its own.)
+            shortest = len(stem) - most if len(stem) >= 8 else len(stem)
+            if any(c[:1] == stem[:1] and len(c) >= shortest and _edits(c, stem, most) <= most for c in looks):
+                return o
+    return None
+
+
+def team_account(owner):
+    """The owner's account, made the first time (it never expires: account_active)."""
+    acct = ACCOUNTS.get(owner['key'])
+    if acct is None:
+        now = int(time.time())
+        acct = ACCOUNTS[owner['key']] = {'key': owner['key'], 'name': owner['owner'], 'created': now, 'seen': now,
+                                         'progress': {}}
+        accounts_changed()
+    return acct
+
+
+def keep_team_names():
+    """At the start: each owner has an account under one of their names, and no other account keeps a team name (one
+    protected before the names were kept for the team loses it)."""
+    for o in TEAM['owners']:
+        acct = team_account(o)
+        if team_owner(acct.get('name', '')) is not o:
+            acct['name'] = o['owner']
+            accounts_changed()
+        ACCOUNT_NAMES[acct['name'].lower()] = o['key']
+    for key, acct in ACCOUNTS.items():
+        owner = team_owner(acct.get('name', ''))
+        if owner and owner['key'] != key:
+            if ACCOUNT_NAMES.get(acct['name'].lower()) == key:
+                del ACCOUNT_NAMES[acct['name'].lower()]
+            acct['name'] = ''
+            accounts_changed()
+
+
+set_team_names(TEAM_OWNERS, TEAM_NAMES_LEFT_FREE)
 
 
 def accounts_changed():
@@ -752,7 +946,7 @@ class Client:
             if not name_free_for(self.persona, pid, address):
                 renamed = free_name(self.persona, pid, address)
                 if renamed == self.persona:
-                    renamed = '%s%d' % (self.persona[:12], self.user_id)
+                    renamed = '%s%d' % ('Soldier' if team_owner(self.persona) else self.persona[:12], self.user_id)
                 self.note('the name %s is in use: this player is renamed %s' % (self.persona, renamed))
                 self.persona = renamed
             NAMES[self.persona.lower()] = (pid, None)
@@ -1263,6 +1457,8 @@ class Registry:
         reply = {'op': 'name', 'name': name}
         if name.lower() != asked.lower() and protected_by(asked):
             reply['protected_by_other'] = True
+            if team_owner(asked):
+                reply['team_name'] = True  # kept for the team (TEAM_OWNERS): the game says so
         reply.update(extra or {})
         self.note('%s asked for the name %s: %s%s' % (address, asked, name, ' (protected)' if
                                                       reply.get('protected') else ''))
@@ -1279,6 +1475,9 @@ class Registry:
             return {'op': 'name', 'name': '', 'why': 'bad'}
         acct = ACCOUNTS.get(key)
         now = time.time()
+        owner = team_owner(asked)
+        if acct and owner and owner['key'] == key and valid_name(asked) and acct.get('name', '').lower() != asked.lower():
+            self.move_name(acct, asked, address)  # a team owner plays under another of their names: the account follows
         if acct and not acct.get('name') and valid_name(asked) and protected_by(asked) is None \
                 and name_holder(asked) in (None, pid):
             acct['name'] = asked  # its name was freed after a long time unused: protected again if still free
@@ -1309,42 +1508,57 @@ class Registry:
         acct = ACCOUNTS.get(key)
         owner = protected_by(name)
         if owner and owner is not acct:
-            return {'op': 'claim', 'ok': False, 'why': 'taken'}
+            # (A team name says "team_name", never "reserved": a game from before the version gate reads that word.)
+            return {'op': 'claim', 'ok': False, 'why': 'team_name' if team_owner(name) else 'taken'}
         if not (acct and acct.get('name', '').lower() == name.lower()):
             if name_holder(name) not in (None, pid):
                 return {'op': 'claim', 'ok': False, 'why': 'in_use'}
             times = [t for t in CLAIMS.get(address, []) if now - t < 3600]
-            if len(times) >= CLAIMS_AN_HOUR:
+            if len(times) >= CLAIMS_AN_HOUR and key not in TEAM['by_key']:  # a team owner moves among their names
                 CLAIMS[address] = times
                 return {'op': 'claim', 'ok': False, 'why': 'too_many'}
             CLAIMS[address] = times + [now]
             if len(ACCOUNTS) >= 200000 and not acct:
                 return {'op': 'claim', 'ok': False, 'why': 'too_many'}
-            old = ACCOUNT_NAMES.get(name.lower())
-            if old and old != key and old in ACCOUNTS:
-                ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
             if acct:
-                if acct.get('name') and ACCOUNT_NAMES.get(acct['name'].lower()) == key:
-                    del ACCOUNT_NAMES[acct['name'].lower()]
-                held = NAMES.get(acct.get('name', '').lower())
-                if held and held[1] is not None:  # the old name's hold from its name checks: free at once
-                    del NAMES[acct['name'].lower()]
-                row = LEADERBOARD.pop(acct.get('name', '').lower(), None)  # the leaderboard row moves with it
-                if row:
-                    row['name'] = name
-                    LEADERBOARD[name.lower()] = row
-                    save_leaderboard()
-                self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
+                self.move_name(acct, name, address)
             else:
-                acct = ACCOUNTS[key] = {'key': key, 'name': '', 'created': int(now), 'seen': int(now), 'progress': {}}
+                old = ACCOUNT_NAMES.get(name.lower())
+                if old and old != key and old in ACCOUNTS:
+                    ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
+                acct = ACCOUNTS[key] = {'key': key, 'name': name, 'created': int(now), 'seen': int(now), 'progress': {}}
                 self.note('%s protected the name %s' % (address, name))
-            acct['name'] = name
         acct['seen'] = int(now)
         ACCOUNT_NAMES[name.lower()] = key
         VERIFIED[key] = (pid, address, now + VERIFIED_FOR)
         NAMES[name.lower()] = (pid, now + 600)
         accounts_changed()
         return {'op': 'claim', 'ok': True, 'name': acct['name']}
+
+    def move_name(self, acct, name, address):
+        """The account moves to another name (a claim, or a team owner's name check under another of their names): its
+        old name is free at once, its leaderboard row moves with it."""
+        key = acct['key']
+        old = ACCOUNT_NAMES.get(name.lower())
+        if old and old != key and old in ACCOUNTS:
+            ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
+        if acct.get('name') and ACCOUNT_NAMES.get(acct['name'].lower()) == key:
+            del ACCOUNT_NAMES[acct['name'].lower()]
+        held = NAMES.get(acct.get('name', '').lower())
+        if held and held[1] is not None:  # the old name's hold from its name checks: free at once
+            del NAMES[acct['name'].lower()]
+        row = LEADERBOARD.pop(acct.get('name', '').lower(), None)  # the leaderboard row moves with it
+        if row:
+            other = LEADERBOARD.get(name.lower())
+            if other and other.get('score', 0) > row.get('score', 0):  # a team owner back on a name with its own row
+                row = other
+            row['name'] = name
+            LEADERBOARD[name.lower()] = row
+            save_leaderboard()
+        self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
+        acct['name'] = name
+        ACCOUNT_NAMES[name.lower()] = key
+        accounts_changed()
 
     def signed_stats(self, m):
         got = check_signed(m, 'stats_put')
@@ -1750,6 +1964,9 @@ async def main():
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
     ap.add_argument('--accounts', default='',
                     help="a file keeping the players' accounts (Protect your name: protected names and progress)")
+    ap.add_argument('--team-names', default='',
+                    help='a JSON file of team names ({"owners": [...], "left_free": [...]}, as TEAM_OWNERS) in place of '
+                         'the built in ones (tests)')
     ap.add_argument('--accounts-save-every', type=float, default=30.0,
                     help='seconds between two writes of the accounts file (only when something changed)')
     ap.add_argument('--stats', default='',
@@ -1777,6 +1994,11 @@ async def main():
     ACCOUNTS_FILE = args.accounts or None
     if ACCOUNTS_FILE and os.path.exists(ACCOUNTS_FILE):
         load_accounts(ACCOUNTS_FILE)
+    if args.team_names:
+        with open(args.team_names, encoding='utf-8') as f:
+            team = json.load(f)
+        set_team_names(team.get('owners', []), team.get('left_free', TEAM_NAMES_LEFT_FREE))
+    keep_team_names()
     STATS.path = args.stats or None
     STATS.load()
     for n, address in enumerate(args.game, 1):
@@ -1828,6 +2050,8 @@ async def main():
         stats_task = asyncio.ensure_future(keep_stats_saved(max(0.5, args.stats_save_every)))
         log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
                                              ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
+        log.write('%s team names: %s\n' % (time.strftime('%H:%M:%S'),
+                                           ', '.join(o['owner'] for o in TEAM['owners']) or 'none'))
         t = STATS.totals()
         log.write('%s stats: %d players, %d this month, %d hours%s\n' % (
             time.strftime('%H:%M:%S'), t['players'], t['players_month'], t['hours'],

@@ -1097,7 +1097,9 @@
       if (!r.ok) {
         REXLOG_INFO("BF account: protecting {} refused: {}", r.name, r.why);
         return AccountMessage(r.why == "taken"    ? "That name is protected by another player. Choose another one."
-                              : r.why == "in_use" ? "Another player is using that name online right now. Choose another "
+                              : r.why == "team_name" ? "That name is kept for the Battlefield 1943 Reborn team. Choose "
+                                                       "another one."
+                              : r.why == "in_use" ?"Another player is using that name online right now. Choose another "
                                                     "one, or try again later."
                               : r.why == "too_many" ? "Too many names were protected from your connection this hour. "
                                                       "Try again later."
@@ -1209,12 +1211,13 @@
     const bool same = name_text_ == settings_.Get("player_name", "");
     const char* chip = code_mode_ ? "RECOVERY"
                        : prot     ? "PROTECTED"
+                       : acct_online_ == 3 && same ? "TEAM NAME"
                        : acct_online_ == 2 && same ? "ANOTHER PLAYER'S"
                                                    : "NOT PROTECTED";
     kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "NAME PROTECTION", st(2));
     const float cw = kit::TextWidth(f.typed, st(13), chip) + st(16);
     d->AddRectFilled(ImVec2(x + w - cw, y - st(3)), ImVec2(x + w, y + st(17)),
-                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' ? kit::kRed : kit::kInkFaint);
+                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' || chip[0] == 'T' ? kit::kRed : kit::kInkFaint);
     d->AddText(f.typed, st(13), ImVec2(x + w - cw + st(8), y), IM_COL32(255, 255, 255, 255), chip);
     y += st(26);
     std::string body;
@@ -1228,6 +1231,9 @@
              " online, and your rank and stats are kept on our server. Your recovery code brings them to another PC.";
     else if (!settings_.Get("account_code", "").empty() && !settings_.Get("account_name", "").empty())
       body = "Your protected name is " + settings_.Get("account_name", "") + ". Protect this name instead to move it here.";
+    else if (acct_online_ == 3 && same)
+      body = "This name is kept for the Battlefield 1943 Reborn team: nobody else can play under it or a name like it. "
+             "Online you play as Soldier for now. Choose a name of your own.";
     else if (acct_online_ == 2 && same)
       body = "Another player protected this name: online you play as it with a number. Choose another name.";
     else

@@ -7,6 +7,9 @@
     python -I tools/test_accounts.py backend           the backend's accounts (claim, sign in, a name thief, recovery,
                                                         stats, renames, expiry, replays) on a backend of its own
                                                         (127.0.0.1, ports 28241 to 28250)
+    python -I tools/test_accounts.py team              the team names (server/plasma.py TEAM_OWNERS): the built in
+                                                        list and its lookalikes, then two test owners with codes of
+                                                        their own on a backend of its own (127.0.0.5, 28261 to 28270)
 
 The test program: a main that answers "sha <hex>", "pub <seed hex>", "sign <seed hex> <message hex>" and
 "code <code> <message>" with hex (scratchpad acct/kt.cpp of 15 Nov 2026).
@@ -26,6 +29,7 @@ sys.path.insert(0, os.path.join(ROOT, 'server'))
 import ed25519  # noqa: E402
 
 ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+BACKEND = ['127.0.0.1']  # the backend's address (the team test runs its own on 127.0.0.5)
 
 
 def seed_of(code):
@@ -125,7 +129,7 @@ class Player:
         self.pid = pid or '%08X' % random.randint(1, 0xFFFFFFFF)
 
     async def ask(self, m):
-        r, w = await asyncio.open_connection('127.0.0.1', self.port, local_addr=(self.address, 0))
+        r, w = await asyncio.open_connection(BACKEND[0], self.port, local_addr=(self.address, 0))
         w.write((json.dumps(m) + '\n').encode())
         await w.drain()
         line = await r.readline()
@@ -149,7 +153,7 @@ class Player:
 async def fesl_login(port, gamertag, pid_hex, address):
     """The game's login as its packets go (server/plasma.py's framing): the persona the backend gives."""
     import plasma
-    r, w = await asyncio.open_connection('127.0.0.1', port, local_addr=(address, 0))
+    r, w = await asyncio.open_connection(BACKEND[0], port, local_addr=(address, 0))
     w.write(plasma.build('acct', plasma.REQUEST, 1, {'TXN': 'NuXBL360Login', 'gamertag': gamertag,
                                                        'xuid': str(int(pid_hex, 16))}))
     await w.drain()
@@ -304,6 +308,224 @@ def backend():
         return not bad
 
 
+# ---- team names (server/plasma.py TEAM_OWNERS)
+# The watchlist's entries as it wrote them (spaces, dots and hyphens and all), each with its owner; and its generic ones.
+WATCHLIST = {
+    'TekRantGaming': [
+        'TekRantGaming', 'Tek Rant Gaming', 'Tek RantGaming', 'TekRant Gaming', 'Tek Rant', 'TekRant', 'TekRG',
+        'TekRantG', 'TekRantGame', 'TekRantGames', 'TekRantGamer', 'TekRantGamers', 'TekRantGamingTV',
+        'TekRantGamingOfficial', 'TekRantGamingUK', 'TekRantGamingDev', 'TekRantGamingProject', 'TekRantGamingTeam',
+        'TekRantGamingCommunity', 'TekRantGamingNetwork', 'TekRantGamingServer', 'TekRantGamingServers',
+        'TekRantGamingOrg', 'TekRantGamingCom', 'Tek-Rant-Gaming', 'Tek_Rant_Gaming', 'Tek.Rant.Gaming',
+        'Tek.RantGaming', 'TekRant-Gaming', 'TekRant_Gaming', 'TekRant.Gaming', 'TekRantGaming_', '_TekRantGaming',
+        'TekRantGaming1', 'TekRantGaming2', 'TekRantGaming01', 'TekRantGaming123', 'TekRantGamingX', 'xTekRantGaming',
+        'TheTekRantGaming', 'RealTekRantGaming', 'ItsTekRantGaming', 'ImTekRantGaming', 'OfficialTekRantGaming',
+        'TechRantGaming', 'Tech Rant Gaming', 'TekRankGaming', 'TekRantGamng', 'TekRantGming', 'TekRantGamin',
+        'TekRantGamming', 'TekRantGamimg', 'TekRantGamig', 'TekRantGaiming', 'TekRantGmaing', 'TekRantGamingg',
+        'TekRanttGaming', 'TekkRantGaming', 'TekRanntGaming', 'TekRantGam1ng', 'TekRantG4ming', 'T3kRantGaming',
+        'TekR4ntGaming', 'TekR@ntGaming', 'T3kR4ntG4ming', 'TekRantG4m1ng', 'TekRantGm', 'TekRGaming', 'TekRantGamez',
+        'TekRantGmz', 'TekRantGng', 'TekRant_G', 'TekRant-G', 'tekrantgaming.com', 'www.tekrantgaming.com',
+        'chat.tekrantgaming.com', 'tek-rant', 'tek_rant', 'tek.rant'],
+    'ZALIAS': [
+        'ZALIAS', 'ZALIA S', 'Z Alias', 'ZAL IAS', 'ZALIAS_', '_ZALIAS', 'ZALIAS1', 'ZALIAS01', 'ZALIAS123', 'ZALIASX',
+        'TheZALIAS', 'ItsZALIAS', 'ImZALIAS', 'RealZALIAS', 'OfficialZALIAS', 'ZALIASOfficial', 'ZALIASGaming',
+        'ZALIASGamer', 'ZALIASDev', 'ZALIASTeam', 'ZALIASProject', 'ZALIASNetwork', 'ZALIAS-', 'ZALIAS.',
+        'Z.A.L.I.A.S.', 'Z-A-L-I-A-S', 'Z_A_L_I_A_S', 'Z A L I A S', 'Zaliass', 'Zaliasss', 'Zallias', 'Zalais',
+        'Zaliasz', 'Zalials', 'Zalius', 'Zaleas', 'Zaleis', 'Zalies', 'Zalyas', 'Zalyass', 'Zaliash', 'Zalias2',
+        'Zalias3', 'ZaliasYT', 'ZaliasTV', 'ZaliasUK', 'ZaliasGames', 'ZaliasG', 'ZAL1AS', 'ZALlAS', 'Z4LIAS', 'Z@LIAS',
+        'Z4L1AS', 'ZALl4S', '2ALIAS', 'ZALIA5', 'ZALlA5', 'ZALIASSSS', 'ZALIAS.com', 'www.zalias.com', 'z-alias',
+        'z_alias', 'z.alias'],
+}
+WATCHLIST_GENERIC = ['TRG', 'T.R.G.', 'T R G', 'TRGaming', 'TRG Gaming', 'TR Gaming', 'Tek Gaming', 'Rant Gaming',
+                     'Rant', 'Gaming', 'TechRant', 'Tech Rant']
+# Lookalikes the watchlist does not hold, and ordinary names that must stay free.
+LOOKALIKES = {'TekRantGaming': ['xXTekRantGamingXx', 'T3kR4ntG4m1ng', 'TEKRANTGAMING', 'MyTekRankGamingFan',
+                                'TekRantGamingFan', 'Tek_R_G', 'TekRanGaming', 'tekrantgaminggg', 'TheRealTekRant'],
+              'ZALIAS': ['xXZaliusXx', 'ThatZaliaSGuy', 'Z_alias_TV', 'zalias', 'ZaliosTV', 'Za11as', 'The_Zalias_99']}
+ORDINARY = ['Gamer123', 'Alias', 'Zalia', 'Zaid', 'Zeus', 'Elias', 'Salias', 'Tekken', 'TekTonic', 'TechGamer',
+            'RantMaster', 'Ranger', 'TankGaming', 'Kestrel_7', 'Soldier', 'TekRanger', 'Zaliyah']
+TEAM_TEST_OWNERS = []  # two test owners (codes of their own, never the real ones) in place of TEAM_OWNERS' keys
+
+
+def plain(name):
+    """A watchlist entry as a game name: spaces, dots and hyphens left out, @ as a (names are letters, digits and
+    underscores)."""
+    return ''.join(c for c in name if c not in ' .-').replace('@', 'a')
+
+
+def report(bad, what, ok, got=None):
+    print('%-62s %s' % (what, 'ok' if ok else 'FAILED %s' % (got,)))
+    if not ok:
+        bad.append(what)
+
+
+def team_list_checks():
+    """The built in list: the two owners' keys, every watchlist entry its owner's, the generic ones free."""
+    import plasma
+    bad = []
+    keys = {o['owner']: o['key'] for o in plasma.TEAM['owners']}
+    report(bad, 'the built in team names: TekRantGaming and ZALIAS, a key each',
+           sorted(keys) == ['TekRantGaming', 'ZALIAS'] and all(len(k) == 64 for k in keys.values()), keys)
+    for owner, names in WATCHLIST.items():
+        wrong = [n for n in names if (plasma.team_owner(plain(n)) or {}).get('owner') != owner]
+        report(bad, 'all %d watchlist entries of %s are kept for %s' % (len(names), owner, owner), not wrong, wrong)
+        wrong = [n for n in LOOKALIKES[owner] if (plasma.team_owner(n) or {}).get('owner') != owner]
+        report(bad, 'lookalikes beyond the watchlist are kept for %s too' % owner, not wrong, wrong)
+    held = [n for n in WATCHLIST_GENERIC if plasma.team_owner(plain(n))]
+    report(bad, 'the watchlist generic entries stay free (%d)' % len(WATCHLIST_GENERIC), not held, held)
+    held = [n for n in ORDINARY if plasma.team_owner(n)]
+    report(bad, 'ordinary names stay free (%s...)' % ', '.join(ORDINARY[:3]), not held, held)
+    started = time.time()
+    for i in range(3000):
+        plasma.TEAM['cache'].clear()
+        plasma.team_owner('TekRanqGamxr%d' % i)
+    took = (time.time() - started) / 3
+    report(bad, 'a name looked up in under a millisecond (%.2f ms at worst)' % took, took < 1.0)
+    return bad
+
+
+async def team_checks(port):
+    import plasma
+    bad = []
+    tek, zal = TEAM_TEST_OWNERS
+    other = Player(port, address='127.0.0.2')
+    # anyone else: every team name and lookalike refused, with the reason
+    names = [plain(n)[:15] for o in WATCHLIST.values() for n in o if len(plain(n)) >= 3]
+    names += [n for o in LOOKALIKES.values() for n in o]
+    wrong = []
+    for n in names:
+        r = await other.name(n, signed=False)
+        if r.get('name', '').lower() == n.lower() or r.get('team_name') is not True or \
+                not r.get('name', '').startswith('Soldier'):
+            wrong.append((n, r))
+    report(bad, 'another player: all %d team names and lookalikes refused' % len(names), not wrong, wrong[:3])
+    r = await other.name('TekRantGaming', signed=False)
+    report(bad, '... given Soldier, with team_name for the game to say why', r.get('name', '').startswith('Soldier')
+           and r.get('team_name') is True and r.get('protected_by_other') is True, r)
+    r = await other.name('Gamer123', signed=False)
+    report(bad, 'a normal name (Gamer123) is free', r.get('name') == 'Gamer123' and not r.get('team_name'), r)
+    r = (await other.signed('claim', 'Gamer123|%s' % other.pid))[0]
+    report(bad, '... and can be protected', r.get('ok') is True and r.get('name') == 'Gamer123', r)
+    for n in ('Zalias2', 'TekRant', 'T3kR4ntG4ming'):
+        r = (await other.signed('claim', '%s|%s' % (n, other.pid)))[0]
+        report(bad, 'another account cannot protect %s (why team_name)' % n, r.get('ok') is False and
+               r.get('why') == 'team_name', r)
+    r = await other.name('ZaliasTV')  # signed, by an account with a name of its own
+    report(bad, 'a signed name check by another account is refused too', r.get('name') != 'ZaliasTV' and
+           r.get('team_name') is True and r.get('protected') is not True, r)
+    r = await other.name('Gamer123')
+    report(bad, 'that account still signs in for its own name', r.get('name') == 'Gamer123' and
+           r.get('protected') is True, r)
+    r = await other.name('Bystander9')
+    report(bad, 'a signed check for another free name answers as a plain one', r.get('name') == 'Bystander9' and
+           r.get('protected') is False, r)
+    r = await other.name('Gamer123')
+    report(bad, '... and the account keeps Gamer123', r.get('name') == 'Gamer123' and r.get('protected') is True, r)
+    r = await other.ask({'op': 'stats_put', 'name': 'TekRantGaming', 'score': 999999, 'seconds': 1, 'captures': 0})
+    report(bad, 'unsigned stats for a team name are refused', r.get('ok') is False, r)
+    persona = await fesl_login(port - 9, 'TekRantGaming', other.pid, '127.0.0.2')
+    report(bad, 'a game logging in as TekRantGaming is renamed (%s)' % persona, bool(persona) and
+           plasma.team_owner(persona) is None, persona)
+    # the owners: the code gives the name back, and works for any of the owner's names
+    r = (await tek.signed('recover', ''))[0]
+    report(bad, 'the TekRantGaming code recovers the account and its name', r.get('ok') is True and
+           r.get('name') == 'TekRantGaming', r)
+    r = await tek.name('TekRantGaming')
+    report(bad, '... signs in for TekRantGaming', r.get('name') == 'TekRantGaming' and r.get('protected') is True, r)
+    r = await tek.name('TekRantGaming2')
+    report(bad, '... and for TekRantGaming2 with the same code', r.get('name') == 'TekRantGaming2' and
+           r.get('protected') is True, r)
+    persona = await fesl_login(port - 9, 'TekRantGaming2', tek.pid, '127.0.0.1')
+    report(bad, 'the owner game logs in as TekRantGaming2', persona == 'TekRantGaming2', persona)
+    r = (await tek.signed('stats_put', 'TekRantGaming2|1500|3600|2|Kill=12,600|1'))[0]
+    report(bad, 'the owner signed stats under it are kept', r.get('ok') is True, r)
+    r = await other.name('TekRantGaming', signed=False)
+    report(bad, 'TekRantGaming stays refused to others meanwhile', r.get('name') != 'TekRantGaming', r)
+    r = (await tek.signed('claim', 'ZALIAS|%s' % tek.pid))[0]
+    report(bad, 'one owner cannot take the other owner name', r.get('ok') is False and r.get('why') == 'team_name', r)
+    r = (await zal.signed('recover', ''))[0]
+    report(bad, 'the ZALIAS code recovers the account and its name', r.get('ok') is True and r.get('name') == 'ZALIAS',
+           r)
+    r = (await zal.signed('claim', 'Zalias2|%s' % zal.pid))[0]
+    report(bad, 'ZALIAS protects Zalias2 with the same code', r.get('ok') is True and r.get('name') == 'Zalias2', r)
+    r = await zal.name('ZALIAS')
+    report(bad, '... and plays as ZALIAS again', r.get('name') == 'ZALIAS' and r.get('protected') is True, r)
+    r = await other.name('Zalias2', signed=False)
+    report(bad, 'Zalias2 stays refused to others after the owner moved off it', r.get('name') != 'Zalias2' and
+           r.get('team_name') is True, r)
+    many = [(await zal.signed('claim', 'ZaliasTV%d|%s' % (i, zal.pid)))[0].get('ok') for i in range(6)]
+    report(bad, 'an owner moves among their names more than 5 times an hour', all(many), many)
+    return bad
+
+
+def team():
+    import plasma
+    bad = team_list_checks()
+    plasma_py = os.path.join(ROOT, 'server', 'plasma.py')
+    BACKEND[0] = '127.0.0.5'
+    TEAM_TEST_OWNERS[:] = [Player(28270), Player(28270)]
+    with tempfile.TemporaryDirectory() as d:
+        accounts = os.path.join(d, 'accounts.json')
+        team_file = os.path.join(d, 'team.json')
+        owners = [dict(o, key=p.key) for o, p in zip(plasma.TEAM_OWNERS, TEAM_TEST_OWNERS)]
+        with open(team_file, 'w', encoding='utf-8') as f:
+            json.dump({'owners': owners}, f)
+        # an account that protected a team name before the names were kept: it loses it at the start
+        early = Player(28270)
+        with open(accounts, 'w', encoding='utf-8') as f:
+            json.dump({'version': 1, 'accounts': [{'key': early.key, 'name': 'ZaliasTV', 'created': 1,
+                                                   'seen': int(time.time()), 'progress': {}}]}, f)
+
+        def start():
+            return subprocess.Popen([sys.executable, '-I', plasma_py, '--host', '127.0.0.5', '--port', '28261',
+                                     '--theater-port', '28266', '--registry-port', '28270', '--accounts', accounts,
+                                     '--team-names', team_file, '--leaderboard', os.path.join(d, 'leaderboard.json'),
+                                     '--log', os.path.join(d, 'plasma.log'), '--accounts-save-every', '1',
+                                     '--login-delay', '0'], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+        async def first():
+            r1 = await Player(28270, address='127.0.0.3').name('ZaliasTV', signed=False)
+            r2 = (await early.signed('recover', ''))[0]
+            return r1, r2
+        p = start()
+        try:
+            time.sleep(1.5)
+            r1, r2 = asyncio.run(first())
+            report(bad, 'a team name protected before is no longer that account', r1.get('name') != 'ZaliasTV' and
+                   r2.get('ok') is True and r2.get('name') == '', (r1, r2))
+            bad += asyncio.run(team_checks(28270))
+            time.sleep(2.5)  # the accounts file is written within a second of a change
+        finally:
+            p.terminate()
+            p.wait()
+        # a restart, every account unused for 400 days: the team names are still the owners' alone
+        with open(accounts, encoding='utf-8') as f:
+            saved = json.load(f)
+        for x in saved['accounts']:
+            x['seen'] = int(time.time()) - 400 * 86400
+        with open(accounts, 'w', encoding='utf-8') as f:
+            json.dump(saved, f)
+
+        async def after():
+            t = Player(28270, address='127.0.0.4')
+            return (await t.name('TekRantGaming2', signed=False), await t.name('ZALIAS', signed=False),
+                    await TEAM_TEST_OWNERS[1].name('Zalias3'), await t.name('Gamer123', signed=False))
+        p = start()
+        try:
+            time.sleep(1.5)
+            r1, r2, r3, r4 = asyncio.run(after())
+        finally:
+            p.terminate()
+            p.wait()
+        report(bad, 'after a restart and 400 days unused: TekRantGaming2 kept', r1.get('name') != 'TekRantGaming2', r1)
+        report(bad, '... ZALIAS kept', r2.get('name') != 'ZALIAS', r2)
+        report(bad, '... the owner code still works (Zalias3)', r3.get('name') == 'Zalias3' and
+               r3.get('protected') is True, r3)
+        report(bad, '... while Gamer123, unused 400 days, is free again', r4.get('name') == 'Gamer123', r4)
+    print('FAILED: %s' % bad if bad else 'ALL PASSED')
+    return not bad
+
+
 if __name__ == '__main__':
     what = sys.argv[1] if len(sys.argv) > 1 else ''
     if what == 'crypto':
@@ -312,4 +534,6 @@ if __name__ == '__main__':
         sys.exit(0 if consts() else 1)
     if what == 'backend':
         sys.exit(0 if backend() else 1)
+    if what == 'team':
+        sys.exit(0 if team() else 1)
     print(__doc__)

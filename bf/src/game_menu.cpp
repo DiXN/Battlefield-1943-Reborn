@@ -463,6 +463,8 @@ int64_t LastGuestPresentMs();               // frame_rate.cpp: when the game las
 // Protect your name (account_key.h): what the latest name check said, for the menu.
 struct AccountNews {
   bool any = false, protected_name = false, other_owner = false;
+  bool team_name = false;  // the name asked for is kept for the team (server/plasma.py TEAM_OWNERS)
+  std::string name;        // the name the backend gave
   std::string progress;  // the account's progress (score|seconds|captures|stats|achievements), to take back
 };
 void SetAccount(const std::string& code, const std::string& name);  // below: the recovery code and its name
@@ -5211,7 +5213,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Protect your name: the name check's answer (signed in for the protected name, with the account's progress to take
     // back; or the name is another player's), and a claim or recovery done on the name page.
     if (const AccountNews news = TakeAccountNews(); news.any) {
-      acct_online_ = news.protected_name ? 1 : news.other_owner ? 2 : 0;
+      acct_online_ = news.protected_name ? 1 : news.team_name ? 3 : news.other_owner ? 2 : 0;
+      // A team owner (server/plasma.py TEAM_OWNERS) signed in under another of their names: the account follows it.
+      const std::string chosen = settings_.Get("player_name", ""), acct = settings_.Get("account_name", "");
+      const auto same = [](const std::string& x, const std::string& y) {
+        return x.size() == y.size() && std::equal(x.begin(), x.end(), y.begin(), [](char p, char q) {
+                 return std::tolower(static_cast<unsigned char>(p)) == std::tolower(static_cast<unsigned char>(q));
+               });
+      };
+      if (news.protected_name && same(news.name, chosen) && !same(acct, chosen) &&
+          !settings_.Get("account_code", "").empty()) {
+        settings_.values["account_name"] = chosen;
+        settings_.Save();
+        SetAccount(settings_.Get("account_code", ""), chosen);
+        REXLOG_INFO("BF account: the protected name is now {} (one of the account's team names)", chosen);
+      }
       if (!news.progress.empty()) TakeBackProgress(news.progress, "the name check");
     }
     ApplyAccountResult();
@@ -5336,7 +5352,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::atomic<bool> acct_busy_{false};
   std::string acct_message_;
   bool acct_message_bad_ = false, acct_show_code_ = false, code_mode_ = false;
-  int acct_online_ = 0;  // from this start's name check: 1 signed in for the protected name, 2 another player's name
+  int acct_online_ = 0;  // from this start's name check: 1 signed in for the protected name, 2 another player's name,
+                         // 3 a name kept for the team
 
   Settings settings_;
   std::function<void(bool)> fullscreen_;
@@ -5785,10 +5802,13 @@ void SetAccount(const std::string& code, const std::string& name) {
   std::lock_guard lock(g_account_mutex);
   g_account_code = code, g_account_name = name;
 }
-// The code, when it protects this name (any case): else empty.
+// The code, when it protects this name (any case), or the account has a name: else empty. A name check under another
+// name is signed too: a team owner (server/plasma.py TEAM_OWNERS) plays under any of their names with one code, and for
+// anyone else the backend answers it as a plain one.
 std::string AccountCodeFor(const std::string& name) {
   std::lock_guard lock(g_account_mutex);
-  return !g_account_code.empty() && SameName(g_account_name, name) ? g_account_code : std::string();
+  return !g_account_code.empty() && (!g_account_name.empty() || SameName(g_account_name, name)) ? g_account_code
+                                                                                                 : std::string();
 }
 AccountNews TakeAccountNews() {
   std::lock_guard lock(g_account_mutex);
@@ -5841,6 +5861,9 @@ void StartNameCheck(const std::string& name, uint32_t player_id) {
       news.any = true;
       news.protected_name = JsonField(reply, "protected") == "true";
       news.other_owner = JsonField(reply, "protected_by_other") == "true";
+      news.team_name = JsonField(reply, "team_name") == "true";
+      news.name = answer;
+      if (news.team_name) REXLOG_INFO("BF account: the name asked for is kept for the Reborn team");
       news.progress = JsonField(reply, "progress_text");
       if (news.protected_name) REXLOG_INFO("BF account: signed in for the protected name {}", answer);
       if (news.other_owner) REXLOG_INFO("BF account: the name asked for is another player's protected name");
