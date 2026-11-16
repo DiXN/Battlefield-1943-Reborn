@@ -3991,7 +3991,8 @@
     }
     if (version.empty() || !update::IsNewerVersion(version, BfVersion()) || version == new_version_shown_) return;
     if ((page_ != Page::kHome && page_ != Page::kMain) || quit_popup_ || update_popup_ || steam_ask_ || steam_job_ ||
-        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_ || notice_popup_)
+        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_ || notice_popup_ ||
+        news_open_)  // (after the news window is closed)
       return;
     new_version_popup_ = true, new_version_shown_ = version, popup_row_ = 1;  // Update
     REXLOG_INFO("BF update: version {} found (this is {}): the new version pop-up", version, BfVersion());

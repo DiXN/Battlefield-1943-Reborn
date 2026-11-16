@@ -17,11 +17,12 @@
   static constexpr MenuRow kMenuRows[] = {{"QUICK PLAY", false},  {"SERVER BROWSER", false}, {"CUSTOM MATCH", false},
                                           {"UNLOCKABLES", false},
                                           {"STATS & AWARDS", false}, {"LEADERBOARDS", false}, {"ACHIEVEMENTS", false},
-                                          {"SETTINGS", false},    {"HELP", false},           {"UPDATE", true},
+                                          {"SETTINGS", false},    {"HELP", false},           {"NEWS", true},
+                                          {"UPDATE", true},
                                           {"REPORT AN ISSUE", true}, {"MORE FROM TRG STUDIOS", true}, {"QUIT", true}};
   enum MenuRowId {
     kRowQuick, kRowBrowser, kRowPrivateMatch, kRowUnlockables, kRowStats, kRowLeaderboards, kRowAchievements,
-    kRowSettings, kRowHelp, kRowUpdate, kRowReport, kRowProjects, kRowQuit, kMenuRowCount
+    kRowSettings, kRowHelp, kRowNews, kRowUpdate, kRowReport, kRowProjects, kRowQuit, kMenuRowCount
   };
   std::string menu_error_;      // Quick Play found no server: said on the card until the next press
   double menu_error_at_ = -100;
@@ -222,6 +223,7 @@
     UpdateOnMenu();
     UpdateTick();
     WhatsNewTick();
+    NewsTick();  // the news window once a run (game_menu_news.inc)
     OwnBackendTick();
     StartProjectArt();
     const Stage st = StageOf(io);
@@ -238,15 +240,15 @@
       if (in.down) home_row_ = (home_row_ + 1) % n;
     }
     home_row_ = std::clamp(home_row_, 0, n - 1);
-    const ImVec2 ra = st.P(48, 93), rb = st.P(400, 620);
+    const ImVec2 ra = st.P(48, 93), rb = st.P(400, 643);  // (620 until the News row, 15 Nov 2026)
     d->AddRectFilled(ra, rb, IM_COL32(13, 15, 11, 204));
     d->AddRect(ra, rb, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
     int clicked = -1;
     float y = ra.y;
     for (int i = 0; i < n; ++i) {
-      if (i == kRowUpdate || i == kRowQuit) y += st(12);  // a rule's worth of air between the groups
+      if (i == kRowNews || i == kRowQuit) y += st(12);  // a rule's worth of air between the groups
       const MenuRow& row = kMenuRows[i];
-      const float h = row.compact ? st(32) : st(41);
+      const float h = row.compact ? st(32) : st(40);  // (41 until the News row)
       const ImVec2 a(ra.x, y), b(rb.x, y + h);
       const bool sel = home_row_ == i;
       const bool hover = ImGui::IsMouseHoveringRect(a, b);
@@ -266,10 +268,13 @@
       ImU32 note_col = sel ? kit::kInkSection : kit::kKhakiDim;
       if (locked) note = "COMING SOON";
       else if (i == kRowUpdate) note = Upper(UpdateNote()), note_col = sel ? kit::kGreenDark : kit::kGreenBright;
+      else if (i == kRowNews) {
+        if (const int unseen = NewsUnseen(); unseen > 0) note = fmt::format("{} NEW", unseen), note_col = sel ? kit::kGreenDark : kit::kGreenBright;
+      }
       else if (i == kRowHelp) note = "TUTORIAL, CONTROLS, CREDITS";
       if (sel) {
         kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(b.x - st(18) - st(20), a.y + h * 0.5f), st(20));
-        if (!note.empty() && i != kRowUnlockables && i != kRowUpdate) note.clear();  // the glyph has the room
+        if (!note.empty() && i != kRowUnlockables && i != kRowUpdate && i != kRowNews) note.clear();  // the glyph has the room
       }
       if (!note.empty()) {
         const float nw = kit::SpacedWidth(f.typed, st(9.5f), note, st(1.5f));
@@ -405,6 +410,7 @@
         return;
       case kRowHelp: page_ = Page::kHelp, help_row_ = 0; return;
       case kRowUnlockables: return;  // nothing yet (TekRantGaming, 8 Nov)
+      case kRowNews: OpenNews("the News row"); return;
       case kRowUpdate: return UpdateNow();
       case kRowReport: page_ = Page::kReport; return;
       case kRowProjects: page_ = Page::kProjects, project_ = 0; return;
