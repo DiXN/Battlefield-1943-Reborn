@@ -1,5 +1,5 @@
-name: Bug
-description: Something works wrong: gameplay, menus, sound, controls, the picture.
+name: "Bug"
+description: "Something works wrong: gameplay, menus, sound, controls, the picture."
 title: "[Bug] "
 labels: ["bug", "needs-triage"]
 body:

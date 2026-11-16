@@ -1,5 +1,5 @@
-name: Performance
-description: Low frame rate, stutters, long loading or hitches.
+name: "Performance"
+description: "Low frame rate, stutters, long loading or hitches."
 title: "[Performance] "
 labels: ["performance", "needs-triage"]
 body:

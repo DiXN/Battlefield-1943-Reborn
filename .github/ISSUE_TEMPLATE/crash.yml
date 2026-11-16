@@ -1,5 +1,5 @@
-name: Crash
-description: The game closed, froze or stopped answering.
+name: "Crash"
+description: "The game closed, froze or stopped answering."
 title: "[Crash] "
 labels: ["crash", "needs-triage"]
 body:
