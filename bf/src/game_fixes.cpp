@@ -203,10 +203,34 @@ void NoteDeadObject(const char* where, uint32_t object, uint32_t caller) {
 }
 }  // namespace
 
+// A live object whose table has no bucket array (16 Nov 2026, the night of the 0.4.7 release: All Maps 1, 0.4.7, and
+// earlier that day on 0.4.6.5, "read of guest 0x00010000" in sub_823C8BD8 from sub_821DC178, in the server's tick
+// sub_824065D0, every player dropped): its bucket pointer (+36) was 0, so the lookup read the null page (the null page
+// guard gave zeros), found nothing, and the insert's begin (sub_823C8BD8, which walks the buckets to the first one in
+// use with no end of its own) walked the whole null page into 0x10000. A bucket pointer in the guest's first 64 KB is
+// never an array: the setter passes the object over as for a released one.
+namespace {
+std::atomic<uint32_t> g_no_buckets{0};
+bool NoBuckets(uint8_t* base, uint32_t object, const char* where, uint32_t caller) {
+  const uint32_t buckets = REX_LOAD_U32(object + 36);
+  if (buckets >= 0x10000) return false;
+  const uint32_t n = ++g_no_buckets;
+  if (n <= 10)
+    REXLOG_WARN("BF game fix: {} on an object whose table has no buckets ({:08X}, bucket pointer {:08X}, {} counted, "
+                "called from {:08X}): passed over instead of a crash (time {})",
+                where, object, buckets, REX_LOAD_U32(object + 40), caller, n);
+  return true;
+}
+}  // namespace
+
 REX_EXTERN(__imp__sub_821DC048);
 REX_HOOK_RAW(sub_821DC048) {
   if (!GuestLive(ctx.r3.u32, 72)) {
     NoteDeadObject("sub_821DC048", ctx.r3.u32, uint32_t(ctx.lr));
+    ctx.r3.u64 = 0;
+    return;
+  }
+  if (NoBuckets(base, ctx.r3.u32, "sub_821DC048", uint32_t(ctx.lr))) {
     ctx.r3.u64 = 0;
     return;
   }
@@ -220,7 +244,40 @@ REX_HOOK_RAW(sub_821DC178) {
     ctx.r3.u64 = 0;
     return;
   }
+  if (NoBuckets(base, ctx.r3.u32, "sub_821DC178", uint32_t(ctx.lr))) {
+    ctx.r3.u64 = 0;
+    return;
+  }
   __imp__sub_821DC178(ctx, base);
+}
+
+// sub_822AE650(node, flag): a scene node's update, recursing into its children. The node keeps an array of 16 byte
+// entries (+44) and its index in it (+48 byte): the update reads and writes entry index+1 (+8, its flags), reads
+// entry index (+30) and the children's pointers from entry index+2 on. Official servers crashed there 7 times, 13 to
+// 16 Nov 2026 (0.4.0 to 0.4.7; All Maps 3 at 22:06 UTC on the 0.4.7 release night, every player dropped): the entry
+// array was 0 (writes and reads of guest 0x18, 0x1B8, 0x218), 0x10000, or a released page, on a node still linked
+// (its own type pointer was fine), often a child several levels down. A node whose entry array is not live memory is
+// left as it is, and its children with it: the update returns at once. Logged, the first 10 times.
+namespace {
+std::atomic<uint32_t> g_bad_nodes{0};
+}  // namespace
+
+REX_EXTERN(__imp__sub_822AE650);
+REX_HOOK_RAW(sub_822AE650) {
+  const uint32_t node = ctx.r3.u32;
+  if (node >= 0x10000) {
+    const uint32_t entries = REX_LOAD_U32(node + 44);
+    const uint32_t index = REX_LOAD_U8(node + 48);
+    if (entries < 0x10000 || !GuestLive(entries + index * 16, 48)) {
+      const uint32_t n = ++g_bad_nodes;
+      if (n <= 10)
+        REXLOG_WARN("BF game fix: a scene node whose entries are gone ({:08X}, entries {:08X}, index {}, called from "
+                    "{:08X}): its update passed over instead of a crash (time {})",
+                    node, entries, index, uint32_t(ctx.lr), n);
+      return;
+    }
+  }
+  __imp__sub_822AE650(ctx, base);
 }
 
 namespace bf1943 {
@@ -321,6 +378,28 @@ void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
   REXLOG_INFO("BF game fix test: a hash table with its bucket pointer at 1 cleared without a fault ({} caught; now "
               "bucket pointer {:08X}, {} buckets)",
               g_bad_tables.load() - bad_before, REX_LOAD_U32(table + 36), REX_LOAD_U32(table + 40));
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+  // 16 Nov 2026: a live object whose table has no bucket array (the All Maps 1 crash), and a scene node whose entry
+  // array is 0 (the All Maps 3 crash). Without the guards: a read of guest 0x10000 and a write of guest 0x18.
+  for (uint32_t a = area; a < area + 0x200; a += 4) REX_STORE_U32(a, 0);
+  const uint32_t no_table = area;  // +36 bucket pointer 0, +40 three buckets counted
+  REX_STORE_U32(no_table + 40, 3);
+  ctx.r3.u64 = no_table, ctx.r4.u64 = 0x12345678, ctx.f1.f64 = 1.0, ctx.lr = 0x82406654;
+  ctx.r1.u64 = area - 0x100;
+  const uint32_t no_buckets_before = g_no_buckets.load();
+  sub_821DC178(ctx, base);
+  REXLOG_INFO("BF game fix test: the setter on a table with no buckets came back without a fault ({} caught, r3 {})",
+              g_no_buckets.load() - no_buckets_before, ctx.r3.u32);
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+  for (uint32_t a = area; a < area + 0x200; a += 4) REX_STORE_U32(a, 0);
+  const uint32_t node = area;  // +44 entries 0, +48 index 32 (the 22:06 crash's write of 0x218)
+  REX_STORE_U8(node + 48, 32);
+  ctx.r3.u64 = node, ctx.r4.u64 = 1, ctx.lr = 0x822AEEC8;
+  ctx.r1.u64 = area - 0x100;
+  const uint32_t bad_nodes_before = g_bad_nodes.load();
+  sub_822AE650(ctx, base);
+  REXLOG_INFO("BF game fix test: a scene node with no entries updated without a fault ({} caught)",
+              g_bad_nodes.load() - bad_nodes_before);
   std::memcpy(&ctx, &saved, sizeof(ctx));
 }
 #endif
