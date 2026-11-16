@@ -54,7 +54,6 @@
 #include "../third_party/miniz/miniz.h"
 #include "capture_points.h"
 #include "dbx_tree.h"
-#include "night_ops.h"
 
 #include <map>
 
@@ -1688,8 +1687,9 @@ void NoteGameFile(const char* path) {
   // D163: no lamps until the level's own are read (nor on a server).
   if (grass) native_x_renderer::NightLamps(nullptr, 0);
   std::thread([root, folder, grass] {
-    // D163: the level's lamps for the night, from its main partition (levels/<map>.dbx in reduced-level-00.fbrb).
-    if (grass && kNightOps) {  // night_ops.h
+    // D163: the level's lamps for the night, from its main partition (levels/<map>.dbx in reduced-level-00.fbrb). In
+    // every build since 16 Nov 2026: they light the day and night cycle's nights (NativeXRenderer D175).
+    if (grass) {
       const fs::path level_archive = root / "dist" / "xenon" / "levels" / folder / "reduced-level-00.fbrb";
       Archive l;
       bool found = false;
