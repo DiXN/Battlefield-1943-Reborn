@@ -283,8 +283,15 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
         float x = x0;
         shadowed(bold, ImVec2(x, y), ChannelColor(d.l->channel, alpha), d.tag, alpha);
         x += bold->CalcTextSizeA(size, FLT_MAX, 0, d.tag.c_str()).x;
-        shadowed(bold, ImVec2(x, y),
-                 d.l->own ? IM_COL32(255, 225, 140, int(255 * alpha)) : ChannelColor(d.l->channel, alpha), d.who, alpha);
+        if (clan::IsDevTag(clan::TagOf(Printable(d.l->name)))) {  // a developer's "[Dev]Name" cycles its colours
+          const std::string tagged = d.who.substr(0, d.who.size() - 2);
+          const float w = clan::DrawDevText(dl, bold, size, ImVec2(x, y), tagged, alpha, true);
+          shadowed(bold, ImVec2(x + w, y), ChannelColor(d.l->channel, alpha), ": ", alpha);
+        } else {
+          shadowed(bold, ImVec2(x, y),
+                   d.l->own ? IM_COL32(255, 225, 140, int(255 * alpha)) : ChannelColor(d.l->channel, alpha), d.who,
+                   alpha);
+        }
         const float body_wrap = wrap - (d.body_x - x0);
         dl->AddText(font, size, ImVec2(d.body_x + 1.5f * s, y + 1.5f * s), IM_COL32(0, 0, 0, int(180 * alpha)),
                     d.body.c_str(), nullptr, body_wrap);
@@ -327,7 +334,10 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       for (const std::string& name : speaking) {
         dl->AddCircleFilled(ImVec2(x + 6 * s, y + line * 0.5f), 5 * s, IM_COL32(130, 225, 120, 255));
         const std::string shown = clan::Tagged(Printable(name));
-        shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), shown, 1.0f);
+        if (clan::IsDevTag(clan::TagOf(Printable(name))))
+          clan::DrawDevText(dl, bold, size, ImVec2(x + 16 * s, y), shown, 1.0f, true);
+        else
+          shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), shown, 1.0f);
         x += 26 * s + bold->CalcTextSizeA(size, FLT_MAX, 0, shown.c_str()).x;
         if (x > io.DisplaySize.x * 0.45f) break;
       }

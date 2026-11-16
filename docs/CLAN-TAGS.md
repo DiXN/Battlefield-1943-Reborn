@@ -66,6 +66,17 @@ names, so only they can show it. Nobody else can type Dev or a lookalike.
   grows itself) is written as "[TAG]Name" with the game's own string assign (sub_821D51C8), four times a second
   (clan_tags.cpp GameNamesTick). Nothing is cut: the string grows. The plain names are put back as the level goes.
   bf_clan_tags_in_game=false turns it off.
+- **The Dev tag's colours in a match** (World at War's "cycl"): the game draws all its Flash text (menus, HUD, kill
+  feed, scoreboard) through one text renderer; a run's colour is one word at renderer + 192 (red in the low byte,
+  alpha in the high one), its glyphs are added one by one (sub_826AB240) and drawn by a flush (sub_826A5650).
+  clan_tag_colours.cpp hooks the run (sub_826AB588: its lines are a circular list whose head, r5, sits in the text
+  command) and, in a run holding "[Dev]", draws the glyphs so far and changes that colour before each letter of the
+  whole "[Dev]Name" (the tag and the name after it, up to 15 letters, digits or underscores; his word: "the full
+  clan tag and user name not just the clan tag"), then puts the run's own colour back: the letters cycle through the
+  colours, a step apart, with the run's own alpha (fades). Our pages and the chat draw the whole "[Dev]Name" the same
+  way (clan_tags.cpp DrawDevText). Runs without "[Dev]" are not touched (and nothing is allocated for them). bf_dev_tag_colours=false
+  turns it off. Found with a read only search of the recompiled code (16 Nov 2026); BF_DEV_TEXTLOG=1 logs the first
+  60 texts drawn.
 
 Why not raise the 15 character limit or put the tag in the gamertag: the gamertag is the name the server's roster
 matches (a game that finds another name than the backend's crashes joining, live_layers.cpp), the Xbox name buffers
@@ -76,4 +87,7 @@ are 16 bytes, and the tag would then come from the player's own game, not the ba
 - tools/test_clan_tags.py rules <text_filter_tests.exe>; tools/test_clan_tags.py backend (127.0.0.5: set, change,
   clear, refused with why, another player cannot set it, Dev only for the team owner's signed game).
 - bf/tests/text_filter_tests.cpp (the C++ rules, 136 checks).
-- In game runs: see the hand over note of 16 Nov 2026.
+- In game runs (16 Nov 2026, scratchpad scripts tagpage.ps1 and tagmatch.ps1: a backend on 127.0.0.8 with a test
+  team name DevTester, two clients): tagpage2, tagnog1, tagd3v1 (the name page); tagmatch12 (the game's scoreboard
+  shows [Dev]DevTester and [IWO]Kestrel); cycmatch2 (the kill feed: "[Dev]DevTester † [Dev]DevTester");
+  cycmatch3 and cycmatch4 (the Dev letters' colours cycling in the scoreboard and the kill feed).

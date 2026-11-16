@@ -338,9 +338,10 @@ void GameNamesTick(void* ctx, uint8_t* base, bool level_loaded) {
 
 // ---- drawing
 unsigned DevColour(int i, double seconds, float alpha) {
-  // World at War's "cycl": the tag's letters run through the colours, each a step behind the one before, so the
-  // colours seem to travel along it. A hue turn every 2 s, the letters 0.15 of a turn apart.
-  const double hue = std::fmod(seconds * 0.5 - i * 0.15 + 100.0, 1.0);
+  // World at War's "cycl": the letters of a developer's tagged name run through the colours, each a step behind the
+  // one before, so the colours seem to travel along it. A hue turn every 2 s, the letters 0.06 of a turn apart (a
+  // 20 letter "[Dev]Name" spans a little more than one turn).
+  const double hue = std::fmod(seconds * 0.5 - i * 0.06 + 100.0, 1.0);
   float r, g, b;
   ImGui::ColorConvertHSVtoRGB(float(hue), 0.75f, 1.0f, r, g, b);
   return IM_COL32(int(r * 255), int(g * 255), int(b * 255), int(std::clamp(alpha, 0.0f, 1.0f) * 255));
@@ -362,17 +363,28 @@ float DrawTagged(ImDrawList* d, ImFont* font, float size, const ImVec2& at, unsi
     d->AddText(font, size, ImVec2(x, at.y), c, s.c_str());
     x += font->CalcTextSizeA(size, 1e9f, 0, s.c_str()).x;
   };
+  // A developer's whole tagged name cycles (TekRantGaming, 16 Nov 2026: "the full clan tag and user name").
+  if (IsDevTag(tag)) return DrawDevText(d, font, size, at, "[" + tag + "]" + name, alpha, false);
   if (!tag.empty()) {
     put("[", fade(tag_ink));
-    if (IsDevTag(tag)) {
-      const double now = ImGui::GetTime();
-      for (size_t i = 0; i < tag.size(); ++i) put(std::string(1, tag[i]), DevColour(int(i), now, alpha));
-    } else {
-      put(tag, fade(tag_ink));
-    }
+    put(tag, fade(tag_ink));
     put("]", fade(tag_ink));
   }
   put(name, fade(ink));
+  return x - at.x;
+}
+
+float DrawDevText(ImDrawList* d, ImFont* font, float size, const ImVec2& at, const std::string& text, float alpha,
+                  bool shadow) {
+  const double now = ImGui::GetTime();
+  float x = at.x;
+  const float off = size * 0.07f;
+  for (size_t i = 0; i < text.size(); ++i) {
+    const char ch[2] = {text[i], 0};
+    if (shadow) d->AddText(font, size, ImVec2(x + off, at.y + off), IM_COL32(0, 0, 0, int(180 * alpha)), ch);
+    d->AddText(font, size, ImVec2(x, at.y), DevColour(int(i), now, alpha), ch);
+    x += font->CalcTextSizeA(size, 1e9f, 0, ch).x;
+  }
   return x - at.x;
 }
 

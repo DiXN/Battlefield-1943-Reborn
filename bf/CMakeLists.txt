@@ -55,6 +55,7 @@ set(BF1943_SOURCES
     src/capture_points.cpp
     src/map_players.cpp
     src/clan_tags.cpp
+    src/clan_tag_colours.cpp
     src/discord_presence.cpp
     src/game_music.cpp
     src/plane_mouse.cpp
