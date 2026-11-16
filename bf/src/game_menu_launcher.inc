@@ -254,16 +254,19 @@
       if (std::string(p.name) == kTierPresets[std::clamp(tier, 0, 2)]) s.insert(s.end(), p.settings.begin(), p.settings.end());
     return s;
   }
-  // A tier's settings applied, its frame rate too: the highest offered that divides into 30 (the screen's and a limit
-  // outside the game allowing), 60 at most below the fast tier (a rate it cannot keep comes unevenly).
+  // A tier's settings applied, its frame rate too: the highest that divides into 30 up to the screen's refresh rate
+  // (a starting choice, not a limit: every rate and Unlimited stay offered), 60 at most below the fast tier (a rate
+  // it cannot keep comes unevenly).
   void ApplyTier(int tier, double slowness, const char* when) {
     rex::ui::Window* window = window_ ? window_() : nullptr;
     const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
     const DisplayMode desktop = DesktopDisplayMode(monitor, window);
     const int refresh = int(std::lround(desktop.refresh));
     std::string fps = "60";
+    const int most = refresh > 0 ? refresh + 1 : 61;  // 59.94 Hz gives 60
     for (const std::string& r : OfferedRates())
-      if (r != "unlimited" && std::atoi(r.c_str()) > std::atoi(fps.c_str()) && (tier == 2 || std::atoi(r.c_str()) <= 60))
+      if (r != "unlimited" && std::atoi(r.c_str()) > std::atoi(fps.c_str()) && std::atoi(r.c_str()) <= most &&
+          (tier == 2 || std::atoi(r.c_str()) <= 60))
         fps = r;
     settings_.values["frame_rate"] = fps;
     settings_.values["vsync"] = "off";
@@ -920,6 +923,8 @@
     // With a controller in hand the keys start open (TekRantGaming, 9 Nov: the controller could not reach them).
     name_key_ = 10, name_keys_ = device_ == Device::kPad, name_caps_ = name_text_.empty();  // on Q
     name_error_.clear();
+    code_mode_ = false, acct_show_code_ = false;
+    if (!acct_busy_.load()) acct_message_.clear();
     if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
     if (page_ != Page::kName) name_from_ = page_;
     page_ = Page::kName, open_ = true;
@@ -937,6 +942,7 @@
   }
   static bool NameChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
   void NameType(char c) {
+    if (code_mode_) return CodeType(c);
     if (int(name_text_.size()) >= kNameMax || !NameChar(c)) return;
     if (std::isalpha(static_cast<unsigned char>(c)))
       c = name_caps_ ? char(std::toupper(static_cast<unsigned char>(c))) : char(std::tolower(static_cast<unsigned char>(c)));
@@ -957,17 +963,18 @@
     name_text_ = std::string(kFirst[r() % 16]) + kSecond[r() % 16] + std::to_string(10 + r() % 90);
     name_error_.clear(), name_caps_ = false;
   }
-  void NameSave() {
+  // The name in the field saved (false, with the error line saying why, when it cannot be).
+  bool NameCommit() {
     const std::string name = name_text_;
     if (name.size() < 3) {
       name_error_ = "A name needs 3 to 15 letters, numbers or underscores.";
-      return;
+      return false;
     }
     // Our profanity filter (text_filter.h): such a name is never saved; the player chooses another.
     if (!text_filter::NameAllowed(name)) {
       name_error_ = "That name is not allowed. Choose another one.";
       REXLOG_INFO("BF name: a name with profanity was refused on the name page");
-      return;
+      return false;
     }
     const bool changed = name != settings_.Get("player_name", "") || settings_.Get("player_name_chosen", "") != "1";
     settings_.values["player_name"] = name;
@@ -975,12 +982,269 @@
     settings_.values.erase("player_name_refused");
     name_required_ = false;
     settings_.Save();
-    REXLOG_INFO("BF name: the player chose {}", name);
+    if (changed) REXLOG_INFO("BF name: the player chose {}", name);
     // Before BF signs in (the setup on a first start) the name is used at once; after, from the next start.
-    if (!signed_in_once_) NameChosen(name), name_ready_at_ = ImGui::GetTime();
-    else if (changed) name_saved_ = name;
+    if (!signed_in_once_) {
+      if (changed || name_ready_at_ == 0) NameChosen(name), name_ready_at_ = ImGui::GetTime();
+    } else if (changed) {
+      name_saved_ = name;
+    }
+    return true;
+  }
+  void NameSave() {
+    if (code_mode_) {  // the field holds a recovery code: Save uses it
+      RecoverAccount();
+      return;
+    }
+    if (!NameCommit()) return;
     if (name_setup_) SetupNext();
     else page_ = name_from_;
+  }
+
+  // ---- Protect your name (account_key.h; server/plasma.py accounts). The name page protects the saved name: the
+  // game makes the account's recovery code (or uses the one it has: a protected name moves to the new one), the backend
+  // keeps the key's public half with the name. The code is shown once and saved to a text file in the user folder; on
+  // a new PC "Recovery code" on this page takes the name and the progress back.
+  bool AccountOnline() const { return !std::string(REXCVAR_GET(bf_online_host)).empty(); }
+  bool NameProtected() const {
+    const std::string acct = settings_.Get("account_name", ""), name = settings_.Get("player_name", "");
+    if (settings_.Get("account_code", "").empty() || acct.size() != name.size() || acct.empty()) return false;
+    for (size_t i = 0; i < acct.size(); ++i)
+      if (std::tolower(static_cast<unsigned char>(acct[i])) != std::tolower(static_cast<unsigned char>(name[i]))) return false;
+    return true;
+  }
+  fs::path RecoveryFile() const { return settings_.path.parent_path() / "BF1943 Reborn recovery code.txt"; }
+  void SaveRecoveryFile(const std::string& name, const std::string& code) {
+    std::ofstream out(RecoveryFile(), std::ios::binary | std::ios::trunc);
+    out << "Battlefield 1943 Reborn: the recovery code of your protected soldier name\r\n\r\n"
+        << "Name: " << name << "\r\nRecovery code: " << account::FormatCode(code) << "\r\n\r\n"
+        << "Keep this code somewhere safe. On a new PC or after a reinstall, open the soldier name page\r\n"
+        << "(Settings, or EDIT on Home), choose Recovery code and type it in: your name and your progress come back.\r\n"
+        << "Anyone with this code can use your name, so do not share it.\r\n";
+    REXLOG_INFO("BF account: the recovery code saved to {}", out ? RecoveryFile().string() : std::string("(not saved)"));
+  }
+  void AccountMessage(std::string text, bool bad) { acct_message_ = std::move(text), acct_message_bad_ = bad; }
+  void ProtectName() {
+    if (acct_busy_.load()) return;
+    if (!AccountOnline()) return AccountMessage("Protecting a name needs the online service.", true);
+    if (!NameCommit()) return;  // the name line says why
+    std::string code = settings_.Get("account_code", "");
+    if (account::NormalizeCode(code).empty()) code = account::NewCode();
+    if (code.empty()) return AccountMessage("This PC gave no random numbers for a code. Try again.", true);
+    char id[9];
+    std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
+    const std::string name = settings_.Get("player_name", ""), fields = name + "|" + id;
+    acct_busy_ = true;
+    AccountMessage("Protecting " + name + "...", false);
+    REXLOG_INFO("BF account: protecting the name {}", name);
+    std::thread([this, code, name, fields] {
+      std::string reply;
+      AccountResult r;
+      r.code = code, r.name = name;
+      r.answered = SignedRegistryRequest(code, "claim", fields, reply);
+      r.ok = r.answered && JsonField(reply, "ok") == "true";
+      r.why = JsonField(reply, "why");
+      if (r.ok) r.name = JsonField(reply, "name");
+      r.ready = true;
+      std::lock_guard lock(acct_mutex_);
+      acct_result_ = r;
+    }).detach();
+  }
+  void RecoverAccount() {
+    if (acct_busy_.load()) return;
+    const std::string code = account::NormalizeCode(name_text_);
+    if (code.empty()) {
+      name_error_ = "A recovery code has 20 letters and numbers.";
+      return;
+    }
+    if (!AccountOnline()) return AccountMessage("A recovery code needs the online service.", true);
+    acct_busy_ = true;
+    AccountMessage("Looking up your recovery code...", false);
+    REXLOG_INFO("BF account: a recovery code typed in");
+    std::thread([this, code] {
+      std::string reply;
+      AccountResult r;
+      r.recover = true, r.code = code;
+      r.answered = SignedRegistryRequest(code, "recover", "", reply);
+      r.ok = r.answered && JsonField(reply, "ok") == "true";
+      r.why = JsonField(reply, "why");
+      r.name = JsonField(reply, "name");
+      r.progress = JsonField(reply, "progress_text");
+      r.ready = true;
+      std::lock_guard lock(acct_mutex_);
+      acct_result_ = r;
+    }).detach();
+  }
+  // A claim's or a recovery's outcome, on the menu's thread (the settings are its).
+  void ApplyAccountResult() {
+    AccountResult r;
+    {
+      std::lock_guard lock(acct_mutex_);
+      if (!acct_result_.ready) return;
+      r = acct_result_;
+      acct_result_ = {};
+    }
+    acct_busy_ = false;
+    if (!r.answered) {
+      REXLOG_WARN("BF account: no answer from the backend ({}){}", r.recover ? "recovery" : "protect",
+                  r.why.empty() ? std::string() : ": " + r.why);
+      return AccountMessage(r.why == "lan" ? "Names are protected by the online service of the Reborn servers, not by a "
+                                             "LAN server."
+                                           : "No answer from the online service. Try again in a moment.",
+                            true);
+    }
+    if (!r.recover) {
+      if (!r.ok) {
+        REXLOG_INFO("BF account: protecting {} refused: {}", r.name, r.why);
+        return AccountMessage(r.why == "taken"    ? "That name is protected by another player. Choose another one."
+                              : r.why == "in_use" ? "Another player is using that name online right now. Choose another "
+                                                    "one, or try again later."
+                              : r.why == "too_many" ? "Too many names were protected from your connection this hour. "
+                                                      "Try again later."
+                                                    : "The online service did not take that name.",
+                              true);
+      }
+      const bool first = settings_.Get("account_code", "") != r.code;
+      settings_.values["account_code"] = r.code;
+      settings_.values["account_name"] = r.name;
+      settings_.Save();
+      SetAccount(r.code, r.name);
+      SaveRecoveryFile(r.name, r.code);
+      acct_online_ = 1;
+      acct_show_code_ = first;
+      REXLOG_INFO("BF account: {} is protected{}", r.name, first ? " (a new account)" : " (the account moved to it)");
+      SendLeaderboard("the name protected");  // the totals so far go to the account
+      return AccountMessage(first ? "Your name is protected. Keep the recovery code above: it is also saved in your "
+                                    "game's user folder as \"BF1943 Reborn recovery code.txt\"."
+                                  : "Your protected name is now " + r.name + ". Your recovery code stays the same.",
+                            false);
+    }
+    if (!r.ok) {
+      REXLOG_INFO("BF account: the recovery code matches no account");
+      return AccountMessage("No account has that recovery code. Check it and try again.", true);
+    }
+    settings_.values["account_code"] = r.code;
+    settings_.values["account_name"] = r.name;
+    code_mode_ = false;
+    if (!r.progress.empty()) TakeBackProgress(r.progress, "the recovery code");
+    if (r.name.empty()) {
+      settings_.Save();
+      SetAccount(r.code, "");
+      name_text_ = settings_.Get("player_name", "");
+      REXLOG_INFO("BF account: recovered an account whose name was freed (unused too long)");
+      return AccountMessage("Your account is back, but its name went unused too long and was freed. Choose a name and "
+                            "protect it again.",
+                            true);
+    }
+    name_text_ = r.name;
+    SetAccount(r.code, r.name);
+    NameCommit();
+    acct_online_ = 1;
+    SaveRecoveryFile(r.name, r.code);
+    REXLOG_INFO("BF account: recovered {} with its progress", r.name);
+    AccountMessage("Welcome back, " + r.name + ". Your name and your progress are back on this PC" +
+                       (signed_in_once_ ? std::string(" (the name from your next start).") : std::string(".")),
+                   false);
+  }
+  // The account's progress (score|seconds|captures|Label=events,points;...|1,7,...) into this PC's: the larger of each
+  // total, the awards together. Never into a test profile.
+  void TakeBackProgress(const std::string& text, const char* from) {
+    if (settings_.Get("test_progression", "") == "1") return;
+    std::vector<std::string> parts;
+    size_t at = 0;
+    for (size_t bar; (bar = text.find('|', at)) != std::string::npos; at = bar + 1) parts.push_back(text.substr(at, bar - at));
+    parts.push_back(text.substr(at));
+    if (parts.size() != 5) return;
+    int raised = 0, unlocked = 0;
+    const double seconds = std::atof(parts[1].c_str());
+    if (seconds > std::atof(settings_.Get("match_seconds", "0").c_str()))
+      settings_.values["match_seconds"] = std::to_string(int64_t(seconds)), ++raised;
+    for (size_t i = 0; i <= parts[3].size();) {
+      size_t end = parts[3].find(';', i);
+      if (end == std::string::npos) end = parts[3].size();
+      const std::string item = parts[3].substr(i, end - i);
+      i = end + 1;
+      const size_t eq = item.find('='), comma = item.find(',');
+      if (eq == std::string::npos || comma == std::string::npos || comma < eq) continue;
+      const std::string key = "stat." + item.substr(0, eq), old = settings_.Get(key, "0,0");
+      const size_t old_comma = old.find(',');
+      const long long n = std::atoll(item.c_str() + eq + 1), pts = std::atoll(item.c_str() + comma + 1);
+      const long long on = std::atoll(old.c_str()),
+                      opts = old_comma == std::string::npos ? 0 : std::atoll(old.c_str() + old_comma + 1);
+      if (n > on || pts > opts) settings_.values[key] = fmt::format("{},{}", std::max(n, on), std::max(pts, opts)), ++raised;
+    }
+    if (auto* k = REX_KERNEL_STATE()) {
+      for (size_t i = 0; i < parts[4].size();) {
+        size_t end = parts[4].find(',', i);
+        if (end == std::string::npos) end = parts[4].size();
+        const unsigned long id = std::strtoul(parts[4].substr(i, end - i).c_str(), nullptr, 10);
+        i = end + 1;
+        if (id && !k->achievements().IsUnlocked(uint32_t(id)) &&
+            k->achievements().UnlockAchievement(uint32_t(id)) == rex::system::AchievementUnlockResult::kUnlocked)
+          ++unlocked;
+      }
+    }
+    if (raised) settings_.Save();
+    REXLOG_INFO("BF account: progress from {}: {} totals raised, {} awards unlocked", from, raised, unlocked);
+  }
+  // Recovery code typing: letters and digits, upper case, 20 at most (spaces and dashes left out).
+  void CodeType(char c) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) || name_text_.size() >= size_t(account::kCodeLength)) return;
+    name_text_ += char(std::toupper(static_cast<unsigned char>(c)));
+    name_error_.clear();
+  }
+  void BeginCodeMode(bool on) {
+    code_mode_ = on;
+    name_text_ = on ? std::string() : settings_.Get("player_name", "");
+    name_error_.clear();
+    acct_show_code_ = false;
+    if (on) AccountMessage("", false);
+  }
+  // The name protection box on the name page, `w` wide from `at`; its height.
+  float AccountBox(ImDrawList* d, const Stage& st, ImVec2 at, float w) {
+    const kit::Fonts& f = kit::GetFonts();
+    const float x = at.x;
+    float y = at.y;
+    const bool prot = NameProtected();
+    const bool same = name_text_ == settings_.Get("player_name", "");
+    const char* chip = code_mode_ ? "RECOVERY"
+                       : prot     ? "PROTECTED"
+                       : acct_online_ == 2 && same ? "ANOTHER PLAYER'S"
+                                                   : "NOT PROTECTED";
+    kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "NAME PROTECTION", st(2));
+    const float cw = kit::TextWidth(f.typed, st(13), chip) + st(16);
+    d->AddRectFilled(ImVec2(x + w - cw, y - st(3)), ImVec2(x + w, y + st(17)),
+                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' ? kit::kRed : kit::kInkFaint);
+    d->AddText(f.typed, st(13), ImVec2(x + w - cw + st(8), y), IM_COL32(255, 255, 255, 255), chip);
+    y += st(26);
+    std::string body;
+    if (code_mode_)
+      body = "Type the recovery code of your protected name (20 letters and numbers). Your name and your progress come "
+             "back to this PC.";
+    else if (!AccountOnline())
+      body = "Protecting a name needs the online service.";
+    else if (prot)
+      body = "Only you can use " + settings_.Get("player_name", "") +
+             " online, and your rank and stats are kept on our server. Your recovery code brings them to another PC.";
+    else if (!settings_.Get("account_code", "").empty() && !settings_.Get("account_name", "").empty())
+      body = "Your protected name is " + settings_.Get("account_name", "") + ". Protect this name instead to move it here.";
+    else if (acct_online_ == 2 && same)
+      body = "Another player protected this name: online you play as it with a number. Choose another name.";
+    else
+      body = "Protect your name so nobody else can use it online, and keep your rank and stats on our server. No email "
+             "and no password: you get a recovery code.";
+    y += kit::Wrapped(d, f.ui, st(16), ImVec2(x, y), kit::kInkSoft, body.c_str(), w) + st(6);
+    if (acct_show_code_ && prot && !code_mode_) {
+      const std::string code = "RECOVERY CODE   " + account::FormatCode(settings_.Get("account_code", ""));
+      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(34)), kit::kPaperLight);
+      d->AddText(f.typed, st(20), ImVec2(x + st(10), y + st(7)), kit::kInk, code.c_str());
+      y += st(40);
+    }
+    if (!acct_message_.empty()) {
+      y += kit::Wrapped(d, f.typed, st(13), ImVec2(x, y), acct_message_bad_ ? kit::kRed : kit::kGreenDark,
+                        acct_message_.c_str(), w);
+    }
+    return y - at.y;
   }
 #if defined(BF_DEV_TOOLS)
   // Tests (a background window gets no typing): whether the game window's text input is on (the SDK starts SDL's text
@@ -1015,6 +1279,10 @@
     }
     for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
       const ImWchar ch = io.InputQueueCharacters[i];
+      if (code_mode_) {
+        if (ch < 128) CodeType(char(ch)), name_keys_ = false;
+        continue;
+      }
       if (ch < 128 && NameChar(char(ch)) && int(name_text_.size()) < kNameMax) {
         name_text_ += char(ch);
         name_error_.clear(), name_caps_ = false;
@@ -1022,7 +1290,13 @@
       }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
-    if (ImGui::IsKeyPressed(ImGuiKey_Tab)) NameRandom();
+    if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !code_mode_) NameRandom();
+    // Protect your name: X (F2) protects the saved name or shows its recovery code; LB (F3) types a recovery code.
+    const bool protect_key = ImGui::IsKeyPressed(ImGuiKey_F2, false), code_key = ImGui::IsKeyPressed(ImGuiKey_F3, false);
+    const char* x_label = code_mode_ ? nullptr
+                          : NameProtected() && name_text_ == settings_.Get("player_name", "")
+                              ? (acct_show_code_ ? "Hide code" : "Show code")
+                              : "Protect name";
     std::vector<Cue> prompts;
     if (name_keys_) {
       prompts = {{kit::Button::kA, "Type"}, {kit::Button::kX, "Delete", "Backspace"},
@@ -1038,6 +1312,16 @@
                  {kit::Button::kStart, name_setup_ ? "Save and continue" : "Save", "Enter", true}};
       if (!name_setup_ && !name_required_) prompts.push_back({kit::Button::kB, "Back", "Esc"});
     }
+    if (code_mode_ && !name_keys_) {
+      prompts = {{kit::Button::kStart, "Use code", "Enter", true}, {kit::Button::kB, "Cancel", "Esc"}};
+      if (device_ != Device::kKeyboard) prompts.insert(prompts.begin(), {kit::Button::kA, "Type code", "Enter"});
+    } else if (code_mode_) {
+      prompts[2].label = "Use code";
+    }
+    if (!name_keys_ && x_label && AccountOnline()) {
+      prompts.push_back({kit::Button::kX, x_label, "F2"});
+      if (!NameProtected()) prompts.push_back({kit::Button::kLB, "Recovery code", "F3"});
+    }
     Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
     // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
     // layout gives a controller's A as Enter too, which saved an empty name instead of opening the keys. With the on
@@ -1048,7 +1332,7 @@
                   in.accept ? "A" : in.start ? "Start" : in.back ? "B" : in.x ? "X" : "Y",
                   in.accept && accept_from_key_ ? "keyboard" : device_ == Device::kPad ? "controller" : "keyboard or mouse",
                   name_keys_ ? " (keys open)" : "");
-    const ImVec2 a = st.P(120, 110), b = st.P(820, 560);
+    const ImVec2 a = st.P(120, 96), b = st.P(820, 640);
     {
       kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.5f);
       kit::Paper(d, a, b, st.u, false);
@@ -1057,17 +1341,19 @@
       kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
                   name_setup_ ? "STEP 2 OF 9 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
       y += st(24);
-      kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, "CHOOSE YOUR SOLDIER NAME", st(2), w);
+      kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, code_mode_ ? "USE A RECOVERY CODE" : "CHOOSE YOUR SOLDIER NAME", st(2), w);
       y += st(64);
       y += kit::Wrapped(d, f.ui, st(18), ImVec2(x, y), kit::kInkSoft,
-                        signed_in_once_ && !name_setup_
+                        code_mode_ ? "The code you were given when you protected your name. Spaces and dashes do not "
+                                     "matter."
+                        : signed_in_once_ && !name_setup_
                             ? "This is the name other players see on the scoreboard and in the server list, from your "
                               "next start. If someone on a server already uses it, a number is added for that server."
                             : "This is the name other players see on the scoreboard and in the server list. If someone "
                               "on a server already uses it, a number is added for that server.",
                         w) +
            st(20);
-      kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "SOLDIER NAME", st(2));
+      kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, code_mode_ ? "RECOVERY CODE" : "SOLDIER NAME", st(2));
       y += st(22);
       const ImVec2 n0(x, y), n1(x + w, y + st(58));
       d->AddRectFilled(n0, n1, kit::kPaperLight);
@@ -1077,16 +1363,22 @@
         const float cx = x + st(16) + kit::TextWidth(f.typed, st(30), name_text_);
         d->AddRectFilled(ImVec2(cx, y + st(12)), ImVec2(cx + st(3), y + st(46)), kit::kInk);
       }
-      const std::string count = std::to_string(name_text_.size()) + " / " + std::to_string(kNameMax);
+      const std::string count = std::to_string(name_text_.size()) + " / " +
+                                std::to_string(code_mode_ ? account::kCodeLength : kNameMax);
       d->AddText(f.typed, st(14), ImVec2(x + w - st(14) - kit::TextWidth(f.typed, st(14), count), y + st(22)),
                  kit::kInkFaint, count.c_str());
       y += st(66);
       d->AddText(f.typed, st(14), ImVec2(x, y), name_error_.empty() ? kit::kInkFaint : kit::kRed,
-                 name_error_.empty() ? "3 to 15 letters, numbers or underscores" : name_error_.c_str());
-      y += st(34);
-      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(64)), kit::kPaperDim);
-      d->AddText(f.ui, st(20), ImVec2(x + st(14), y + st(8)), kit::kInk, RankLine().c_str());
-      d->AddText(f.typed, st(14), ImVec2(x + st(14), y + st(38)), kit::kInkFaint, "Your rank grows as you play.");
+                 name_error_.empty() ? (code_mode_ ? "20 letters and numbers" : "3 to 15 letters, numbers or underscores")
+                                     : name_error_.c_str());
+      y += st(30);
+      if (!code_mode_) {
+        d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
+        d->AddText(f.ui, st(20), ImVec2(x + st(14), y + st(5)), kit::kInk, RankLine().c_str());
+        d->AddText(f.typed, st(14), ImVec2(x + st(14), y + st(33)), kit::kInkFaint, "Your rank grows as you play.");
+        y += st(68);
+      }
+      AccountBox(d, st, ImVec2(x, y), w);
     }
     // The on screen keys, QWERTY (TekRantGaming, 8 Nov): the numbers, three rows of letters with the underscore, then
     // Capitals and Done. Ten columns; a key's span is in columns.
@@ -1185,7 +1477,20 @@
         return;
       }
     }
-    if (!name_keys_ && in.y) NameRandom();
+    if (!name_keys_ && in.y && !code_mode_) NameRandom();
+    if ((!name_keys_ && in.x) || protect_key) {
+      if (code_mode_) {
+      } else if (NameProtected() && name_text_ == settings_.Get("player_name", "")) {
+        acct_show_code_ = !acct_show_code_;
+      } else {
+        ProtectName();
+      }
+    }
+    if (((!name_keys_ && in.prev_tab) || code_key) && !code_mode_ && !NameProtected() && AccountOnline()) BeginCodeMode(true);
+    if (in.back && code_mode_ && !name_keys_) {
+      BeginCodeMode(false);
+      return;
+    }
     // Enter with no name yet (too short to save) opens the keys, as A does: Steam's Enter for a controller's A can come
     // just before the A itself, which the merge then drops.
     if (enter && !name_keys_ && name_text_.size() < 3) {
@@ -1599,8 +1904,10 @@
     // Top right: the players and servers online (the backend's list, every 5 s).
     {
       const auto servers = list_.servers();
-      const bool up = list_.reachable();
-      const std::string t = up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
+      const ServerNotice notice = list_.notice();
+      const bool up = list_.reachable() && !notice.active();
+      const std::string t = notice.active() ? "SERVERS CLOSED \xC2\xB7 " + Upper(notice.title)
+                            : up ? fmt::format("{} PLAYERS  /  {} {}", list_.players_online(), servers.size(),
                                              servers.size() == 1 ? "SERVER ONLINE" : "SERVERS ONLINE")
                         : !list_.asked() ? "CONNECTING"
                                : "SERVERS NOT REACHABLE";
@@ -1953,18 +2260,43 @@
     }
     req += "}";
     const double seconds = std::atof(settings_.Get("match_seconds", "0").c_str());
-    std::thread([req, test, name, total, seconds, why] {
+    // A protected name (Protect your name): its totals go signed, with each stat and the awards, to its account too.
+    std::string code, fields;
+    if (!test && NameProtected()) {
+      code = settings_.Get("account_code", "");
+      std::string stats, awards;
+      for (const auto& [key, value] : settings_.values) {
+        if (key.rfind("stat.", 0) != 0 || key.size() > 5 + 48) continue;
+        const std::string label = key.substr(5);
+        if (label.empty() || !std::all_of(label.begin(), label.end(), [](char c) {
+              return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+            }))
+          continue;
+        const size_t comma = value.find(',');
+        const long long n = std::atoll(value.c_str()),
+                        pts = comma == std::string::npos ? 0 : std::llround(std::atof(value.c_str() + comma + 1));
+        stats += fmt::format("{}{}={},{}", stats.empty() ? "" : ";", label, std::max(0LL, n), pts);
+      }
+      if (auto* k = REX_KERNEL_STATE()) {
+        for (const auto& a : k->achievements().ListAchievements())
+          if (k->achievements().IsUnlocked(a.id)) awards += (awards.empty() ? "" : ",") + std::to_string(a.id);
+      }
+      fields = fmt::format("{}|{:.0f}|{:.0f}|{}|{}|{}", settings_.Get("account_name", name), total, seconds, captures,
+                           stats, awards);
+    }
+    std::thread([req, test, name, total, seconds, why, code, fields] {
       static constexpr int kWait[] = {0, 5, 15, 30};
       for (int attempt = 0; attempt < int(std::size(kWait)); ++attempt) {
         if (kWait[attempt]) std::this_thread::sleep_for(std::chrono::seconds(kWait[attempt]));
         std::string reply;
         // A test profile's made-up rank and awards go to a backend on this PC only.
         const bool local = std::string(REXCVAR_GET(bf_backend_registry)).rfind("127.", 0) == 0;
-        const bool answered = (!test || local) && RegistryRequest(req, reply);
+        const bool answered = code.empty() ? (!test || local) && RegistryRequest(req, reply)
+                                           : SignedRegistryRequest(code, "stats_put", fields, reply);
         const bool ok = answered && reply.find("\"ok\": true") != std::string::npos;
         if (ok) {
           REXLOG_INFO("BF leaderboard: stats posted for {} ({}: score {:.0f}, {:.0f} s played{})", name, why, total,
-                      seconds, test ? ", test profile, local backend only" : "");
+                      seconds, test ? ", test profile, local backend only" : code.empty() ? "" : ", signed, to the account");
           return;
         }
         if (answered) {  // the backend refused it: sending the same again will not help
@@ -2225,7 +2557,19 @@
   // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
   // (UPnP) with the port typed when it is not ticked.
   static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmTick = 7,
-                       kPmPass = 8, kPmPassText = 9, kPmRows = 10;
+                       kPmPass = 8, kPmPassText = 9,
+                       // 14 Nov 2026, the match's world ("cloud coverage, rate, weather percentage, day/night
+                       // adjustment and time scale settings and sliders ... in the create match menu"): one row
+                       // that opens its own list in the rail (the rail has no room for six more rows).
+                       kPmWorld = 10, kPmDayNight = 11, kPmTime = 12, kPmDayLen = 13, kPmCloud = 14, kPmRate = 15,
+                       kPmWeather = 16, kPmFog = 17, kPmGroundFog = 18, kPmWind = 19, kPmCloudHeight = 20, kPmWorldBack = 21, kPmRows = 22;
+  bool pm_world_view_ = false;  // the rail shows the world's rows
+  bool pm_dn_ = false;          // day and night
+  float pm_time_ = 16.0f;       // the hour the match starts at
+  static constexpr int kPmDayLens[] = {0, 24, 48, 60, 120, 240};  // minutes a day takes; 0 stands still
+  int pm_daylen_ = 0;
+  int pm_cloud_ = 35, pm_rate_ = 33, pm_weather_ = 0, pm_fog_ = 0, pm_ground_fog_ = 0, pm_wind_ = 30;  // per cent
+  int pm_cloud_height_ = 450;  // the cloud base over the sea, metres
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
@@ -2263,6 +2607,17 @@
     pm_pass_ = settings_.Get("private_match_password", "");
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
+    pm_dn_ = settings_.Get("private_match_day_night", "0") == "1";
+    pm_time_ = std::clamp(float(std::atof(settings_.Get("private_match_time", "16").c_str())), 0.0f, 23.5f);
+    pm_daylen_ = std::atoi(settings_.Get("private_match_day_minutes", "0").c_str());
+    if (std::find(std::begin(kPmDayLens), std::end(kPmDayLens), pm_daylen_) == std::end(kPmDayLens)) pm_daylen_ = 0;
+    pm_cloud_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_cover", "35").c_str()), 0, 100);
+    pm_rate_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_rate", "33").c_str()), 0, 100);
+    pm_weather_ = std::clamp(std::atoi(settings_.Get("private_match_weather", "0").c_str()), 0, 100);
+    pm_fog_ = std::clamp(std::atoi(settings_.Get("private_match_fog", "0").c_str()), 0, 100);
+    pm_ground_fog_ = std::clamp(std::atoi(settings_.Get("private_match_ground_fog", "0").c_str()), 0, 100);
+    pm_wind_ = std::clamp(std::atoi(settings_.Get("private_match_wind", "30").c_str()), 0, 100);
+    pm_cloud_height_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_height", "450").c_str()), 200, 1500);
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2274,6 +2629,16 @@
     settings_.values["private_match_tick"] = std::to_string(pm_tick_);
     settings_.values["private_match_password_on"] = pm_pass_on_ ? "1" : "0";
     settings_.values["private_match_password"] = pm_pass_;
+    settings_.values["private_match_day_night"] = pm_dn_ ? "1" : "0";
+    settings_.values["private_match_time"] = fmt::format("{:.2f}", pm_time_);
+    settings_.values["private_match_day_minutes"] = std::to_string(pm_daylen_);
+    settings_.values["private_match_cloud_cover"] = std::to_string(pm_cloud_);
+    settings_.values["private_match_cloud_rate"] = std::to_string(pm_rate_);
+    settings_.values["private_match_weather"] = std::to_string(pm_weather_);
+    settings_.values["private_match_fog"] = std::to_string(pm_fog_);
+    settings_.values["private_match_ground_fog"] = std::to_string(pm_ground_fog_);
+    settings_.values["private_match_wind"] = std::to_string(pm_wind_);
+    settings_.values["private_match_cloud_height"] = std::to_string(pm_cloud_height_);
     settings_.Save();
   }
 
@@ -2306,6 +2671,10 @@
     }
     o.password = pm_pass_on_ ? pm_pass_ : std::string();
     o.tick = pm_tick_;
+    o.day_night = pm_dn_, o.time = pm_time_, o.day_minutes = pm_daylen_;
+    o.cloud_cover = pm_cloud_ / 100.0f, o.cloud_rate = pm_rate_ / 100.0f, o.weather = pm_weather_ / 100.0f;
+    o.fog = pm_fog_ / 100.0f, o.ground_fog = pm_ground_fog_ / 100.0f, o.wind = pm_wind_ / 100.0f;
+    o.cloud_height = float(pm_cloud_height_);
     // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
     // another, this run cannot change: the server would start, and the host's join would have to start the game again,
     // which ends the server with it (the review of pull request 16). Said instead.
@@ -2440,15 +2809,19 @@
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
     std::vector<int> order = {kPmName, kPmPass};
     if (pm_pass_on_) order.push_back(kPmPassText);
-    order.insert(order.end(), {kPmMap, kPmTick, kPmNet});
+    order.insert(order.end(), {kPmMap, kPmTick, kPmWorld, kPmNet});
     if (!pm_lan_) order.push_back(kPmListed);
     if (!pm_lan_) order.push_back(kPmUpnp);
     order.insert(order.end(), {kPmPort, kPmHost});
+    if (pm_world_view_) order = {kPmDayNight, kPmTime, kPmDayLen, kPmCloud, kPmRate, kPmWeather, kPmFog, kPmGroundFog, kPmWind, kPmCloudHeight, kPmWorldBack};
     {
       int at = 0;
       for (int k = 0; k < int(order.size()); ++k)
         if (order[size_t(k)] == pm_row_) at = k;
-      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 3;  // UPnP went with LAN
+      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) {
+        if (pm_world_view_) pm_row_ = kPmDayNight, at = 0;
+        else pm_row_ = kPmNet, at = int(std::find(order.begin(), order.end(), kPmNet) - order.begin());  // UPnP went with LAN
+      }
       const int n = int(order.size());
       if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
       if (in.down) pm_row_ = order[size_t((at + 1) % n)];
@@ -2481,6 +2854,24 @@
       if (row == kPmPass) pm_pass_on_ = !pm_pass_on_;
       if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
       if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
+      if (row == kPmWorld) pm_world_view_ = true, pm_row_ = kPmDayNight;
+      if (row == kPmWorldBack) pm_world_view_ = false, pm_row_ = kPmWorld;
+      if (row == kPmDayNight) pm_dn_ = !pm_dn_;
+      if (row == kPmTime) pm_time_ = std::fmod(pm_time_ + 24.0f + 0.5f * step, 24.0f);
+      if (row == kPmDayLen) {
+        const int n = int(std::size(kPmDayLens));
+        int at = 0;
+        for (int k = 0; k < n; ++k)
+          if (kPmDayLens[k] == pm_daylen_) at = k;
+        pm_daylen_ = kPmDayLens[(at + n + step) % n];
+      }
+      if (row == kPmCloud) pm_cloud_ = std::clamp(pm_cloud_ + 5 * step, 0, 100);
+      if (row == kPmRate) pm_rate_ = std::clamp(pm_rate_ <= 5 && step < 0 ? pm_rate_ - 1 : pm_rate_ < 5 ? pm_rate_ + 1 : pm_rate_ + 5 * step, 0, 100);
+      if (row == kPmWeather) pm_weather_ = std::clamp(pm_weather_ + 5 * step, 0, 100);
+      if (row == kPmFog) pm_fog_ = std::clamp(pm_fog_ + 5 * step, 0, 100);
+      if (row == kPmGroundFog) pm_ground_fog_ = std::clamp(pm_ground_fog_ + 5 * step, 0, 100);
+      if (row == kPmWind) pm_wind_ = std::clamp(pm_wind_ + 5 * step, 0, 100);
+      if (row == kPmCloudHeight) pm_cloud_height_ = std::clamp(pm_cloud_height_ + 50 * step, 200, 1500);
       SavePrivateMatchChoices();
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
@@ -2488,7 +2879,10 @@
     // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
     static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
                                               "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE",
-                                              "PASSWORD", "PASSWORD"};
+                                              "PASSWORD", "PASSWORD", "WEATHER AND TIME", "DAY AND NIGHT",
+                                              "TIME OF DAY", "A DAY LASTS", "CLOUD COVER", "CLOUD CHANGE RATE",
+                                              "WEATHER", "DISTANCE FOG", "GROUND FOG", "WIND", "CLOUD HEIGHT",
+                                              "BACK TO THE MATCH"};
     int clicked = -1;
     float y = rows_y;
     int number = 0;
@@ -2561,6 +2955,36 @@
       } else if (i == kPmTick) {
         value_text(std::to_string(pm_tick_) + (pm_tick_ == 60 ? "Hz - Default" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Experimental"),
                    true, false);
+      } else if (i == kPmWorld) {
+        value_text(!pm_dn_ && pm_weather_ == 0 ? std::string("AFTERNOON, FAIR")
+                                               : fmt::format("{}{}", pm_dn_ ? fmt::format("{:02d}:{:02d}", int(pm_time_), int(pm_time_ * 60) % 60)
+                                                                            : std::string("AFTERNOON"),
+                                                             pm_weather_ > 0 ? fmt::format(", WEATHER {}%", pm_weather_) : std::string()),
+                   false, false);
+      } else if (i == kPmDayNight) {
+        draw_switch(pm_dn_);
+      } else if (i == kPmTime) {
+        value_text(fmt::format("{:02d}:{:02d}", int(pm_time_), int(pm_time_ * 60) % 60), true, !pm_dn_);
+      } else if (i == kPmDayLen) {
+        value_text(pm_daylen_ == 0 ? std::string("TIME STANDS STILL")
+                                   : pm_daylen_ % 60 == 0 ? fmt::format("{} H", pm_daylen_ / 60) : fmt::format("{} MIN", pm_daylen_),
+                   true, !pm_dn_);
+      } else if (i == kPmCloud) {
+        value_text(fmt::format("{}%", pm_cloud_), true, false);
+      } else if (i == kPmRate) {
+        value_text(fmt::format("{}%", pm_rate_), true, false);
+      } else if (i == kPmWeather) {
+        value_text(pm_weather_ == 0 ? std::string("FAIR") : fmt::format("{}%", pm_weather_), true, false);
+      } else if (i == kPmFog) {
+        value_text(pm_fog_ == 0 ? std::string("NONE") : fmt::format("{}%", pm_fog_), true, false);
+      } else if (i == kPmGroundFog) {
+        value_text(pm_ground_fog_ == 0 ? std::string("NONE") : fmt::format("{}%", pm_ground_fog_), true, false);
+      } else if (i == kPmWind) {
+        value_text(pm_wind_ == 0 ? std::string("CALM") : fmt::format("{}%", pm_wind_), true, false);
+      } else if (i == kPmCloudHeight) {
+        value_text(fmt::format("{} M", pm_cloud_height_), true, false);
+      } else if (i == kPmWorldBack) {
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
       } else if (i == kPmListed) {
@@ -2610,7 +3034,7 @@
     // ---- the band: the chosen row's help, the green button
     {
       static constexpr const char* kAbout[] = {
-          "The map your match plays. All four in turn: the next map after each round, as on the official servers.",
+          "The map your match plays. All four in turn: the next map after each round, as on the Reborn servers.",
           "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
           "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
           "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "
@@ -2628,7 +3052,24 @@
           "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
           "Off, anybody who sees the match can join.",
           "The password players type to join: up to 24 letters, digits or signs, no spaces. Give it to your friends "
-          "yourself."};
+          "yourself.",
+          "The match's time of day, clouds and weather: every player sees the same. You can change them while the "
+          "match runs, with the admin panel (F9).",
+          "On, the match has a clock: the light, the shadows and the sky follow the time of day, with dusk and "
+          "night. Off, it is the game's own afternoon.",
+          "The hour the match starts at: 12 is noon, 18 sunset, 0 midnight. Needs Day and night.",
+          "How long a whole day and night take in the match, or the time stands still at the hour above. Needs Day "
+          "and night.",
+          "How much of the sky the clouds take, for players who chose the volumetric sky.",
+          "How fast the clouds form and dissolve. Lower is calmer and closer to real weather.",
+          "From fair to a storm: more and denser cloud, a greyer sky and less sun; from about half, mist and far "
+          "rain shafts; a little higher, rain; from about two thirds, lightning in the clouds.",
+          "A haze that hides what is far: at 100% the sight is about a kilometre.",
+          "A low layer of fog over the sea and the shore, in patches that drift.",
+          "From calm to a gale: the stronger the wind, the further the rain leans.",
+          "How high over the sea the clouds begin, for players who chose the volumetric sky. Low, the planes fly "
+          "through them and can hide in them.",
+          "Back to the match's other settings."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
                     kPmMapNames[pm_map_]);
@@ -2644,7 +3085,10 @@
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+    if (in.back) {
+      if (pm_world_view_) pm_world_view_ = false, pm_row_ = kPmWorld;  // the world's rows: back to the match's
+      else BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+    }
   }
 
   // While our server starts: its steps in the rail (ra..rb under the heading), the wait on the band (band..hb), then
@@ -2870,6 +3314,7 @@
       joining_ = "The game's tutorial", joining_map_ = "Wake Island";
       joined_gid_.clear();
       comms::NoteJoined("");
+      world::NoteJoined("");
       SetJoinedServerNight(false);
       failed_ = false, joined_from_start_ = true;
       page_ = Page::kJoining;
@@ -2887,6 +3332,7 @@
     joining_map_ = "Wake Island";
     joined_gid_.clear();
     comms::NoteJoined("");  // no server: no voice or text chat in the tutorial
+    world::NoteJoined("");
     SetJoinedServerNight(false);  // nor a Night Ops server's night
     failed_ = false;
     joined_from_start_ = false;
@@ -3545,7 +3991,7 @@
     }
     if (version.empty() || !update::IsNewerVersion(version, BfVersion()) || version == new_version_shown_) return;
     if ((page_ != Page::kHome && page_ != Page::kMain) || quit_popup_ || update_popup_ || steam_ask_ || steam_job_ ||
-        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_)
+        whats_new_open_ || exp_popup_ || tick_popup_ || pw_popup_ || own_popup_ || new_version_popup_ || notice_popup_)
       return;
     new_version_popup_ = true, new_version_shown_ = version, popup_row_ = 1;  // Update
     REXLOG_INFO("BF update: version {} found (this is {}): the new version pop-up", version, BfVersion());
@@ -3671,7 +4117,8 @@
   // notes since that version, the build counted as the changelog's newest one (a developer build's own version has
   // no notes).
   void WhatsNewTick() {
-    if (!whats_new_pending_ || whats_new_open_ || update_popup_ || quit_popup_ || steam_ask_ || steam_job_) return;
+    if (!whats_new_pending_ || whats_new_open_ || update_popup_ || quit_popup_ || steam_ask_ || steam_job_ || notice_popup_)
+      return;
     std::string current = BfVersion();
 #if defined(BF_DEV_TOOLS)
     const char* dev = std::getenv("BF_DEV_WHATS_NEW");
@@ -3842,6 +4289,54 @@
     const auto state = update::State(update::Get().state.load());
     if (state == update::State::kNone || state == update::State::kFailed) CheckForUpdate("Update now on the pop-up");
     page_ = Page::kUpdate;
+  }
+  // ---- The backend's words for a player it does not let in (server_list.h ServerNotice; TekRantGaming, 15 Nov 2026:
+  // maintenance periods players learn about in the game, not only on Discord): maintenance mode's notice, a full
+  // server, any refusal of a join with a message. Over the page that asked to join, one OK.
+  bool notice_popup_ = false;
+  ServerNotice notice_shown_;
+  void ShowNotice(const ServerNotice& n, const std::string& asked) {
+    notice_popup_ = true, notice_shown_ = n, popup_row_ = 0;
+    if (notice_shown_.title.empty()) notice_shown_.title = n.kind == "full" ? "SERVER FULL" : "COULD NOT JOIN";
+    REXLOG_INFO("BF join: {} refused by the backend ({}): {}: {}", asked.empty() ? "the join" : asked,
+                n.kind.empty() ? "maintenance" : n.kind, notice_shown_.title, n.text);
+  }
+  void NoticePopup(ImDrawList* d, ImGuiIO& io, Input in) {
+    const Stage st = StageOf(io);
+    const kit::Fonts& f = kit::GetFonts();
+    d->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(10, 12, 8, 190));
+    const bool full = notice_shown_.kind == "full";
+    const std::string eyebrow = full ? "THE SERVER LIST \xC2\xB7 COULD NOT JOIN" : "THE SERVER LIST \xC2\xB7 SERVERS CLOSED";
+    const std::string foot = full ? "" : "New joins are closed for now. Players already in a match play on.";
+    const float w = st(560);
+    const float text_h = kit::WrappedHeight(f.ui, st(18), notice_shown_.text, w);
+    const float foot_h = foot.empty() ? 0 : kit::WrappedHeight(f.ui, st(14), foot, w) + st(12);
+    const float h = st(26) + st(22) + st(48) + text_h + st(16) + foot_h + st(70) + st(20);
+    const float top = std::max(st.P(0, 120).y, st.P(0, 360).y - h * 0.5f);
+    const ImVec2 a(st.P(330, 0).x, top), b(st.P(950, 0).x, top + h);
+    {
+      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.3f);
+      kit::Paper(d, a, b, st.u);
+      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y), st(110), st(26), -3);
+      float y = a.y + st(26);
+      kit::Spaced(d, f.typed, st(11), ImVec2(a.x + st(32), y), kit::kStamp, eyebrow, st(1.5f));
+      y += st(22);
+      kit::Heading(d, st(36), ImVec2(a.x + st(30), y), kit::kInk, Upper(notice_shown_.title), st(1.5f), w);
+      y += st(48);
+      kit::Wrapped(d, f.ui, st(18), ImVec2(a.x + st(30), y), kit::kInkSoft, notice_shown_.text, w);
+      y += text_h + st(16);
+      if (!foot.empty()) kit::Wrapped(d, f.ui, st(14), ImVec2(a.x + st(30), y), kit::kInkFaint, foot, w);
+    }
+    const ImVec2 c0(a.x + st(30), b.y - st(70)), c1(a.x + st(230), b.y - st(26));
+    const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+    d->AddRectFilled(ImVec2(c0.x, c0.y + st(4)), ImVec2(c1.x, c1.y + st(4)), kit::kGreenShadow);
+    d->AddRectFilled(c0, c1, kit::kGreen);
+    const float tw = kit::TextWidth(f.ui_bold, st(20), "OK");
+    d->AddText(f.ui_bold, st(20), ImVec2((c0.x + c1.x - tw) * 0.5f, c0.y + st(8)), IM_COL32(255, 255, 255, 255), "OK");
+    if (in.accept || in.back || (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left))) {
+      notice_popup_ = false;
+      REXLOG_INFO("BF join: the backend's notice closed");
+    }
   }
   void UpdatePage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("update");

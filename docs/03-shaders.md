@@ -81,6 +81,10 @@ translations and pipelines all kept) and copied to `bf/data/shaders`.
 - 8 Nov (0.1.11 to 0.1.14): 91 pipelines and 13 translations added (1,943 pipelines, 1,042 translations).
 - 11 Nov (0.1.33 and 0.2.0, 49 files, all four maps): 193 pipelines and 46 translations added (2,136 pipelines,
   1,088 translations); the shader list itself unchanged (1,089 shaders, every one found in the game files).
+- 15 Nov (0.4.6.4 and 0.4.6.3, 845 files, all four maps, plus every test run here): 653 pipelines and 41
+  translations added (3,015 pipelines, 1,157 translations, 1,117 shaders, all in the game files); 170 pipelines and
+  100 translations from the uploads left out, their shaders never recorded here. Run list15a: all 2,839 that a start
+  makes compiled in 1.5 s, no errors.
 
 ## Next
 - More coverage: every map, vehicles, weapons, effects, menus; a Vulkan recording (Linux uses Vulkan).

@@ -1,0 +1,33 @@
+# Battlefield 1943 Reborn servers on a Linux VPS, headless: the server manager and its servers, started at boot and
+# again if anything stops. Edit the three paths if yours differ (the package folder, its data folder, the user), then:
+#   cp bf1943-reborn-server.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now bf1943-reborn-server
+# Status: systemctl status bf1943-reborn-server; the servers: <package>/bf1943-server status (as the same user, with
+# BF_SERVER_DATA set as below). Logs: <data>/logs (each server's game.out holds a crash's stack).
+[Unit]
+Description=Battlefield 1943 Reborn servers
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bf1943
+Group=bf1943
+WorkingDirectory=/opt/bf1943/BF1943-Reborn-Server-@VERSION@-linux
+Environment=BF_SERVER_DATA=/opt/bf1943/data
+ExecStart=/opt/bf1943/BF1943-Reborn-Server-@VERSION@-linux/bf1943-server run --no-browser
+ExecStop=/opt/bf1943/BF1943-Reborn-Server-@VERSION@-linux/bf1943-server quit
+# Back after any exit (a stop through systemctl stays stopped); the manager itself restarts a crashed server in 2 s.
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+LimitNOFILE=65536
+# A crash's whole core for systemd-coredump (the game maps its console memory: set ProcessSizeMax in
+# /etc/systemd/coredump.conf.d/ high enough, 24G, or the core is cut short and holds no stack).
+LimitCORE=infinity
+# The servers before other work for the CPU, and the last the kernel would end when memory runs out.
+Nice=-10
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

@@ -125,6 +125,51 @@ loc_8275B724:
   return;
 }
 
+// sub_821DBC68(r3, buckets, count): empties a hash table's buckets: for each bucket, every node of its chain (next at
+// +36) freed (sub_82624D90), with the node's own buffer, then the bucket set to 0. sub_821E08D0(table) clears a table
+// that way (buckets at +36, count at +40) and then frees the bucket array when there is more than one. Official servers
+// crashed there four times, 13 to 15 Nov 2026 (0.4.0 server 6, 0.4.1 servers 10 and 13, then 0.4.6 All Maps 4 mid
+// match on Iwo Jima, every player dropped): the table's bucket pointer was 1 with buckets counted, so the clear read
+// guest 0x1 (the null page guard gave zeros) and then wrote there ("Unhandled guest access violation: write of guest
+// 0x00000001", frames sub_821DBC68, sub_821E08D0, sub_823F0F30, sub_82410950, ... in the server's tick). What left the
+// table that way is not known. A bucket pointer in the guest's first 64 KB (never a heap address) is a table with
+// nothing to clear: sub_821DBC68 returns at once, and sub_821E08D0 empties it (no buckets, nothing to free) before
+// its own code runs. Logged, the first 10 times.
+namespace {
+std::atomic<uint32_t> g_bad_tables{0};
+bool BadBuckets(uint32_t buckets, uint32_t count) { return count != 0 && buckets < 0x10000; }
+void NoteBadTable(const char* where, uint32_t table, uint32_t buckets, uint32_t count) {
+  const uint32_t n = ++g_bad_tables;
+  if (n <= 10)
+    REXLOG_WARN("BF game fix: a hash table with its bucket pointer at {:08X} and {} buckets in {} (table {:08X}): "
+                "treated as empty instead of a crash (time {})",
+                buckets, count, where, table, n);
+}
+}  // namespace
+
+REX_EXTERN(__imp__sub_821DBC68);
+REX_HOOK_RAW(sub_821DBC68) {
+  if (BadBuckets(ctx.r4.u32, ctx.r5.u32)) {
+    NoteBadTable("sub_821DBC68", ctx.r3.u32, ctx.r4.u32, ctx.r5.u32);
+    return;
+  }
+  __imp__sub_821DBC68(ctx, base);
+}
+
+REX_EXTERN(__imp__sub_821E08D0);
+REX_HOOK_RAW(sub_821E08D0) {
+  const uint32_t table = ctx.r3.u32;
+  if (table >= 0x10000) {
+    const uint32_t buckets = REX_LOAD_U32(table + 36), count = REX_LOAD_U32(table + 40);
+    if (BadBuckets(buckets, count)) {
+      NoteBadTable("sub_821E08D0", table, buckets, count);
+      REX_STORE_U32(table + 36, 0);
+      REX_STORE_U32(table + 40, 0);
+    }
+  }
+  __imp__sub_821E08D0(ctx, base);
+}
+
 namespace bf1943 {
 
 #if defined(BF_DEV_TOOLS)
@@ -132,7 +177,26 @@ namespace bf1943 {
 // slots, the middle one empty, built on the free part of that thread's guest stack (below its frames). The first
 // and last are objects whose type is not in the (empty) filter, so no method runs. Without the guard the empty slot
 // faults at guest 0x8. The registers are put back after.
+// BF_DEV_BADCALL_TEST=1: once, on the server's thread, a call through a broken function pointer (the stack address
+// of the 15 Nov All Maps 3 stop). With guest_invalid_call_skip (on for dedicated servers, bf1943_app.h) it is skipped
+// and logged; without, the program stops. The registers are put back after.
+void RunBadCallTest(PPCContext& ctx, uint8_t* base) {
+  static bool done = false;
+  const char* v = std::getenv("BF_DEV_BADCALL_TEST");
+  if (done || !v || *v != '1') return;
+  done = true;
+  PPCContext saved;
+  std::memcpy(&saved, &ctx, sizeof(ctx));
+  ctx.last_indirect_target = 0x7018E740;
+  ctx.lr = 0x82000000;
+  ctx.r3.u64 = 0x1234;
+  rex::runtime::ResolveIndirectFunction(0x7018E740)(ctx, base);
+  REXLOG_INFO("BF game fix test: the call through a broken pointer came back (r3 {:#x}); the server goes on", ctx.r3.u32);
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+}
+
 void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
+  RunBadCallTest(ctx, base);
   static bool done = false;
   const char* v = std::getenv("BF_DEV_FIX_TEST");
   if (done || !v || *v != '1') return;
@@ -156,6 +220,20 @@ void RunGameFixTest(PPCContext& ctx, uint8_t* base) {
   sub_8275B690(ctx, base);
   REXLOG_INFO("BF game fix test: a list with an empty slot queried without a fault ({} empty slot passed over)",
               g_empty_slots.load() - before);
+  // The hash table of the 15 Nov crash: its bucket pointer 1 with 3 buckets counted, and a buffer of its own (+8 to
+  // +16) of one byte, which sub_821E08D0 does not free. Without the guard the clear writes guest 0x1.
+  std::memcpy(&ctx, &saved, sizeof(ctx));
+  for (uint32_t a = area; a < area + 0x200; a += 4) REX_STORE_U32(a, 0);
+  const uint32_t table = area;
+  REX_STORE_U32(table + 36, 1);
+  REX_STORE_U32(table + 40, 3);
+  ctx.r3.u64 = table;
+  ctx.r1.u64 = area - 0x100;
+  const uint32_t bad_before = g_bad_tables.load();
+  sub_821E08D0(ctx, base);
+  REXLOG_INFO("BF game fix test: a hash table with its bucket pointer at 1 cleared without a fault ({} caught; now "
+              "bucket pointer {:08X}, {} buckets)",
+              g_bad_tables.load() - bad_before, REX_LOAD_U32(table + 36), REX_LOAD_U32(table + 40));
   std::memcpy(&ctx, &saved, sizeof(ctx));
 }
 #endif

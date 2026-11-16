@@ -25,10 +25,12 @@ echo "== AppDir ($B)"
 rm -rf "$A"
 mkdir -p "$A/usr/bin" "$A/usr/lib"
 cp "$B/bf1943" "$A/usr/bin/"
-# Anything the build put beside the program (the runtime, the GPU plugin), then the SDK install's own copies,
-# which win (the build refreshes the ones beside the program only when it relinks).
-find "$B" -maxdepth 1 -name '*.so*' -exec cp -a {} "$A/usr/bin/" \;
-for lib in librexruntime.so librexgpu-bfnative.so libTracyClient.so; do
+# The two libraries the game loads: the runtime (linked) and our renderer's GPU plugin (bfnative, the only one a
+# release build opens), the build's own copies beside the program, then the SDK install's, which win (the build
+# refreshes the ones beside the program only when it relinks). Not everything beside the program (15 Nov 2026: a stale
+# librexgpu-xenos.so, a developer build's, rode along) and not libTracyClient.so (nothing links or opens it).
+for lib in librexruntime.so librexgpu-bfnative.so; do
+  [ -e "$B/$lib" ] && cp -aL "$B/$lib" "$A/usr/bin/"
   f="$(find "$SDK" -name "$lib" -print -quit)"
   [ -z "$f" ] || cp -aL "$f" "$A/usr/bin/"
 done
@@ -38,7 +40,11 @@ for d in data fonts glyphs; do cp -a "$B/$d" "$A/usr/bin/"; done
 printf '# Battlefield 1943 Reborn: runtime settings. Your own settings are in user/bf1943-settings.txt beside the AppImage.\nbf_online_host = "%s"\n' \
   "$ONLINE_HOST" > "$A/usr/bin/bf1943.toml"
 # The C++ runtime from GCC 13 (GLIBCXX_3.4.32), for systems with an older one; AppRun uses it only then.
-for lib in libstdc++.so.6 libgcc_s.so.1; do cp -L "$(g++ -print-file-name=$lib)" "$A/usr/lib/"; done
+# BF_CXX_LIB_DIR: where to take it from (15 Nov 2026: a build made in an Ubuntu 22.04 root takes that root's GCC 13
+# runtime, built for glibc 2.35; the host's own needs the glibc it was built with, 2.38 on Ubuntu 24.04).
+for lib in libstdc++.so.6 libgcc_s.so.1; do
+  if [ -n "${BF_CXX_LIB_DIR:-}" ]; then cp -L "$BF_CXX_LIB_DIR/$lib" "$A/usr/lib/"; else cp -L "$(g++ -print-file-name=$lib)" "$A/usr/lib/"; fi
+done
 cp "$WT/bf/data/linux/bf1943-reborn.png" "$A/bf1943-reborn.png"
 cp "$A/bf1943-reborn.png" "$A/.DirIcon"
 cat > "$A/bf1943-reborn.desktop" <<'EOF'

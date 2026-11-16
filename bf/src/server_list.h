@@ -8,6 +8,12 @@
 // or close"; server/plasma.py VERSION_GATE): list, find and reserve say this game's version and platform. The list's
 // answer names the version players need, if any (required_version), and reserve answers "outdated" in place of
 // "reserved" for a game older than it: the menu then shows its update pop-up (game_menu.cpp Join, AskToUpdate).
+//
+// Maintenance mode (TekRantGaming, 15 Nov 2026; server/plasma.py maintenance_now): this game says "notice": 1, and
+// while the backend's switch is on its list answer carries notice_kind, notice_title, notice_text and notice_seconds
+// (the real servers stay listed), and reserve answers "closed" with a title and a message. Any refusal of reserve with
+// a "message" ("closed", "full", later ones) is shown in the notice pop-up (game_menu.cpp NoticePopup). A notice is kept
+// while the backend cannot be reached (a deploy restarts it), until its end time.
 
 #pragma once
 
@@ -57,7 +63,7 @@ inline std::string ClientFields() {
 #else
   const char* platform = "linux";
 #endif
-  return std::string("\"version\": \"") + BfVersion() + "\", \"platform\": \"" + platform + "\"";
+  return std::string("\"version\": \"") + BfVersion() + "\", \"platform\": \"" + platform + "\", \"notice\": 1";
 }
 
 int TickRate();  // tick_rate.cpp: this game's simulation rate (bf_tick_rate: 30, or 60)
@@ -270,6 +276,12 @@ inline bool RegistryRequest(const std::string& request, std::string& reply, std:
   return ok;
 }
 
+// The backend's notice: maintenance mode's (from the list), or one refusal's (from reserve).
+struct ServerNotice {
+  std::string kind, title, text;
+  bool active() const { return !text.empty(); }
+};
+
 class ServerList {
  public:
   ServerList() {
@@ -343,14 +355,31 @@ class ServerList {
     return reply.find("\"servers\"") != std::string::npos;
   }
 
+  // Maintenance mode's notice (empty: none): the list's last answer's, or the last one known while the backend
+  // cannot be reached, until its end time (or for 10 minutes without one).
+  ServerNotice notice() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!reachable_ && notice_.active() && Now() > notice_until_) notice_ = {};
+    return notice_;
+  }
+
   // kOutdated: the backend's version gate refused this game; `required` (if given) gets the version players need.
-  enum class Reserved { kYes, kNo, kOutdated };
-  Reserved Reserve(const std::string& gid, std::string* required = nullptr) {
+  // kRefused: refused with words for the player (maintenance, a full server): `refusal` (if given) gets them.
+  enum class Reserved { kYes, kNo, kOutdated, kRefused };
+  Reserved Reserve(const std::string& gid, std::string* required = nullptr, ServerNotice* refusal = nullptr) {
     std::string reply;
     if (!RegistryRequest("{\"op\": \"reserve\", \"gid\": \"" + gid + "\", " + ClientFields() + "}", reply)) return Reserved::kNo;
-    if (JsonField(reply, "op") == "outdated") {
+    const std::string op = JsonField(reply, "op");
+    if (op == "outdated") {
       if (required) *required = JsonField(reply, "required");
       return Reserved::kOutdated;
+    }
+    if (op != "reserved" && !JsonField(reply, "message").empty()) {
+      if (refusal) *refusal = {op, JsonField(reply, "title"), JsonField(reply, "message")};
+      if (op == "closed") {  // maintenance went on since the list's last answer: the list says it too, at once
+        RefreshNow();
+      }
+      return Reserved::kRefused;
     }
     return reply.find("reserved") != std::string::npos ? Reserved::kYes : Reserved::kNo;
   }
@@ -393,6 +422,12 @@ class ServerList {
         std::lock_guard<std::mutex> lock(mutex_);
         servers_ = std::move(found);
         if (reachable_) required_version_ = JsonField(reply, "required_version");
+        if (reachable_) {
+          // (The notice's fields come before "servers" in the answer: the first of each name is the notice's.)
+          notice_ = {JsonField(reply, "notice_kind"), JsonField(reply, "notice_title"), JsonField(reply, "notice_text")};
+          const int seconds = std::atoi(JsonField(reply, "notice_seconds").c_str());
+          notice_until_ = Now() + (seconds > 0 ? seconds : 600);
+        }
       }
       for (int i = 0; i < 50 && !stop_ && !refresh_now_.exchange(false); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -479,6 +514,8 @@ class ServerList {
   std::mutex mutex_;
   std::vector<ServerInfo> servers_;
   std::string required_version_;
+  ServerNotice notice_;
+  double notice_until_ = 0;
 };
 
 }  // namespace bf1943

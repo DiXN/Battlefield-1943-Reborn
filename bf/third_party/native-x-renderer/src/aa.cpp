@@ -675,8 +675,10 @@ void Antialiasing::Apply(IDeviceContext* context, ITexture* texture, ITextureVie
 
 int TestTaaShaders();  // taa.cpp
 int TestMotionBlurShaders();  // motion_blur.cpp
+int TestDofShaders();         // dof.cpp
+int TestSkyShaders();         // sky.cpp
 int TestUtilityShaders() {
-  int failed = TestTaaShaders() + TestMotionBlurShaders();
+  int failed = TestTaaShaders() + TestMotionBlurShaders() + TestDofShaders() + TestSkyShaders();
   const std::pair<const char*, const char*> shaders[] = {{"CMAA edges", kCmaaEdgesCS},
                                                          {"CMAA arguments", kCmaaArgsCS},
                                                          {"CMAA candidates", kCmaaProcessCS},

@@ -45,8 +45,20 @@ New-Item -ItemType Directory -Force $out | Out-Null
 # SDK 2.4.0 loader and upscaler, Intel's XeSS (0.4.1, pull request 16: NativeXRenderer D167). Not the Xenos plugin
 # (development only), nor AMD's FidelityFX SDK 1.1.4 library (frame generation's, not offered since 9 Nov 2026 and no
 # longer fetched). The player download also gets data\shaders, our shader list (New-Bin -Shaders).
-$binFiles = @("bf1943.exe", "rexruntime.dll", "rexgpu-bfnative.dll", "nvngx_dlss.dll", "amd_fidelityfx_loader_vk.dll",
-              "amd_fidelityfx_upscaler_vk.dll", "libxess.dll")
+# Since 0.4.7 not the temporal upscalers' libraries (NVIDIA's DLSS, AMD's FSR SDK loader and upscaler, Intel's XeSS,
+# 161 MB): none is offered since 0.4.4 and the game no longer loads them to ask what the GPU runs (D171). The updater
+# removes them from players' folders (bf-retired.txt).
+$binFiles = @("bf1943.exe", "rexruntime.dll", "rexgpu-bfnative.dll")
+# The Visual C++ runtime the three need (15 Nov 2026), from the build machine's Visual Studio redistributable folder,
+# beside them ("app-local", as Microsoft allows for these files): without it a PC that never installed the Visual C++
+# Redistributable could not start the game ("MSVCP140.dll was not found"), and one with an older runtime than our
+# toolset's (14.40 or newer) crashes on a std::mutex (Visual Studio 17.10's changed constructor). The game's folder
+# comes first in Windows' search, so these are the ones used.
+$crtFiles = @("msvcp140.dll", "msvcp140_atomic_wait.dll", "vcruntime140.dll", "vcruntime140_1.dll")
+$crtDir = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT" -Directory -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName "msvcp140.dll") } | Sort-Object { [version]($_.Parent.Parent.Name) } | Select-Object -Last 1
+if (-not $crtDir) { throw "no Visual C++ redistributable folder (VC\Redist\MSVC\<version>\x64\Microsoft.VC143.CRT) on this machine" }
+"Visual C++ runtime from $($crtDir.FullName)"
 
 function Copy-Licences([string]$dest) {
     $l = Join-Path $dest "licences"
@@ -92,6 +104,7 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
     $bin = if ($Flat) { $dest } else { Join-Path $dest "bin" }
     New-Item -ItemType Directory -Force $bin | Out-Null
     foreach ($f in $binFiles) { Copy-Item (Join-Path $build $f) $bin }
+    foreach ($f in $crtFiles) { Copy-Item (Join-Path $crtDir.FullName $f) $bin }
     Copy-Item (Join-Path $build "fonts") (Join-Path $bin "fonts") -Recurse  # our menus' font (Oswald, OFL)
     # Our shader list (data\shaders: where each shader is in the player's game files, and the pipelines' render
     # state; no shader code), read at the first start (bf\src\shader_prep.cpp). Missing from every package up to
@@ -157,7 +170,7 @@ function New-ServerPackage([string]$sname, [bool]$official) {
     Copy-Licences $s
     $sv = Join-Path $s "server"
     New-Item -ItemType Directory -Force (Join-Path $sv "manager_ui") | Out-Null
-    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
+    Copy-Item (Join-Path $root "server\plasma.py"), (Join-Path $root "server\ed25519.py"), (Join-Path $root "server\gmhost.py"), (Join-Path $root "server\manager.py") $sv
     Copy-Item (Join-Path $root "server\manager_ui\index.html") (Join-Path $sv "manager_ui")
     Copy-Item (Join-Path $root "tools\server_package\open_firewall.ps1") $s
     # The package's own Python (tools\server_package\make_python_runtime.py): a host installs nothing. python.org's

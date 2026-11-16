@@ -14,14 +14,18 @@
 // runs the commands (D71): render targets, clears, resolves and presenting here, draws in draw.cpp. With
 // native_x_renderer_thread off, each command runs right away on the game's thread.
 
+#include "GraphicsAccessories.hpp"
 #include "renderer.h"
 
 #include "aa.h"
+#include "cpu_cores.h"
 #include "gtao.h"
 #include "grass.h"
 #include "night.h"
 #include "scope.h"
 #include "ssgi.h"
+#include "dof.h"
+#include "sky.h"
 #include "motion_blur.h"
 #include "upscaler.h"
 #include "fsr.h"
@@ -74,9 +78,20 @@
 
 #include <xxhash.h>
 
+#if defined(_M_X64)
+#include <intrin.h>
+#elif defined(__x86_64__)
+#include <x86intrin.h>
+#endif
+
 REXCVAR_DEFINE_BOOL(native_x_renderer_replay_recorded_targets, false, "NativeXRenderer",
                     "Draws replayed from recorded command buffers render into the targets the recording device had "
                     "bound (D129) instead of the running device's (D131); for diagnosis");
+REXCVAR_DEFINE_BOOL(native_x_renderer_ads_dof, true, "NativeXRenderer",
+                    "Depth of field of the renderer's own while the player aims down the sights (dof.h): what is "
+                    "near, the gun at the eye, is blurred; taken at once");
+REXCVAR_DEFINE_STRING(native_x_renderer_dof_quality, "medium", "NativeXRenderer",
+                      "Depth of field: low, medium or high (12, 24 or 40 taps); taken at once");
 REXCVAR_DEFINE_STRING(native_x_renderer_motion_blur, "off", "NativeXRenderer",
                       "Motion blur of the renderer's own on the main 3D view (motion_blur.h): off, low, medium or high "
                       "(6, 10 or 16 taps); taken at once");
@@ -84,6 +99,62 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_motion_blur_strength, 50.0, "NativeXRend
                       "Motion blur: its strength, 0 to 100 (%): the exposure, of a sixtieth of a second");
 REXCVAR_DEFINE_BOOL(native_x_renderer_motion_blur_objects, true, "NativeXRenderer",
                     "Motion blur: the objects that move on their own (soldiers, vehicles) blur by their own motion too");
+// The sky of its own (sky.h): stage 1 of the day and night work, 14 Nov 2026.
+// "an option in the graphics settings for players to choose if they want the volumetric clouds on, or if they want
+// to use the original sky ... can we have the original sky be affected by the lighting changes for day and night"
+// (14 Nov 2026): the day and night is one setting (the light, the shadows and whichever sky follow the time of day),
+// the sky another (native_x_renderer_sky: the renderer's own with volumetric clouds, or the game's painted one,
+// which is then tinted by the hour).
+REXCVAR_DEFINE_BOOL(native_x_renderer_day_night, false, "NativeXRenderer",
+                    "Day and night: the game's light, its shadows and the sky follow the time of day");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sky, false, "NativeXRenderer",
+                    "The renderer's own sky in place of the game's: time of day, sun, moon, stars and volumetric clouds");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_time_of_day, 16.0, "NativeXRenderer",
+                      "The sky's time of day, 0 to 24 hours (12 noon, 0 midnight)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_day_length, 0.0, "NativeXRenderer",
+                      "Minutes a whole day takes, the time of day running on from its setting; 0: it stands still");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_cloud_cover, 0.35, "NativeXRenderer", "How much of the sky the clouds take, 0 to 1");
+// "We just don't want the clouds accumulating and dissipating at an unrealistic speed" (14 Nov 2026): the rate is a
+// setting, against Beachhead's full cloud generation speed.
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_cloud_rate, 0.33, "NativeXRenderer",
+                      "How fast the volumetric clouds form and change, 0 to 1 (1: Beachhead's full generation speed)");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_weather, 0.0, "NativeXRenderer",
+                      "The weather, 0 fair to 1 heavy overcast: more and denser cloud, a greyer sky, less sun");
+// "let's do the ground fog, distance fog, rain shafts, storm mist, and lightning in clouds" (14 Nov 2026): sky.h's Fog.
+// The rain shafts, the storm's mist and the lightning come with the weather.
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_fog, 0.0, "NativeXRenderer",
+                      "The distance fog, 0 to 1: a haze between the eye and what is far, thinner higher up");
+// "Rain should also tilt/angle when wind is higher % (which should also be part of the weather sliders)" (14 Nov 2026).
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_wind, 0.3, "NativeXRenderer",
+                      "The wind, 0 calm to 1 a gale: how far the rain and the far rain shafts lean");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_cloud_height, 450.0, "NativeXRenderer",
+                      "The clouds' base over the sea, metres (100 to 3000): low enough, the planes fly through them "
+                      "(with native_x_renderer_world_own; a match's server sets its own)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_lightning, true, "NativeXRenderer",
+                    "Lightning: a storm's flashes in the clouds, on the fog and on the ground");
+REXCVAR_DEFINE_BOOL(native_x_renderer_rain_lens, true, "NativeXRenderer",
+                    "Rain on the lens: while you stand in the rain, drops gather on the view and run down it");
+REXCVAR_DEFINE_BOOL(native_x_renderer_wetness, true, "NativeXRenderer",
+                    "Wetness: what you hold gets wet in the rain and in the sea, with beads of water, and dries again");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_ground_fog, 0.0, "NativeXRenderer",
+                      "The ground fog, 0 to 1: a low layer over the sea and the shore in drifting patches");
+REXCVAR_DEFINE_BOOL(native_x_renderer_world_own, false, "NativeXRenderer",
+                    "Developer: the player's own time, weather and fog settings even in a match whose server keeps them");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_sun_azimuth, -1.0, "NativeXRenderer",
+                      "Where the sky's sun stands at noon, degrees around the world's up axis; under 0: from the game's "
+                      "own sun, so that the sky's sun stands where the game's shadows say at their hour");
+REXCVAR_DEFINE_DOUBLE(native_x_renderer_sky_exposure, 3.0, "NativeXRenderer",
+                      "The sky's brightness in the view's own light units");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sky_light, true, "NativeXRenderer",
+                    "With the renderer's own sky, the game's daylight on the ground follows its time of day");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sky_sun_moves, true, "NativeXRenderer",
+                    "With the sky's light on the ground, the light's direction and the game's shadows turn with the "
+                    "sky's sun and moon");
+REXCVAR_DEFINE_INT32(native_x_renderer_sky_debug, 0, "NativeXRenderer",
+                     "Developer: 1 paints the pixels the sky takes in one flat colour; 4 the fog's distances in "
+                     "bands, 5 its heights over the sea");
+REXCVAR_DEFINE_INT32(native_x_renderer_msaa, 1, "NativeXRenderer",
+                     "Multisampling of the game's view (its targets of the output's size): 1 (none), 2 or 4 samples");
 REXCVAR_DEFINE_BOOL(native_x_renderer, false, "NativeXRenderer",
                     "Draw the game with NativeXRenderer instead of the SDK's Xenos emulation (read at startup). Off "
                     "in the library; a game that is ready turns it on in its own configuration (POTCAWE: D56). "
@@ -171,6 +242,13 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_thread, true, "NativeXRenderer",
                     "Run the renderer on a thread of its own (read at startup, D71): the game's render thread only "
                     "captures what each D3D call needs, and the renderer's thread draws, through DiligentCore and the "
                     "driver. Off: all of it on the game's render thread, inside its D3D calls");
+REXCVAR_DEFINE_BOOL(native_x_renderer_record_thread, true, "NativeXRenderer",
+                    "With native_x_renderer_thread: the draws' DiligentCore calls made on a second thread, the "
+                    "recorder's, while the renderer's thread prepares the next draws (read at startup)");
+REXCVAR_DEFINE_INT32(native_x_renderer_record_thread_cores, 4, "NativeXRenderer",
+                     "The recorder's thread (native_x_renderer_record_thread) only with at least this many processor "
+                     "cores (read at startup): on fewer it competes with the game's own threads (Battlefield 1943 "
+                     "Reborn, 15 Nov 2026, two cores at 90 FPS: 1% low 34 FPS with it, 78 without)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_present_with_swaps, false, "NativeXRenderer",
                     "Show each frame when the command processor executes the game's swap for it, as the SDK's "
                     "presenters do, instead of when the game calls Present (read at startup, D86): the game's CPU "
@@ -189,6 +267,10 @@ REXCVAR_DEFINE_DOUBLE(native_x_renderer_upscaler_sharpness, 0.0, "NativeXRendere
 REXCVAR_DEFINE_DOUBLE(native_x_renderer_resolution_scale, 0.0, "NativeXRenderer",
                       "Render scale, host pixels per guest pixel (read at startup). 0: from the screen, the largest "
                       "at which the game's image fits the monitor or the window (at least 1)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_check_temporal, true, "NativeXRenderer",
+                    "At the start, ask AMD's FSR and Intel's XeSS libraries whether this GPU runs them, for a menu's "
+                    "temporal upscaler choices (TemporalSupport). Off: neither library is loaded, and none is "
+                    "reported (a game that offers no temporal upscaler: D171)");
 REXCVAR_DEFINE_BOOL(native_x_renderer_check_nis, false, "NativeXRenderer",
                     "Ask the GPU at startup whether NVIDIA Image Scaling runs on it when another scaling is chosen "
                     "(D158): the answer for the game's menus (NisSupport), which offer NIS only where it runs");
@@ -316,6 +398,17 @@ void ReportNightModelDraw(uint32_t index_count, const Mat4d& m) {
 }
 std::vector<NightLight> g_night_frame_lights;
 std::vector<NightSprite> g_night_frame_sprites;
+// D175: the night's lights at the sky's day and night (16 Nov 2026, TekRantGaming: the night maps gone, the day and night
+// cycle of pull request 32 in their place, the lights kept). How dark the cycle's hour is for them: 0 by day, rising as
+// the sun nears the horizon, 1 once it is 6 degrees down (set with the outdoor light, read on every draw: no lock).
+std::atomic<float> g_cycle_dark{0.0f};
+// The night's lights' strength: 1 with the old night look (native_x_renderer_night, D162), else the cycle's darkness.
+float NightLightsAmount() {
+  if (REXCVAR_GET(native_x_renderer_night)) return 1.0f;
+  return g_cycle_dark.load(std::memory_order_relaxed);
+}
+// The night pass runs (its depths, the effects' layer, the lamps' camera): the old night look, or the cycle's dark.
+bool NightPassOn() { return NightLightsAmount() > 0.01f; }
 bool NightLightsWanted();
 bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings& s);
 void BuildNightSky(NightFrame& f, float to_u, float to_v);
@@ -346,6 +439,38 @@ bool g_scene_antialiased = false;  // this frame's scene copy antialiased alread
 Upscaler g_upscaler;   // NVIDIA DLSS (Phase 5, D46)
 // Motion blur (motion_blur.h, 0.4.2): made at its first use; the view's camera vote kept for it (the ambient
 // occlusion or the upscaler takes it first), and the time of its last frame.
+DepthOfField g_dof;
+int g_dof_state = 0;  // 0 not made, 1 made, -1 could not be
+// The sky of its own (sky.h): made at its first use; the moment its time began to run.
+Sky g_own_sky;
+int g_sky_state = 0;  // 0 not made, 1 made, -1 could not be
+std::chrono::steady_clock::time_point g_sky_start{};
+bool SkyLoaded() {
+  if (g_sky_state < 0 || !g_device) return false;
+  if (g_sky_state == 0) {
+    g_sky_state = g_own_sky.Load(g_device->device()) ? 1 : -1;
+    g_sky_start = std::chrono::steady_clock::now();
+  }
+  return g_sky_state == 1;
+}
+bool SkyOn() { return REXCVAR_GET(native_x_renderer_sky) && SkyLoaded(); }
+// The fog (sky.h's Fog), with either sky: whether the world now has any (ExecuteDraw keeps it), the camera and the
+// settings of this frame's view kept from the end of its opaque draws, and the game's sky dome seen being drawn
+// (the fog is laid right after it: the game's water is drawn by then, its smoke and fire are not yet).
+bool g_fog_wanted = false;
+Sky::Inputs g_fog_in;
+bool g_fog_ready = false, g_fog_dome = false;
+bool g_lens_due = false;
+// A view that shows no terrain (the camera looks up: "Sky box does this when the camera looks up to the sky ... it
+// glitches out", 14 Nov 2026: the game's own sky is not drawn with the renderer's on, and without the terrain's
+// camera the renderer's was not either, so the sky was the bare background). The sky is then drawn late, once the
+// game's sky dome's draws have come by: the view's direction from the dome's matrix, the rest (the eye's place, the
+// view's size) as the last view with terrain had it.
+Sky::Inputs g_last_sky_in;
+bool g_last_sky_valid = false, g_sky_late = false;
+void ApplyLateSky();  // the fog ran in this frame's view: the rain on the lens may follow once
+bool FogOn() { return g_fog_wanted && SkyLoaded(); }
+void ApplyFog();
 MotionBlur g_motion_blur;
 int g_motion_blur_state = 0;  // 0 not made, 1 made, -1 could not be
 Mat4d g_blur_vote;
@@ -406,6 +531,9 @@ RenderScale g_shadow_scale;
 bool g_shadow_scaled = false;
 bool g_scene_view = false;
 std::array<float, 16> g_scene_view_projection{};
+bool g_msaa_trace = false;  // one frame's copies and draws logged (now and then)
+uint32_t g_msaa_trace_ms = 0, g_msaa_trace_single = 0;  // draws' views since the last logged copy
+uint64_t g_msaa_downs = 0, g_msaa_ups = 0;  // host MSAA: the copies between a target's twin and its one-sample texture
 HostTarget* g_scene_color = nullptr;
 HostTarget* g_scene_depth = nullptr;
 GuestSurface g_scene_color_surface;
@@ -413,6 +541,110 @@ GuestSurface g_scene_color_surface;
 std::vector<std::pair<GuestSurface, HostTarget*>> g_reduced_used;
 std::filesystem::path g_cache_root;  // the runtime's cache directory (D42)
 std::unique_ptr<DrawPath> g_draw;  // created on the first draw (it needs the tracker's register file)
+// Where the sky's sun stands at noon, degrees around the world's up axis: the setting, or under 0 from the game's own
+// sun (the direction its shaders get, DrawPath::GameLightDir): the afternoon hour at which the sky's sun is as high
+// as the game's (Wake Island's is 35 degrees up: 16:00), and the azimuth that puts it there at that hour, so that
+// at that hour the sky, the light and the game's own shadows agree.
+float SkyNoonAzimuth() {
+  const float set = float(REXCVAR_GET(native_x_renderer_sun_azimuth));
+  if (set >= 0.0f) return set;
+  float dir[3];
+  if (g_draw && g_draw->GameLightDir(dir)) {
+    const double len = std::sqrt(double(dir[0]) * dir[0] + double(dir[1]) * dir[1] + double(dir[2]) * dir[2]);
+    if (len > 1e-3 && dir[1] > 0.0f) {
+      const double pi = 3.14159265358979;
+      const double up = std::min(std::asin(dir[1] / len) * 180.0 / pi, 70.0);
+      const double hour = 6.0 + 12.0 * (1.0 - std::asin(up / 70.0) / pi);
+      const double az = std::atan2(double(dir[0]), double(dir[2])) * 180.0 / pi + 15.0 * (hour - 12.0);
+      static bool said = false;
+      if (!said) {
+        said = true;
+        REXLOG_INFO("[native_x_renderer] sky: the game's sun is {:.1f} degrees up: the sky's hour for it {:.2f}, its "
+                    "noon azimuth {:.1f}", up, hour, std::fmod(az + 720.0, 360.0));
+      }
+      return float(std::fmod(az + 720.0, 360.0));
+    }
+  }
+  return 135.0f;
+}
+// The game's own hour: where its sun stands (16:00 until that is known).
+double SkyGameHour() {
+  float dir[3];
+  if (g_draw && g_draw->GameLightDir(dir)) {
+    const double len = std::sqrt(double(dir[0]) * dir[0] + double(dir[1]) * dir[1] + double(dir[2]) * dir[2]);
+    if (len > 1e-3 && dir[1] > 0.0f) {
+      const double pi = 3.14159265358979;
+      return 6.0 + 12.0 * (1.0 - std::asin(std::min(std::asin(dir[1] / len) * 180.0 / pi, 70.0) / 70.0) / pi);
+    }
+  }
+  return 16.0;
+}
+// The world now (the public WorldState with its clocks run on to this moment): a match's server's (SetWorldState),
+// or the player's own settings. Without the day and night the hour is the game's own, so that a sky of the
+// renderer's own agrees with the game's light.
+std::mutex g_world_mutex;
+WorldState g_world_set;
+std::chrono::steady_clock::time_point g_world_set_at{};
+WorldState World() {
+  static const auto start = std::chrono::steady_clock::now();
+  static auto last = start;
+  static double own_evolve = 0.0, own_hours = 0.0;
+  const auto now = std::chrono::steady_clock::now();
+  const double dt = std::chrono::duration<double>(now - last).count();
+  last = now;
+  WorldState w;
+  std::chrono::steady_clock::time_point at;
+  {
+    std::lock_guard lock(g_world_mutex);
+    w = g_world_set, at = g_world_set_at;
+  }
+  if (w.valid && REXCVAR_GET(native_x_renderer_world_own)) w = WorldState{};
+  if (w.valid) {
+    const double since = std::chrono::duration<double>(now - at).count();
+    if (w.day_night && w.day_minutes > 0.0) w.hour += since / (w.day_minutes * 60.0) * 24.0;
+    w.cloud_seconds += since;
+    w.cloud_evolve += since * w.cloud_rate;
+    // The clocks drawn with only ever run forward ("When the lightning strikes, it looks like it reverses the rain and
+    // then restarts it", 14 Nov 2026): each answer of the server's sets its clocks anew, a little before or after
+    // where this game had run them on to, and a step back played the rain backward and a flash again. They run at
+    // up to a fifth faster or slower toward the server's; only when more than five seconds off are they set.
+    static double shown_seconds = 0.0, shown_evolve = 0.0;
+    static bool shown = false;
+    if (!shown || std::abs(w.cloud_seconds - shown_seconds) > 5.0 || std::abs(w.cloud_evolve - shown_evolve) > 5.0) {
+      shown = true, shown_seconds = w.cloud_seconds, shown_evolve = w.cloud_evolve;
+    } else {
+      shown_seconds += dt * (1.0 + std::clamp((w.cloud_seconds - shown_seconds) * 0.5, -0.2, 0.2));
+      shown_evolve += dt * w.cloud_rate * (1.0 + std::clamp((w.cloud_evolve - shown_evolve) * 0.5, -0.2, 0.2));
+    }
+    w.cloud_seconds = shown_seconds, w.cloud_evolve = shown_evolve;
+  } else {
+    // No server's world: the player's own choice of day and night, and the world as it is by itself (16:00, the
+    // time standing still, fair weather). The weather and the clock are the server's to set ("take them out of the
+    // graphics settings. Players use what the server sets", 15 Nov 2026): their settings are read only with
+    // native_x_renderer_world_own (the tests), so a value saved while they were in the menu does nothing now.
+    w = WorldState{};
+    w.day_night = REXCVAR_GET(native_x_renderer_day_night);
+    const bool own = REXCVAR_GET(native_x_renderer_world_own);
+    if (own) {
+      w.day_minutes = REXCVAR_GET(native_x_renderer_day_length);
+      w.cloud_cover = float(REXCVAR_GET(native_x_renderer_cloud_cover));
+      w.cloud_rate = float(std::clamp(REXCVAR_GET(native_x_renderer_cloud_rate), 0.0, 4.0));
+      w.weather = float(REXCVAR_GET(native_x_renderer_weather));
+      w.fog = float(REXCVAR_GET(native_x_renderer_fog));
+      w.ground_fog = float(REXCVAR_GET(native_x_renderer_ground_fog));
+      w.wind = float(REXCVAR_GET(native_x_renderer_wind));
+      w.cloud_height = float(REXCVAR_GET(native_x_renderer_cloud_height));
+    }
+    own_evolve += dt * w.cloud_rate;
+    if (w.day_night && w.day_minutes > 0.0) own_hours += dt / (w.day_minutes * 60.0) * 24.0;
+    w.hour = (own ? REXCVAR_GET(native_x_renderer_time_of_day) : 16.0) + own_hours;
+    w.cloud_seconds = std::chrono::duration<double>(now - start).count();
+    w.cloud_evolve = own_evolve;
+  }
+  if (!w.day_night) w.hour = SkyGameHour();
+  w.hour = std::fmod(std::fmod(w.hour, 24.0) + 24.0, 24.0);
+  return w;
+}
 
 void ScopeProbe(const char* when, ITexture* texture) {
   if (!texture || !g_device) return;
@@ -654,17 +886,34 @@ struct PhaseTimes {
   double draws = 0, clears = 0, effects = 0, resolves = 0, present = 0;
 } g_phase;
 
+#if defined(__x86_64__) || defined(_M_X64)
+uint64_t Ticks() { return __rdtsc(); }
+double TicksMs(uint64_t ticks) {
+  static const double ms_per_tick = [] {
+    const auto start = Pacing::Clock::now();
+    const uint64_t first = __rdtsc();
+    while (Pacing::Clock::now() - start < std::chrono::milliseconds(5)) {
+    }
+    return Pacing::Ms(Pacing::Clock::now() - start) / double(__rdtsc() - first);
+  }();
+  return double(ticks) * ms_per_tick;
+}
+#else
+uint64_t Ticks() { return uint64_t(Pacing::Clock::now().time_since_epoch().count()); }
+double TicksMs(uint64_t ticks) { return Pacing::Ms(Pacing::Clock::duration(ticks)); }
+#endif
+
 class RendererTime {
  public:
-  explicit RendererTime(double* phase = nullptr) : start_(Pacing::Clock::now()), phase_(phase) {}
+  explicit RendererTime(double* phase = nullptr) : start_(Ticks()), phase_(phase) {}
   ~RendererTime() {
-    const double ms = Pacing::Ms(Pacing::Clock::now() - start_);
+    const double ms = TicksMs(Ticks() - start_);
     g_pacing.renderer_ms += ms;
     if (phase_) *phase_ += ms;
   }
 
  private:
-  Pacing::Clock::time_point start_;
+  uint64_t start_;
   double* phase_;
 };
 
@@ -702,6 +951,162 @@ std::filesystem::path StoragePath(uint32_t title_id) {
 // whatever is bound: the XDK's ClearF clears depth through an aliased color surface (POTCAWE's).
 enum class Binding { kUnknown, kDepthOnly, kWithColor };
 
+}  // namespace
+}  // namespace native_x_renderer::renderer
+namespace native_x_renderer {
+void DumpNextDraws(int count);  // draw.cpp
+}
+namespace native_x_renderer::renderer {
+namespace {
+// Host MSAA (13 Nov 2026, "Let's build MSAA 2x and 4x"; targets.h's HostTarget). The game draws without multisampling
+// and D31/D60 left the console's out; this is the renderer's own, for geometry thinner than a pixel (a distant mast,
+// power lines), which no antialiasing of the finished picture can put back. The targets of the output's size get a
+// multisampled twin; the draws go into the twins (DrawPath, through HostMsaaDrawView), and whatever else reads or
+// writes a target takes its one-sample texture, after MsaaRead or MsaaWrite here. Not with a reduced view (D49).
+uint32_t MsaaSetting() {
+  const int32_t v = REXCVAR_GET(native_x_renderer_msaa);
+  return g_reduced ? 1 : v >= 4 ? 4 : v >= 2 ? 2 : 1;
+}
+
+// The one-sample texture brought up to date from the twin: the colour's samples averaged, the depth's first taken.
+void MsaaDown(HostTarget* t) {
+  if (!t || !t->msaa_view || !t->single_stale) return;
+  t->single_stale = false;
+  const Blitter::Rect all{0, 0, t->width, t->height};
+  Blitter::Options options;
+  options.samples = t->msaa_samples;
+  g_blit.Copy(g_device->context(), t->msaa_srv,
+              t->depth ? Blitter::Source::kDepthMsaaToDepth : Blitter::Source::kColorMsaa, all, t->view, all, options);
+  ++g_msaa_downs;
+  if (g_msaa_trace) {
+    REXLOG_INFO("[native_x_renderer] MSAA trace: down, {} format {} (after {} multisampled views, {} one-sample)",
+                t->depth ? "depth" : "color", int(t->format), g_msaa_trace_ms, g_msaa_trace_single);
+    g_msaa_trace_ms = g_msaa_trace_single = 0;
+  }
+  if (g_draw) g_draw->TargetsChanged();
+}
+
+// The twin brought up to date from the one-sample texture: every sample of a pixel alike.
+void MsaaUp(HostTarget* t) {
+  if (!t || !t->msaa_view || !t->msaa_stale) return;
+  t->msaa_stale = false;
+  const Blitter::Rect all{0, 0, t->width, t->height};
+  if (t->msaa_delta && t->msaa_before) {
+    // The change made to the one-sample texture, added to each sample (HostTarget::msaa_before).
+    Blitter::Options options;
+    options.before = t->msaa_before->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+    g_blit.Copy(g_device->context(), t->srv, Blitter::Source::kColorDelta, all, t->msaa_view, all, options);
+  } else {
+    g_blit.Copy(g_device->context(), t->srv, t->depth ? Blitter::Source::kDepthToDepth : Blitter::Source::kColor, all,
+                t->msaa_view, all);
+  }
+  t->msaa_delta = false;
+  ++g_msaa_ups;
+  if (g_msaa_trace) {
+    REXLOG_INFO("[native_x_renderer] MSAA trace: up, {} format {} (after {} multisampled views, {} one-sample)",
+                t->depth ? "depth" : "color", int(t->format), g_msaa_trace_ms, g_msaa_trace_single);
+    g_msaa_trace_ms = g_msaa_trace_single = 0;
+  }
+  if (t->depth) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXLOG_INFO("[native_x_renderer] MSAA: a depth target's multisampled twin was filled from its one-sample "
+                  "texture (the stencil is not carried)");
+    }
+  }
+  if (g_draw) g_draw->TargetsChanged();
+}
+
+// Before the one-sample texture is read, and before it is written.
+void MsaaRead(HostTarget* t, int line = __builtin_LINE()) {
+  if (g_msaa_trace && t && t->msaa_view && t->single_stale) REXLOG_INFO("[native_x_renderer] MSAA trace: read of {} {} from line {}", t->depth ? "depth" : "color", fmt::ptr(t), line);
+  MsaaDown(t);
+}
+void MsaaWrite(HostTarget* t, int line = __builtin_LINE()) {
+  if (!t || !t->msaa_view) return;
+  if (g_msaa_trace)
+    REXLOG_INFO("[native_x_renderer] MSAA trace: write of {} {} from line {}", t->depth ? "depth" : "color", fmt::ptr(t), line);
+  MsaaDown(t);
+  // The first write since the twin and the texture were alike, of a float colour target: the texture kept as it is,
+  // for the twin to take the change alone (HostTarget::msaa_before).
+  if (!t->msaa_stale && !t->depth &&
+      GetTextureFormatAttribs(t->format).ComponentType == COMPONENT_TYPE_FLOAT) {
+    if (!t->msaa_before) {
+      TextureDesc desc = t->texture->GetDesc();
+      desc.Name = "NativeXRenderer target before a write (MSAA)";
+      desc.BindFlags = BIND_SHADER_RESOURCE;
+      g_device->device()->CreateTexture(desc, nullptr, &t->msaa_before);
+    }
+    if (t->msaa_before) {
+      CopyTextureAttribs copy(t->texture, RESOURCE_STATE_TRANSITION_MODE_TRANSITION, t->msaa_before,
+                              RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      g_device->context()->CopyTexture(copy);
+      t->msaa_delta = true;
+      if (g_draw) g_draw->TargetsChanged();
+    }
+  }
+  t->msaa_stale = true;
+}
+
+// A target's twin made, remade or dropped as the setting asks.
+void EnsureMsaa(HostTarget* t) {
+  if (!t || !t->texture) return;
+  const bool eligible = !t->reduced && !t->shadow && t->samples == 1 && t->guest_width == g_profile->output_width &&
+                        t->guest_height == g_profile->output_height;
+  const uint32_t want = eligible ? MsaaSetting() : 1;
+  if (want == t->msaa_samples || (want == 1 && !t->msaa_samples)) return;
+  if (t->msaa_view) {
+    MsaaDown(t);
+    t->msaa_texture.Release();
+    t->msaa_before.Release();
+    t->msaa_view = t->msaa_srv = nullptr;
+    if (g_draw) g_draw->TargetsChanged();
+  }
+  t->msaa_samples = want;
+  t->msaa_stale = t->single_stale = t->msaa_delta = false;
+  if (want <= 1) return;
+  IRenderDevice* device = g_device->device();
+  if (!(device->GetTextureFormatInfoExt(t->format).SampleCounts & SAMPLE_COUNT(want))) {
+    REXLOG_WARN("[native_x_renderer] MSAA: {} samples are not supported for a {} target's format ({}); drawn without",
+                want, t->depth ? "depth" : "color", int(t->format));
+    return;
+  }
+  TextureDesc desc = t->texture->GetDesc();
+  const std::string name = std::string(desc.Name ? desc.Name : "NativeXRenderer target") + " MSAA";
+  desc.Name = name.c_str();
+  desc.SampleCount = want;
+  desc.MipLevels = 1;
+  device->CreateTexture(desc, nullptr, &t->msaa_texture);
+  if (!t->msaa_texture) {
+    REXLOG_ERROR("[native_x_renderer] MSAA: could not create {}", name);
+    return;
+  }
+  t->msaa_view = t->msaa_texture->GetDefaultView(t->depth ? TEXTURE_VIEW_DEPTH_STENCIL : TEXTURE_VIEW_RENDER_TARGET);
+  t->msaa_srv = t->msaa_texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+  if (!t->msaa_view || !t->msaa_srv) {
+    t->msaa_texture.Release();
+    t->msaa_view = t->msaa_srv = nullptr;
+    return;
+  }
+  t->msaa_stale = true;  // what the target holds is in its one-sample texture
+  REXLOG_INFO("[native_x_renderer] MSAA: {} ({}x{}, {} samples)", name, desc.Width, desc.Height, want);
+}
+
+ITextureView* MsaaDrawView(HostTarget* t, bool multisampled, bool writes) {
+  if (!t->msaa_view) return t->view;
+  ++(multisampled ? g_msaa_trace_ms : g_msaa_trace_single);
+  if (multisampled) {
+    MsaaUp(t);
+    if (writes) t->single_stale = true;
+    return t->msaa_view;
+  }
+  MsaaDown(t);
+  if (writes) t->msaa_stale = true;
+  if (g_msaa_trace) REXLOG_INFO("[native_x_renderer] MSAA trace: a one-sample draw into {} {}", t->depth ? "depth" : "color", fmt::ptr(t));
+  return t->view;
+}
+
 Binding BindingOf(const Command& c) {
   bool color = c.surfaces[0] || c.surfaces[1] || c.surfaces[2] || c.surfaces[3];
   return color ? Binding::kWithColor : Binding::kDepthOnly;
@@ -724,6 +1129,7 @@ HostTarget* TargetFor(const GuestSurface& surface, Binding binding = Binding::kU
   }
   using Kind = RenderTargets::Kind;
   HostTarget* target = g_targets.Get(surface, reduced ? Kind::kReduced : shadow ? Kind::kShadow : Kind::kRender);
+  EnsureMsaa(target);
   auto same = [&](const auto& used) { return used.second == target; };
   if (reduced && target && std::none_of(g_reduced_used.begin(), g_reduced_used.end(), same)) {
     g_reduced_used.emplace_back(surface, target);
@@ -741,6 +1147,7 @@ void PromoteReduced(const HostTarget* upscaled) {
     HostTarget* full = g_targets.Get(surface);
     if (!full || reduced->samples > 1) continue;
     Blitter::Rect from{0, 0, reduced->width, reduced->height}, to{0, 0, full->width, full->height};
+    MsaaWrite(full);
     g_blit.Copy(context, reduced->srv, reduced->depth ? Blitter::Source::kDepthToDepth : Blitter::Source::kColorScaled,
                 from, full->view, to);
     full->written = ++g_target_writes;
@@ -800,6 +1207,8 @@ void CarryColorIntoDepth(const GuestSurface& surface, HostTarget* depth) {
   if (!color) return;
   Blitter::Rect r{0, 0, std::min(color->guest_width, depth->guest_width),
                   std::min(color->guest_height, depth->guest_height)};
+  MsaaRead(color);
+  MsaaWrite(depth);
   ResolvedTexture* words = color->words_from ? g_resolved.FindNewest(color->words_from) : nullptr;
   bool resolved = words && words->last_resolve == color->words_from_resolve && words->srv && !words->shadow;
   if (resolved) {
@@ -859,6 +1268,73 @@ void ExecuteDraw(const Command& c) {
     g_draw->SetUploadAhead(UploadAhead);
     g_draw->SetTextureSizeConstants(g_profile->texture_size_constants, g_profile->texture_size_constant_count);
   }
+  // The first person weapon's wetness (DrawPath::WetRequest): how wet it is now, and the wet copies of its textures
+  // that the last draws asked for, made here between draws.
+  {
+    static const int tint = [] {  // NXR_WET_TINT=<the pixel shader's texture number>: a developer's check
+      const char* v = std::getenv("NXR_WET_TINT");
+      return v && *v ? std::atoi(v) : -1;
+    }();
+    const bool on = (REXCVAR_GET(native_x_renderer_wetness) || tint >= 0) && g_sky_state == 1;
+    g_own_sky.whole_colour_ = tint == 98;
+    static const auto wet_start = std::chrono::steady_clock::now();
+    g_draw->SetWeaponWet(on ? g_own_sky.weapon_wet_count() : 0.0f, on ? g_own_sky.weapon_wet_show() : 0.0f, on ? tint : -1,
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - wet_start).count());
+    static std::vector<DrawPath::WetRequest> wanted;
+    if (on && g_draw->TakeWetRequests(wanted)) {
+      RendererTime time(&g_phase.effects);
+      for (DrawPath::WetRequest& w : wanted) {
+        RefCntAutoPtr<ITextureView> copy = w.copy;
+        if (!copy) {
+          TextureDesc d = w.original->GetTexture()->GetDesc();
+          d.Name = "NativeXRenderer wet copy";
+          d.Format = TEX_FORMAT_RGBA8_UNORM;
+          d.MipLevels = 0;  // all of them
+          d.Usage = USAGE_DEFAULT;
+          d.BindFlags = BIND_SHADER_RESOURCE | BIND_RENDER_TARGET;
+          d.MiscFlags = MISC_TEXTURE_FLAG_GENERATE_MIPS;
+          d.CPUAccessFlags = CPU_ACCESS_NONE;
+          RefCntAutoPtr<ITexture> texture;
+          g_device->device()->CreateTexture(d, nullptr, &texture);
+          if (!texture) continue;
+          copy = texture->GetDefaultView(TEXTURE_VIEW_SHADER_RESOURCE);
+          static bool said = false;
+          if (!said) {
+            said = true;
+            REXLOG_INFO("[native_x_renderer] wetness: the first wet copy, {}x{} (wet {:.2f}, showing {:.2f})", d.Width,
+                        d.Height, g_draw->wet_count(), g_draw->wet_show());
+          }
+        }
+        // Read as a plain 2D texture (the game's are arrays of one layer).
+        TextureViewDesc plain;
+        plain.ViewType = TEXTURE_VIEW_SHADER_RESOURCE;
+        plain.TextureDim = RESOURCE_DIM_TEX_2D;
+        RefCntAutoPtr<ITextureView> from;
+        w.original->GetTexture()->CreateView(plain, &from);
+        if (from && g_own_sky.WetCopy(g_device->context(), from, copy->GetTexture(), g_draw->wet_count(), g_draw->wet_show(),
+                                  g_draw->wet_tint() >= 0, g_draw->wet_seconds(), w.skin)) {
+          g_draw->SetWetCopy(w.original, copy);
+        } else {
+          static bool said_failed = false;
+          if (!said_failed) {
+            said_failed = true;
+            REXLOG_INFO("[native_x_renderer] wetness: a wet copy could not be made ({})", from ? "the pass" : "no view");
+          }
+        }
+      }
+      g_draw->TargetsChanged();
+    }
+  }
+  // The fog, before the first draw that follows the game's sky dome's (Battlefield 1943: 8ABF56776060E64C, six draws
+  // after the water's; with a sky of the renderer's own they are not drawn, but they still come by here).
+  if ((g_fog_ready || g_sky_late) && c.programs[1]) {
+    if (g_draw->PixelShaderHash(*c.programs[1]) == 0x8ABF56776060E64Cull) {
+      g_fog_dome = true;
+    } else if (g_fog_dome) {
+      if (g_sky_late) ApplyLateSky();
+      else ApplyFog();
+    }
+  }
   std::array<HostTarget*, 5> targets;
   const HostTarget* first_target = nullptr;
   for (uint32_t i = 0; i < 5; ++i) targets[i] = TargetFor(Tiled(c.surfaces[i]), BindingOf(c));
@@ -911,15 +1387,85 @@ void ExecuteDraw(const Command& c) {
   // The objects' own motion: the upscalers', or the motion blur's (taken at once from its settings).
   g_draw->SetObjectMotion(g_object_motion || (MotionBlurTaps() > 0 && REXCVAR_GET(native_x_renderer_motion_blur_objects)));
   g_draw->SetCameraVote(g_camera_vote);
+  g_draw->SetSkipGameSky(SkyOn() && REXCVAR_GET(native_x_renderer_sky_debug) == 0);
+  {
+    // The game's own daylight by the sky's hour (sky.h's SkyLightAt, DrawPath::SetOutdoorLight).
+    DrawPath::OutdoorLight light;
+    const WorldState world = World();
+    const int sky_debug = REXCVAR_GET(native_x_renderer_sky_debug);
+    SetSkyLightning(REXCVAR_GET(native_x_renderer_lightning));
+    g_fog_wanted = world.fog > 0.001f || world.ground_fog > 0.001f || world.weather > 0.45f || sky_debug == 4 || sky_debug == 5 ||
+                   sky_debug == 6 || REXCVAR_GET(native_x_renderer_rain_lens) || REXCVAR_GET(native_x_renderer_wetness) ||
+                   REXCVAR_GET(native_x_renderer_sky);  // (the clouds over the view are laid with it)  // (the lens's water needs the sea's height)
+    // D175: the night's lights come on as the cycle's sun sets (from 4 degrees up) and are full 6 degrees under.
+    {
+      float dark = 0.0f;
+      if (world.day_night) {
+        const float t = std::clamp((SkyLightAt(world.hour, world.weather).sun_elevation - 4.0f) / -10.0f, 0.0f, 1.0f);
+        dark = t * t * (3.0f - 2.0f * t);
+      }
+      g_cycle_dark.store(dark, std::memory_order_relaxed);
+    }
+    if (world.day_night && REXCVAR_GET(native_x_renderer_sky_light)) {
+      const SkyLight at = SkyLightAt(world.hour, world.weather);
+      light.on = true;
+      light.game_sky = !SkyOn();  // the game's own sky is drawn: tinted by the hour
+      for (int i = 0; i < 3; ++i) light.key[i] = at.key[i], light.sky[i] = at.sky[i], light.ground[i] = at.ground[i];
+      for (int i = 0; i < 3; ++i) light.painted[i] = at.painted[i];
+      // The storm's lightning: for its moment the sky's light on everything, and the painted sky, flash blue-white.
+      if (const float flash = SkyFlashAt(world.cloud_seconds, world.weather).light; flash > 0.0f) {
+        const float tint[3] = {0.72f, 0.8f, 1.0f};
+        for (int i = 0; i < 3; ++i) {
+          light.sky[i] += flash * 0.9f * tint[i];
+          light.ground[i] += flash * 0.6f * tint[i];
+          light.painted[i] += flash * 0.5f * tint[i];
+        }
+      }
+      // Where the light comes from: the sun, or once it is down the moon (opposite it), never under 5 degrees.
+      if (REXCVAR_GET(native_x_renderer_sky_sun_moves)) {
+        const bool moon = at.sun_elevation < -1.5f;
+        const float rad = 3.14159265f / 180.0f;
+        light.turn = true;
+        light.azimuth = (SkyNoonAzimuth() - at.sun_turn + (moon ? 180.0f : 0.0f)) * rad;
+        light.elevation = std::max(moon ? -at.sun_elevation : at.sun_elevation, 5.0f) * rad;
+        // While it rains (sky.cpp's rain: from 55% of the weather) the shadows go steep.
+        light.steep = std::clamp((world.weather - 0.55f) / 0.4f, 0.0f, 1.0f);
+      }
+    }
+    // NXR_LIGHT_TEST=<nine numbers> (a developer's check of the mapping): the multipliers themselves, the sun's
+    // r, g, b, the sky's and the ground's.
+    static const std::vector<float> test = [] {
+      std::vector<float> out;
+      for (const char* q = std::getenv("NXR_LIGHT_TEST"); q && *q;) {
+        char* e = nullptr;
+        const float v = std::strtof(q, &e);
+        if (e == q) break;
+        out.push_back(v);
+        q = *e == ',' ? e + 1 : e;
+      }
+      return out;
+    }();
+    if (test.size() == 9) {
+      light.on = true;
+      for (int i = 0; i < 3; ++i) light.key[i] = test[i], light.sky[i] = test[3 + i], light.ground[i] = test[6 + i];
+    }
+    g_draw->SetOutdoorLight(light);
+    static bool said_dir = false;
+    float dir[3];
+    if (!said_dir && g_draw->GameLightDir(dir)) {
+      said_dir = true;
+      REXLOG_INFO("[native_x_renderer] the game's outdoor light direction: {:.4f} {:.4f} {:.4f}", dir[0], dir[1], dir[2]);
+    }
+  }
   g_draw->SetProjectionVote((g_gtao_on || g_ssgi_on) && g_scene_view && !g_gtao_done);
   // The terrain's draws: the grass's, and the night's lights' camera (D163).
-  g_draw->SetTerrainCapture(g_scene_view && !g_gtao_done && (GrassOn() || NightLightsWanted()) ? &g_terrain : nullptr);
+  g_draw->SetTerrainCapture(g_scene_view && !g_gtao_done && (GrassOn() || NightLightsWanted() || SkyOn() || FogOn()) ? &g_terrain : nullptr);
   // D169: the sky dome's, for the night sky (it may come after the opaque effects).
   g_draw->SetSkyCapture(g_scene_view && REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_sky) > 0.0
                             ? &g_sky
                             : nullptr);
   // D163: the models with lamps (a jeep's headlights), at night.
-  g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && REXCVAR_GET(native_x_renderer_night) &&
+  g_draw->SetModelLamps(g_scene_view && !g_night_model_counts.empty() && NightPassOn() &&
                                 REXCVAR_GET(native_x_renderer_night_lamps) > 0.0
                             ? &g_night_model_counts
                             : nullptr,
@@ -953,10 +1499,15 @@ void ExecuteDraw(const Command& c) {
       // Each depth with its own share of its texture (with an upscaler the textures can differ from the target's).
       const float to_u = view_w > 0 ? float(desc.Width) / view_w : 1.0f;
       const float to_v = view_h > 0 ? float(desc.Height) / view_h : 1.0f;
-      night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0));
-      night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0));
+      // D175: with the old night look (D162) the moonlit grade, its haze and sky (D169); at the cycle's night the scene
+      // as the cycle drew it, with the lights only, as strong as the hour is dark.
+      const bool old_night = REXCVAR_GET(native_x_renderer_night);
+      const float amount = NightLightsAmount();
+      night.grade = old_night ? 1.0f : 0.0f;
+      night.glow = float(std::clamp(REXCVAR_GET(native_x_renderer_night_glow), 0.0, 8.0)) * amount;
+      night.lamps = float(std::clamp(REXCVAR_GET(native_x_renderer_night_lamps), 0.0, 8.0)) * amount;
       night.debug = REXCVAR_GET(native_x_renderer_night_debug);
-      night.sky = float(std::clamp(REXCVAR_GET(native_x_renderer_night_sky), 0.0, 4.0));
+      night.sky = old_night ? float(std::clamp(REXCVAR_GET(native_x_renderer_night_sky), 0.0, 4.0)) : 0.0f;
       NightFrame f;
       f.depth = depth ? g_night_depth.RawPtr() : nullptr;
       f.depth_uv[0] = to_u * g_night_depth_uv[0], f.depth_uv[1] = to_v * g_night_depth_uv[1];
@@ -973,6 +1524,7 @@ void ExecuteDraw(const Command& c) {
         f.lights = g_night_frame_lights.data(), f.light_count = uint32_t(g_night_frame_lights.size());
         f.sprites = g_night_frame_sprites.data(), f.sprite_count = uint32_t(g_night_frame_sprites.size());
       }
+      MsaaWrite(t);
       g_night.Apply(g_device->device(), g_device->context(), t->texture, t->view, f, night);
       t->written = ++g_target_writes;
       g_draw->TargetsChanged();
@@ -999,6 +1551,7 @@ void ExecuteDraw(const Command& c) {
         const float view_h = float(t->scale.HostHeight(g_profile->output_height));
         const float uv[2] = {(view_w > 0 ? float(desc.Width) / view_w : 1.0f) * g_night_depth_uv[0],
                              (view_h > 0 ? float(desc.Height) / view_h : 1.0f) * g_night_depth_uv[1]};
+        MsaaRead(t);
         g_scope.Remember(g_device->device(), g_device->context(), t->texture, camera, depth ? g_night_depth.RawPtr() : nullptr,
                          uv);
       }
@@ -1021,6 +1574,7 @@ void ExecuteDraw(const Command& c) {
     if (noted && zoom >= kScopeZoom) ++g_scope_unzoomed;  // the periodic log: whether its shaders are a scope's alone
     if (noted && zoom < kScopeZoom) {
       if (g_scope_research_frame) ScopeProbe("before the scope's pass", t->texture);
+      MsaaWrite(t);
       g_scope.Apply(g_device->device(), g_device->context(), t->texture, t->view, camera);
       t->written = ++g_target_writes;
       g_draw->TargetsChanged();
@@ -1130,8 +1684,14 @@ void ClearColorRect(HostTarget* target, Blitter::Rect r, const float color[4]) {
   if (ClipToTarget(*target, r)) {
     context->SetRenderTargets(1, &target->view, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     context->ClearRenderTarget(target->view, color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if (target->msaa_view) {  // host MSAA: the twin too, and both are then alike
+      context->SetRenderTargets(1, &target->msaa_view, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->ClearRenderTarget(target->msaa_view, color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      target->msaa_stale = target->single_stale = target->msaa_delta = false;
+    }
   } else if (r.width && r.height && FillableTarget(*target)) {
     g_blit.FillColor(context, target->view, HostRect(target->scale, r), color);
+    if (target->msaa_view) g_blit.FillColor(context, target->msaa_view, HostRect(target->scale, r), color);
   }
   target->written = ++g_target_writes;
   if (g_draw) g_draw->TargetsChanged();
@@ -1146,8 +1706,15 @@ void ClearDepthStencilRect(HostTarget* target, Blitter::Rect r, bool depth, floa
     if (stencil) clear_flags |= CLEAR_STENCIL_FLAG;
     context->SetRenderTargets(0, nullptr, target->view, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
     context->ClearDepthStencil(target->view, clear_flags, z, s, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+    if (target->msaa_view) {  // host MSAA: the twin too; alike once the depth is cleared (the stencil is not carried)
+      context->SetRenderTargets(0, nullptr, target->msaa_view, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->ClearDepthStencil(target->msaa_view, clear_flags, z, s, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      if (depth) target->msaa_stale = target->single_stale = false;
+    }
   } else if (r.width && r.height && FillableTarget(*target)) {
     g_blit.FillDepthStencil(context, target->view, HostRect(target->scale, r), depth, z, stencil, s);
+    if (target->msaa_view)
+      g_blit.FillDepthStencil(context, target->msaa_view, HostRect(target->scale, r), depth, z, stencil, s);
   }
   target->written = ++g_target_writes;
   if (g_draw) g_draw->TargetsChanged();
@@ -1217,14 +1784,14 @@ void UpscaleScene();
 // D163: the night's lights need the camera: night on and lamps wanted (asked on every draw: no lock).
 bool NightLightsWanted() {
   return (g_night_lamps_present.load(std::memory_order_relaxed) || !g_night_model_counts.empty()) &&
-         REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_lamps) > 0.0;
+         NightPassOn() && REXCVAR_GET(native_x_renderer_night_lamps) > 0.0;
 }
 
 // D163: the terrain's camera kept for the night's lights (at the AO's moment, before the terrain's frame is reset): its
 // world-view-projection (the world in the level's own units), viewport and NDC transform, and the view's host size.
 void NoteNightCamera() {
   if (!g_device || !g_terrain.valid || g_night_camera.frame == g_device->frames_presented()) return;
-  if (!REXCVAR_GET(native_x_renderer_night)) return;
+  if (!NightPassOn()) return;
   std::memcpy(g_night_camera.wvp, g_terrain.wvp, sizeof(g_night_camera.wvp));
   g_night_camera.viewport = g_terrain.viewport;
   for (int i = 0; i < 3; ++i) {
@@ -1492,6 +2059,7 @@ bool BuildNightCamera(NightFrame& f, float to_u, float to_v, const NightSettings
 void CopyNightGlow(HostTarget* source, const Blitter::Rect& from) {
   using namespace Diligent;
   if (!g_device || !source->srv || !from.width || !from.height) return;
+  MsaaRead(source);
   if (!g_night_glow || g_night_glow->GetDesc().Width != from.width || g_night_glow->GetDesc().Height != from.height) {
     g_night_glow.Release();
     TextureDesc d;
@@ -1529,10 +2097,108 @@ void ApplyOpaqueEffects() {
   // The grass prototype (grass.h), before the AO darkens the ground under it.
   if (GrassOn() && g_scene_depth->view) {
     RendererTime time(&g_phase.effects);
-    if (g_grass.Apply(g_device->context(), g_terrain, g_scene_color->texture, g_scene_color->view,
-                      g_scene_depth->texture, g_scene_depth->view, g_device->frames_presented())) {
+    // Host MSAA: it reads the one-sample textures and draws its tufts into the twins, as the game's draws do (a
+    // one-sample depth written here would flatten the twin's, and what the game draws next, the sky, would then
+    // cover every edge's samples: run msaa4u).
+    const bool twins = g_scene_color->msaa_view && g_scene_depth->msaa_view &&
+                       g_scene_color->msaa_samples == g_scene_depth->msaa_samples;
+    MsaaRead(g_scene_color);
+    MsaaRead(g_scene_depth);
+    if (twins) {
+      MsaaUp(g_scene_color);
+      MsaaUp(g_scene_depth);
+    } else {
+      MsaaWrite(g_scene_color);
+      MsaaWrite(g_scene_depth);
+    }
+    if (g_grass.Apply(g_device->context(), g_terrain, g_scene_color->texture,
+                      twins ? g_scene_color->msaa_view : g_scene_color->view, g_scene_depth->texture,
+                      twins ? g_scene_depth->msaa_view : g_scene_depth->view, g_device->frames_presented())) {
+      if (twins) g_scene_color->single_stale = g_scene_depth->single_stale = true;
       g_draw->TargetsChanged();
     }
+  }
+  // The sky of its own (sky.h), where the view's depth holds nothing: before the game's water, effects and the first
+  // person weapon are drawn over it. Its camera from the terrain's draws, as the night's (BuildNightCamera).
+  {  // NXR_SKY_DRAWS=<frame>: the 60 draws after this moment in that frame of the view, logged (which is the game's sky)
+    static const int at = [] {
+      const char* v = std::getenv("NXR_SKY_DRAWS");
+      return v && *v ? std::atoi(v) : 0;
+    }();
+    static int frames = 0;
+    if (at > 0 && ++frames == at) DumpNextDraws(60);
+  }
+  if ((SkyOn() || FogOn()) && g_terrain.valid && g_scene_depth->srv) {
+    RendererTime time(&g_phase.effects);
+    Sky::Inputs in;
+    const float(*m)[4] = g_terrain.wvp;
+    const double a[3][3] = {{m[0][0], m[0][1], m[0][2]}, {m[1][0], m[1][1], m[1][2]}, {m[3][0], m[3][1], m[3][2]}};
+    const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                       a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    const Diligent::Viewport& vp = g_terrain.viewport;
+    if (std::abs(det) > 1e-12 && vp.Width > 0.0f && vp.Height > 0.0f && g_terrain.ndc_scale[0] != 0.0f &&
+        g_terrain.ndc_scale[1] != 0.0f) {
+      double inv[3][3];
+      inv[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det;
+      inv[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det;
+      inv[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det;
+      inv[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) / det;
+      inv[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det;
+      inv[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det;
+      inv[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det;
+      inv[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det;
+      inv[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det;
+      const double t[3] = {m[0][3], m[1][3], m[3][3]};
+      for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) in.inverse[r][c] = float(inv[r][c]);
+        in.inverse_t[r] = float(t[r]);
+        in.eye[r] = float(-(inv[r][0] * t[0] + inv[r][1] * t[1] + inv[r][2] * t[2]));
+        for (int c = 0; c < 3; ++c) in.forward[r][c] = float(a[r][c]);
+      }
+      in.width = g_scene_color->scale.HostWidth(g_profile->output_width);
+      in.height = g_scene_color->scale.HostHeight(g_profile->output_height);
+      in.to_ndc[0] = float(in.width) * 2.0f / (vp.Width * g_terrain.ndc_scale[0]);
+      in.to_ndc[1] = -float(in.height) * 2.0f / (vp.Height * g_terrain.ndc_scale[1]);
+      in.to_ndc[2] = (-vp.TopLeftX * 2.0f / vp.Width - 1.0f - g_terrain.ndc_offset[0]) / g_terrain.ndc_scale[0];
+      in.to_ndc[3] = (vp.TopLeftY * 2.0f / vp.Height + 1.0f - g_terrain.ndc_offset[1]) / g_terrain.ndc_scale[1];
+      const WorldState world = World();
+      in.seconds = world.cloud_seconds;
+      in.evolve = world.cloud_evolve;
+      in.weather = world.weather;
+      in.fog = world.fog;
+      in.ground_fog = world.ground_fog;
+      in.wind = world.wind;
+      in.hour = world.hour;
+      in.sun_azimuth = SkyNoonAzimuth();
+      in.coverage = world.cloud_cover;
+      in.exposure = float(REXCVAR_GET(native_x_renderer_sky_exposure));
+      in.debug = REXCVAR_GET(native_x_renderer_sky_debug);
+      in.cloud_height = world.cloud_height;
+      {  // NXR_CLOUD_LIFT=<metres> (a developer's check): the clouds seen as from that much higher, in them or over them
+        static const float lift = [] {
+          const char* v = std::getenv("NXR_CLOUD_LIFT");
+          return v && *v ? float(std::atof(v)) : 0.0f;
+        }();
+        in.cloud_lift = lift;
+      }
+      if (SkyOn()) {
+        MsaaRead(g_scene_depth);
+        MsaaWrite(g_scene_color);
+        in.color = g_scene_color->texture;
+        in.depth_srv = g_scene_depth->srv;
+        if (g_own_sky.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+      }
+      g_last_sky_in = in, g_last_sky_valid = true;
+      // The fog waits for the game's water (ApplyFog).
+      if (FogOn()) {
+        g_fog_in = in;
+        g_fog_ready = true;
+        g_fog_dome = false;
+      }
+    }
+  } else if ((SkyOn() || FogOn()) && !g_terrain.valid && g_last_sky_valid) {
+    g_sky_late = true;  // no terrain in this view: after the sky dome's draws (ApplyLateSky)
+    g_fog_dome = false;
   }
   NoteNightCamera();  // D163
   g_terrain.Reset();
@@ -1561,11 +2227,18 @@ void ApplyOpaqueEffects() {
   const bool voted = !g_temporal && g_camera_vote && g_draw->TakeCameraVote(vote, votes, offers);
   if (voted) g_blur_vote = vote, g_blur_voted = true;  // the motion blur's too, at the view's end
   bool applied = false;
+  // Host MSAA: the effects read the one-sample depth. The ambient occlusion alone multiplies its factor into the
+  // colour's twin, every sample of a pixel alike, so the edges' samples stay apart for what is drawn after it; the
+  // global illumination reads the colour too, and takes the one-sample texture.
+  MsaaRead(g_scene_depth);
+  const bool ao_twin = ao_on && !gi_on && g_scene_color->msaa_view;
+  if (ao_twin) MsaaUp(g_scene_color);
+  else MsaaWrite(g_scene_color);
   if (ao_on) {
     Gtao::Inputs in;
     in.projection = projection;
     in.depth = g_scene_depth->texture;
-    in.color = g_scene_color->view;
+    in.color = ao_twin ? g_scene_color->msaa_view : g_scene_color->view;
     in.width = width;
     in.height = height;
     in.scale = g_scene_color->scale;
@@ -1591,7 +2264,9 @@ void ApplyOpaqueEffects() {
       in.votes = votes;
       in.offers = offers;
     }
-    applied = g_gtao.Apply(g_device->context(), in) || applied;
+    const bool ao_applied = g_gtao.Apply(g_device->context(), in);
+    if (ao_applied && ao_twin) g_scene_color->single_stale = true;
+    applied = ao_applied || applied;
   }
   if (gi_on) {
     Ssgi::Inputs in;
@@ -1616,10 +2291,110 @@ void ApplyOpaqueEffects() {
   if (applied) g_draw->TargetsChanged();
 }
 
+// The renderer's sky in a view without terrain (g_sky_late), then its fog.
+void ApplyLateSky() {
+  if (!g_sky_late) return;
+  g_sky_late = g_fog_dome = false;
+  float m[4][4];
+  if (!g_scene_color || !g_scene_depth || !g_draw || !g_scene_color->texture || !g_scene_depth->srv ||
+      !g_draw->DomeCamera(m)) {
+    return;
+  }
+  const double a[3][3] = {{m[0][0], m[0][1], m[0][2]}, {m[1][0], m[1][1], m[1][2]}, {m[3][0], m[3][1], m[3][2]}};
+  const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                     a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+  if (std::abs(det) < 1e-12) return;
+  Sky::Inputs in = g_last_sky_in;  // the eye's place and the view's size as they last were
+  const double inv[3][3] = {
+      {(a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det, (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det,
+       (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det},
+      {(a[1][2] * a[2][0] - a[1][0] * a[2][2]) / det, (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det,
+       (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det},
+      {(a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det, (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det,
+       (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det}};
+  for (int row = 0; row < 3; ++row)
+    for (int col = 0; col < 3; ++col) in.inverse[row][col] = float(inv[row][col]), in.forward[row][col] = float(a[row][col]);
+  const WorldState world = World();
+  in.seconds = world.cloud_seconds;
+  in.evolve = world.cloud_evolve;
+  in.weather = world.weather;
+  in.fog = world.fog;
+  in.ground_fog = world.ground_fog;
+  in.wind = world.wind;
+  in.cloud_height = world.cloud_height;
+  in.hour = world.hour;
+  in.sun_azimuth = SkyNoonAzimuth();
+  in.coverage = world.cloud_cover;
+  in.debug = REXCVAR_GET(native_x_renderer_sky_debug);
+  RendererTime time(&g_phase.effects);
+  if (SkyOn()) {
+    MsaaRead(g_scene_depth);
+    MsaaWrite(g_scene_color);
+    in.color = g_scene_color->texture;
+    in.depth_srv = g_scene_depth->srv;
+    if (g_own_sky.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+  }
+  static bool said = false;
+  if (!said) {
+    said = true;
+    REXLOG_INFO("[native_x_renderer] sky: a view without terrain: the sky drawn from the sky dome's camera");
+  }
+  if (FogOn()) {
+    g_fog_in = in;
+    g_fog_ready = true;
+    ApplyFog();
+  }
+}
+
+// The fog over this frame's view (sky.h's Fog), once: after the game's sky dome's draws (ExecuteDraw), or, in a view
+// that drew none, before the finished scene is copied (ExecuteResolve).
+void ApplyFog() {
+  if (!g_fog_ready) return;
+  g_fog_ready = g_fog_dome = false;
+  g_lens_due = true;
+  if (!g_scene_color || !g_scene_depth || !g_draw || !g_scene_color->texture || !g_scene_depth->srv) return;
+  RendererTime time(&g_phase.effects);
+  MsaaRead(g_scene_depth);
+  MsaaWrite(g_scene_color);
+  g_fog_in.color = g_scene_color->texture;
+  g_fog_in.depth_srv = g_scene_depth->srv;
+  // The rain's cover: this frame's shadow map, if the game drew with one.
+  const DrawPath::ShadowMap& shadows = g_draw->shadow_map();
+  g_fog_in.cover = shadows.view && shadows.frame == g_device->frames_presented() ? shadows.view.RawPtr() : nullptr;
+  std::memcpy(g_fog_in.cover_m, shadows.cascades, sizeof(g_fog_in.cover_m));
+  // The clouds over what the view holds (planes in them, the ground under them), then the fog over all.
+  const bool over = SkyOn() && g_own_sky.CloudsOver(g_device->context(), g_fog_in);
+  const bool drawn = g_own_sky.Fog(g_device->context(), g_fog_in);
+  if (drawn || over) g_draw->TargetsChanged();
+  static bool said = false;
+  if (!said) {
+    said = true;
+    REXLOG_INFO("[native_x_renderer] fog: the first pass {}: distance fog {:.2f}, ground fog {:.2f}, weather {:.2f}; the "
+                "eye at {:.0f}, {:.0f}, {:.0f}", drawn ? "drawn" : "not drawn", g_fog_in.fog, g_fog_in.ground_fog,
+                g_fog_in.weather, g_fog_in.eye[0], g_fog_in.eye[1], g_fog_in.eye[2]);
+  }
+}
+
 void ExecuteResolve(const Command& c) {
   RendererTime time(&g_phase.resolves);
   uint32_t flags = c.r[1], level = c.r[5], slice = c.r[6];
   GuestSurface surface = Tiled(c.surfaces[0]);
+  if (c.caller == g_profile->upscale_resolve_caller && surface && !surface.depth &&
+      surface.width == g_profile->output_width && surface.height == g_profile->output_height) {
+    if (g_sky_late) ApplyLateSky();
+    if (g_fog_ready) ApplyFog();
+    // Rain on the lens, over the finished view (once a frame: the fog's pass of this frame keeps how wet it is).
+    if (g_lens_due && g_scene_color && g_scene_color->texture && g_draw && g_own_sky.lens_wet() >= 0.01f &&
+        REXCVAR_GET(native_x_renderer_rain_lens)) {
+      g_lens_due = false;
+      RendererTime time(&g_phase.effects);
+      MsaaWrite(g_scene_color);
+      if (g_own_sky.Lens(g_device->context(), g_scene_color->texture, g_scene_color->scale.HostWidth(g_profile->output_width),
+                     g_scene_color->scale.HostHeight(g_profile->output_height))) {
+        g_draw->TargetsChanged();
+      }
+    }
+  }
   // D119: the profile's upscale point, the copy of the finished 3D scene of the output size: DLSS or FSR 3.1 on the
   // view first, so that the copy takes their image. No view again until the next Present. Before the copy's source is
   // chosen: with reduced targets (D121) it is then the upscaled image's, at the render scale.
@@ -1636,6 +2411,7 @@ void ExecuteResolve(const Command& c) {
     ApplyOpaqueEffects();
   }
   HostTarget* source = TargetFor(surface);
+  MsaaRead(source);  // host MSAA: the copy reads the one-sample texture
   // D168 research (NXR_SCOPE_RESEARCH): in a logged frame, each copy of an output size color target: from which target,
   // and four of its pixels (where the screen's picture comes from in a scoped frame).
   if (g_scope_research_frame && source && source->texture && !surface.depth &&
@@ -1649,7 +2425,7 @@ void ExecuteResolve(const Command& c) {
   // D162: the world's depth for the night's haze, at the same depth copy (once a frame): the first person weapon's
   // draws clear the depth after it, so on foot the view's depth at its end held only the weapon and the night took
   // everything else for the far sky (run nightzip1). Copied into a float texture's red channel.
-  if (REXCVAR_GET(native_x_renderer_night) && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
+  if (NightPassOn() && c.caller == g_profile->ao_resolve_caller && surface.depth && source &&
       source->srv && source->texture && surface.width == g_profile->output_width &&
       surface.height == g_profile->output_height && g_night_world_frame != g_device->frames_presented()) {
     const TextureDesc& d = source->texture->GetDesc();
@@ -1771,6 +2547,7 @@ void ExecuteResolve(const Command& c) {
       }
     }
     source = alias;
+    MsaaRead(source);
     copied = from = a;
   }
   // Then on the host: the source at its scale (the render scale, D37; the reduced one in an upscaled view,
@@ -1844,7 +2621,7 @@ void ExecuteResolve(const Command& c) {
   // particles (muzzle flashes, tracers, fire, explosions: run nightrd2, its premultiplied draws then one draw over the
   // scene); its other half size pass, the sky's, draws without blending.
   // (Before the scene's copy: every copy goes through the scene copy's caller, the bloom chain's half size ones after it.)
-  if (REXCVAR_GET(native_x_renderer_night) && REXCVAR_GET(native_x_renderer_night_glow) > 0.0 && !source->depth &&
+  if (NightPassOn() && REXCVAR_GET(native_x_renderer_night_glow) > 0.0 && !source->depth &&
       !source->shadow && !scaled && source->samples == 1 && !g_night_pending && slice == 0 && !cube &&
       g_night_world_frame == g_device->frames_presented() && source->last_draw_blended &&
       copied.width * 2 == g_profile->output_width && copied.height * 2 == g_profile->output_height) {
@@ -1941,7 +2718,7 @@ void ExecuteResolve(const Command& c) {
   }
   // Night (D162): the scene's copy arms it; it runs after the game's composite (ExecuteDraw). Graded here, before the
   // bloom chain, the game's automatic exposure (its 1x1 luminance) brightened it back (runs night_wake2, night_gc2).
-  if (REXCVAR_GET(native_x_renderer_night) && c.scene_caller && slice == 0 &&
+  if (NightPassOn() && c.scene_caller && slice == 0 &&
       target->guest_width == g_profile->output_width && target->guest_height == g_profile->output_height) {
     g_night_pending = true;
   }
@@ -1980,6 +2757,7 @@ void ExecuteResolve(const Command& c) {
     write.scale_x = target->scale.x, write.scale_y = target->scale.y;
     write.slice = slice;
     GuestMemory* memory = g_resolved.memory();
+    memory->EnsureMirror(write.address, uint32_t(std::min<uint64_t>(uint64_t((write.pitch + 31) & ~31u) * ((write.height + 31) & ~31u) * 16, 0x20000000u)));  // D174
     if (g_blit.WriteToMirror(g_device->context(), target->ArrayView(), memory->buffer(), memory->uav(), write)) {
       ++g_stats.mirror_writes;
       static const bool log = std::getenv("NXR_D140_LOG") != nullptr;  // a diagnosis aid: each one
@@ -2038,7 +2816,8 @@ void ExecuteQuery(const Command& c) {
     // Samples are reported at the game's scale: from the scale of the targets the query's draws go to, the
     // reduced one in an upscaled view (D49).
     const RenderScale& scale = g_reduced && (g_scene_view || g_auto_reduced) ? g_reduced_scale : g_scale;
-    g_queries.SetSampleScale(double(scale.x) * double(scale.y));
+    // With host MSAA the view's draws count every sample of a pixel.
+    g_queries.SetSampleScale(double(scale.x) * double(scale.y) * double(MsaaSetting()));
     g_queries.Begin(g_device->context());
   } else if (flags & 1) {
     g_queries.End(g_device->context(), c.address);
@@ -2081,6 +2860,9 @@ void UpscaleScene() {
     // DLSS's result goes to the scene color at the render scale: the target itself, or for a reduced one the
     // surface's target at the render scale (D49).
     HostTarget* output = g_scene_color->reduced ? g_targets.Get(g_scene_color_surface) : g_scene_color;
+    MsaaWrite(output);
+    MsaaWrite(g_scene_color);
+    MsaaRead(g_scene_depth);
     // The camera vote of this view's draws (D118).
     Mat4d vote;
     bool voted = false;
@@ -2144,6 +2926,8 @@ void UpscaleScene() {
     const float seconds = g_blur_last.time_since_epoch().count() ? std::chrono::duration<float>(now - g_blur_last).count() : 1.0f / 60.0f;
     g_blur_last = now;
     if (g_motion_blur_state == 1 && blurred && blurred->texture && seconds < 0.25f) {
+      MsaaWrite(blurred);
+      MsaaRead(g_scene_depth);
       MotionBlur::Inputs in;
       in.color = blurred->texture;
       in.depth = g_scene_depth->texture;
@@ -2174,12 +2958,36 @@ void UpscaleScene() {
     }
   }
   g_blur_voted = false;
+  // Depth of field (dof.h): while the player aims down the sights, after the motion blur.
+  if (const float ads = REXCVAR_GET(native_x_renderer_ads_dof) ? AdsBlendNow() : 0.0f;
+      ads > 0.01f && g_scene_color && g_scene_depth && g_scene_depth->srv && g_draw && g_dof_state >= 0 &&
+      !(g_queries_on && g_queries.open())) {
+    if (g_dof_state == 0) g_dof_state = g_dof.Load(g_device->device()) ? 1 : -1;
+    HostTarget* soft = upscaled && g_scene_color->reduced ? g_targets.Get(g_scene_color_surface) : g_scene_color;
+    if (g_dof_state == 1 && soft && soft->texture) {
+      MsaaWrite(soft);
+      MsaaRead(g_scene_depth);
+      const std::string quality = REXCVAR_GET(native_x_renderer_dof_quality);
+      DepthOfField::Inputs in;
+      in.color = soft->texture;
+      in.depth = g_scene_depth->texture;
+      in.depth_srv = g_scene_depth->srv;
+      in.width = soft->scale.HostWidth(g_profile->output_width);
+      in.height = soft->scale.HostHeight(g_profile->output_height);
+      in.depth_width = g_scene_depth->scale.HostWidth(g_profile->output_width);
+      in.depth_height = g_scene_depth->scale.HostHeight(g_profile->output_height);
+      in.blend = ads;
+      in.taps = quality == "low" ? 12 : quality == "high" ? 40 : 24;
+      if (g_dof.Apply(g_device->context(), in)) g_draw->TargetsChanged();
+    }
+  }
   PromoteReduced(upscaled ? g_scene_color : nullptr);
   // D162: the view's depth for the night at the scene's copy, which follows in this frame.
   // D168: the picture in picture scope's too, to leave the first person weapon out of the view it remembers.
-  if ((REXCVAR_GET(native_x_renderer_night) || g_scope_watch) && g_scene_depth && g_scene_depth->srv &&
+  if ((NightPassOn() || g_scope_watch) && g_scene_depth && g_scene_depth->srv &&
       g_scene_depth->texture) {
     const TextureDesc& depth = g_scene_depth->texture->GetDesc();
+    MsaaRead(g_scene_depth);
     g_night_depth = g_scene_depth->srv;
     g_night_depth_uv[0] = float(g_scene_depth->scale.HostWidth(g_profile->output_width)) / float(depth.Width);
     g_night_depth_uv[1] = float(g_scene_depth->scale.HostHeight(g_profile->output_height)) / float(depth.Height);
@@ -2574,6 +3382,21 @@ void PresentPending(bool room = false) {
 }
 
 void ExecutePresent(const Command& c) {
+  // Host MSAA: what it copies in a frame, said now and then.
+  if (MsaaSetting() > 1) {
+    static uint64_t frames = 0, downs = 0, ups = 0;
+    if (++frames % 1800 == 0) {
+      REXLOG_INFO("[native_x_renderer] MSAA {}x: {:.2f} copies down and {:.2f} up per frame over the last 1800",
+                  MsaaSetting(), double(g_msaa_downs - downs) / 1800.0, double(g_msaa_ups - ups) / 1800.0);
+      downs = g_msaa_downs, ups = g_msaa_ups;
+    }
+    if (g_msaa_trace)
+      REXLOG_INFO("[native_x_renderer] MSAA trace: present (after {} multisampled views, {} one-sample)",
+                  g_msaa_trace_ms, g_msaa_trace_single);
+    static const bool trace = std::getenv("NXR_MSAA_TRACE") != nullptr;  // a developer's: one frame in 1800 logged
+    g_msaa_trace = trace && frames % 1800 == 900;
+    g_msaa_trace_ms = g_msaa_trace_single = 0;
+  }
   bool with_swap = g_present_with_swaps && c.swap_tag;
   if (with_swap) PresentPending(true);  // room for this frame
   RendererTime time(&g_phase.present);
@@ -2590,6 +3413,7 @@ void ExecutePresent(const Command& c) {
   g_view_ended = false;
   g_auto_view_done = false;
   g_gtao_done = false;
+  g_fog_ready = g_fog_dome = g_lens_due = g_sky_late = false;
   g_terrain.Reset();
   g_sky.valid = false;
   g_scene_antialiased = false;
@@ -3121,8 +3945,11 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
   }
   // Which temporal upscalers this GPU runs, for the game's menus (TemporalSupport): FSR as AMD's library lists it for
   // this GPU (FSR 4 on a Radeon RX 9000 only), XeSS as Intel's library answers for it, DLSS on an NVIDIA GeForce RTX
-  // (NGX runs on RTX cards only).
-  {
+  // (NGX runs on RTX cards only). Not asked when the game offers none (native_x_renderer_check_temporal, D171).
+  if (!REXCVAR_GET(native_x_renderer_check_temporal)) {
+    g_temporal_support = 0;
+    REXLOG_INFO("[native_x_renderer] temporal upscalers: not checked (native_x_renderer_check_temporal off)");
+  } else {
     bool fsr4 = false, fsr3 = false;
     Fsr probe;
     probe.Generations(device->device(), &fsr4, &fsr3);
@@ -3291,22 +4118,35 @@ bool Initialize(const Profile& profile, rex::system::IGraphicsSystem* graphics, 
     }
   }
   CommandQueue::Poller poller = nullptr;
-  if (g_present_with_swaps) poller = [] { PresentPending(); };
+  if (g_present_with_swaps) poller = [] {
+    g_device->recorder().BeginInline();
+    PresentPending();
+    g_device->recorder().EndInline();
+  };
   const bool raise = REXCVAR_GET(native_x_renderer_raise_priority);
   g_queue.SetRaisePriority(raise);
+  if (threaded && REXCVAR_GET(native_x_renderer_record_thread)) {
+    const uint32_t cores = AvailableCores(), need = uint32_t(std::max(0, REXCVAR_GET(native_x_renderer_record_thread_cores)));
+    if (cores >= need) g_device->recorder().Start();
+    REXLOG_INFO("[native_x_renderer] recorder thread {} ({} cores, at least {} for it); waits {}",
+                cores >= need ? "on" : "off", cores, need, SpinWaitsAllowed() ? "spin, then sleep" : "sleep at once");
+  }
   g_queue.Start(threaded, &Execute, poller);
   if (threaded) {
     // The gate is called on the command processor's thread: its priority raised there, the first time (D136).
     static bool raise_gate = false;
     raise_gate = raise;
     graphics->SetSignalGate(
-        [](void*) {
+        [](void*, uint64_t tag) {
           static thread_local bool raised = false;
           if (raise_gate && !raised) raised = true, RaiseCurrentThreadPriority();
-          g_queue.WaitIdle();
+          g_queue.WaitIdle(tag);
         },
-        nullptr);
-    std::atexit([] { g_queue.Stop(); });
+        nullptr, [](void*) { return g_queue.Produced(); });
+    std::atexit([] {
+      g_queue.Stop();
+      if (g_device) g_device->recorder().Stop();
+    });
   }
   if (g_present_with_swaps) {
     graphics->SetSwapObserver(
@@ -3421,6 +4261,11 @@ void NightModels(const NightModelLamps* models, uint32_t count) {
   REXLOG_INFO("[native_x_renderer] night: {} models with lamps (D163)", g_night_models.size());
 }
 
+void SetWorldState(const WorldState& state) {
+  std::lock_guard lock(g_world_mutex);
+  g_world_set = state, g_world_set_at = std::chrono::steady_clock::now();
+}
+WorldState CurrentWorldState() { return World(); }
 void NightSky(const NightSkyStyle& style) {
   std::lock_guard lock(g_night_lamps_mutex);
   g_night_sky_style = style;
@@ -3628,7 +4473,7 @@ void ExecuteFrameEnd(const Command& c) {
                   frame, scoped, g_uploads.frames, g_scope_unzoomed);
       g_scope_unzoomed = 0;
     }
-    if (REXCVAR_GET(native_x_renderer_night)) {
+    if (NightPassOn()) {
       uint64_t world = 0, glow = 0, lights = 0, sprites = 0;
       const uint64_t applied = g_night.TakeApplied();
       g_night.TakeCounts(world, glow, lights, sprites);
@@ -3802,7 +4647,22 @@ void ExecuteFrameEnd(const Command& c) {
   g_stats = {};
 }
 
+// A draw's context calls are recorded for the recorder's thread; any other command, and a draw that presents
+// first, makes its own at once, after the recorded ones. A command counts as run once this thread is past it: a
+// recorded call holds copies of what it uploads, and a draw changes nothing the game reads.
+void ExecuteCommand(Command& c);
+
 void Execute(Command& c) {
+  Recorder* recorder = g_device && g_device->recorder().threaded() ? &g_device->recorder() : nullptr;
+  if (!recorder) return ExecuteCommand(c);
+  const bool record = c.type == Command::Type::kDraw && !g_pending_count;
+  if (!record) recorder->BeginInline();
+  ExecuteCommand(c);
+  if (record) recorder->Publish();
+  else recorder->EndInline();
+}
+
+void ExecuteCommand(Command& c) {
   if (g_pending_count) PresentPending();
   // A command past the last uploads-ahead window (D98): its data is no longer known to be as the window found it.
   if (g_draw && g_queue.running_index() >= g_ahead_until) g_draw->EndAheadWindow();
@@ -3849,3 +4709,9 @@ void Execute(Command& c) {
 }  // namespace
 
 }  // namespace native_x_renderer::renderer
+
+namespace native_x_renderer {
+Diligent::ITextureView* HostMsaaDrawView(HostTarget* target, bool multisampled, bool writes) {
+  return renderer::MsaaDrawView(target, multisampled, writes);
+}
+}  // namespace native_x_renderer

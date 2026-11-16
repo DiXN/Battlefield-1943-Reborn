@@ -46,6 +46,7 @@
 
 #include <native_x_renderer/native_x_renderer.h>
 
+#include "account_key.h"
 #include "capture_points.h"
 #include "display_modes.h"
 #include "game_install.h"
@@ -57,6 +58,7 @@
 #include "projects_art.h"
 #include "steam_shortcut.h"
 #include "comms.h"
+#include "world_sync.h"
 #include "text_filter.h"
 #include "changelog.h"
 #include "update.h"
@@ -97,6 +99,10 @@ REXCVAR_DEFINE_DOUBLE(bf_render_scale, 100.0, "BF1943",
 REXCVAR_DEFINE_BOOL(bf_wheel_bindable, false, "BF1943/Controls",
                     "The mouse wheel presses what the bindings name it for (WheelUp, WheelDown among a binding's keys); "
                     "false, as before the bindings had mouse columns: Toggle Weapon on foot");
+REXCVAR_DEFINE_INT32(bf_menu_max_fps, 60, "BF1943",
+                     "The launcher's pages before the game runs, at this many frames a second at most (0: no limit)");
+REXCVAR_DEFINE_INT32(bf_menu_idle_fps, 30, "BF1943",
+                     "The launcher's pages before the game runs, after 10 s without input (0: as bf_menu_max_fps)");
 REXCVAR_DEFINE_STRING(bf_temporal, "off", "BF1943",
                       "The temporal upscaler: off, fsr (AMD FSR 3.1), xess (Intel XeSS), dlss (NVIDIA DLSS) or taa (the "
                       "renderer's own); fsr4 (AMD FSR 4) is no longer offered and becomes fsr");
@@ -121,8 +127,6 @@ REXCVAR_DECLARE(bool, native_x_renderer_fill_screen);  // NativeXRenderer: ultra
 void SetFrameRate(double fps);  // frame_rate.cpp
 
 namespace bf1943 {
-int SystemFrameCap();      // frame_cap.cpp: a frame limit set outside the game (0: none known)
-void StartFrameCapRead();  // frame_cap.cpp
 
 // The real Steam and Discord marks on the launcher's cards (TekRantGaming, 11 Nov 2026; King Kong's, Simple Icons, CC0).
 namespace {
@@ -446,6 +450,7 @@ void PressStartForPlayer();  // auto_join.cpp
 void MarkExitChosen();
 void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
 void SuicideNow();  // the game's own suicide command
+void ApplyLodDistance();  // frame_rate.cpp: the level of detail's distance written to the game's settings
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
 bool LevelLoaded();
@@ -453,6 +458,17 @@ bool LoadingScreenShown();  // auto_join.cpp: the level's loading screen is up a
 
 void NameChosen(const std::string& name);  // below: the name the player chose on the first start, in use at once
 bool PollNameCheck(bool abandon);           // below: the backend's answer to a chosen name, applied once it is in
+int64_t LastGuestPresentMs();               // frame_rate.cpp: when the game last presented a frame (steady ms)
+// Protect your name (account_key.h): what the latest name check said, for the menu.
+struct AccountNews {
+  bool any = false, protected_name = false, other_owner = false;
+  std::string progress;  // the account's progress (score|seconds|captures|stats|achievements), to take back
+};
+void SetAccount(const std::string& code, const std::string& name);  // below: the recovery code and its name
+AccountNews TakeAccountNews();                                       // below: once each, from the name check
+bool SignedRegistryRequest(const std::string& code, const std::string& op, const std::string& fields,
+                           std::string& reply);                      // below
+uint32_t OnlinePlayerId();                                           // live_layers.cpp
 bool ShadersAfterUpdate();                  // below: the shaders are prepared again after an update
 bool ShadersPreparedAtStart();              // below: this version's shaders were prepared before: no shader page
 const char* BfVersion();                    // pipeline_upload.cpp
@@ -660,7 +676,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       settings_.values["cvar.native_x_renderer_antialiasing"] = "fxaa";
     settings_.values.erase("cvar.native_x_renderer_frame_generation");
     NoteStartValues();
-    StartFrameCapRead();
     ApplyFrameRate();
     open_ = true;  // the launcher is the main menu: shown from the first frame
     // The SDK plugin's storage only runs on the Xenos path (under NativeXRenderer it never finishes); NativeXRenderer
@@ -765,6 +780,36 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool open() const { return open_; }
   // For the graphics panel (f8_panel.cpp): the launcher's own pages are up; the settings file.
   bool ShowingLauncher() const { return open_ && LauncherPage(page_); }
+  // No input on the launcher's pages for `seconds` (the frame limiter then draws them at bf_menu_idle_fps).
+  static int64_t SteadyMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+  }
+  bool IdleFor(double seconds) const {
+    return SteadyMs() - last_input_ms_.load(std::memory_order_relaxed) > int64_t(seconds * 1000);
+  }
+  // The launcher's pages before the game sends frames (15 Nov 2026): the window's own loop asks for a new paint after
+  // each one and presents at once, so an idle Home page was drawn as fast as the GPU went (measured 19 to 46% of an RTX
+  // 4070 Ti, whatever the frame rate setting). Each such frame now waits for its turn: bf_menu_max_fps a second, and
+  // bf_menu_idle_fps after 10 s without a key, the mouse or a controller. Once the game sends frames (one in the last
+  // 250 ms) they pace the menu, as before.
+  void PaceLauncher() {
+    const int menu = REXCVAR_GET(bf_menu_max_fps);
+    if (menu <= 0 || !ShowingLauncher() || SteadyMs() - LastGuestPresentMs() < 250) return;
+    const int idle = REXCVAR_GET(bf_menu_idle_fps);
+    const bool idling = idle > 0 && idle < menu && IdleFor(10.0);
+    if (idling != launcher_idling_) {
+      launcher_idling_ = idling;
+      REXLOG_INFO("BF launcher: {}", idling ? fmt::format("idle (no input for 10 s): {} frames a second", idle)
+                                            : fmt::format("{} frames a second", menu));
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto period = std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(1.0 / (idling ? idle : menu)));
+    const auto now = Clock::now();
+    if (launcher_next_.time_since_epoch().count() == 0 || now > launcher_next_ + period) launcher_next_ = now;
+    if (now < launcher_next_) std::this_thread::sleep_for(launcher_next_ - now);
+    launcher_next_ += period;
+  }
   bool KeyboardLast() const { return device_.load(std::memory_order_relaxed) == Device::kKeyboard; }
   // The game's own Vertical look is Inverted (GstInput Scheme2FlipY; RefreshGameFlipY keeps it), for look.cpp.
   bool GameFlipY() const { return game_flip_y_.load(std::memory_order_relaxed); }
@@ -822,6 +867,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
  protected:
   void OnDraw(ImGuiIO& io) override {
+    PaceLauncher();
     // The keyboard's Esc in a match with our menu closed opens the pause, as the controller's Start does (auto_join.cpp
     // takes it at the next pad read; only with the soldier in the world, as Start).
     if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !comms::TypingOrJustClosed())
@@ -886,9 +932,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
 #endif
     if (!open_) PauseTest();
-    // A frame limit outside the game found since (the driver's read, or measured): the rate offered at most.
-    if (SystemFrameCap() != applied_cap_) ApplyFrameRate();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
+    ApplyLodDistance();
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
     if (const int stage = MenuDriverStage(); stage != last_stage_) {
@@ -999,14 +1044,22 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (quick_waiting_ > 0) {
       if (list_.answers() > quick_asked_at_) {
         quick_waiting_ = 0;
-        if (!QuickJoin()) {
+        if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) {
+          menu_error_.clear();
+          ShowNotice(n, "Quick Play");
+        } else if (!QuickJoin()) {
           menu_error_ = list_.reachable() ? "No server has room right now. Try again in a moment, or open the server browser."
                                          : "The servers do not answer. Check your internet connection.";
           menu_error_at_ = ImGui::GetTime();
         }
       } else if (ImGui::GetTime() > quick_waiting_) {
         quick_waiting_ = 0;
-        menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = ImGui::GetTime();
+        if (const ServerNotice n = list_.notice(); n.active()) {  // the backend is down: the last notice known
+          menu_error_.clear();
+          ShowNotice(n, "Quick Play");
+        } else {
+          menu_error_ = "The servers do not answer. Check your internet connection.", menu_error_at_ = ImGui::GetTime();
+        }
       }
     }
 
@@ -1116,7 +1169,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
     const bool over_popup =
-        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_;
+        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_ ||
+        notice_popup_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1155,6 +1209,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (over_popup) {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
+      else if (notice_popup_) NoticePopup(d, io, popup_in);
       else if (new_version_popup_) NewVersionPopup(d, io, popup_in);
       else if (own_popup_) OwnBackendPopup(d, io, popup_in);
       else if (exp_popup_) ExperimentalPopup(d, io, popup_in);
@@ -1887,7 +1942,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // The selected row's card, at the right, and the backend's numbers.
     static const std::map<std::string, const char*> kAbout = {
         {"QUICK MATCH", "Straight into the busiest server with room."},
-        {"SERVER BROWSER", "Every official and community server: maps, players and ping."},
+        {"SERVER BROWSER", "Every Reborn and community server: maps, players and ping."},
         {"JOIN MATCH WITH FRIENDS", "The game's own friends list and invitations."},
         {"CUSTOM MATCH", "Host a match on this PC for you and your friends: pick the map, then play. Friends "
                                  "join it by Direct connect."},
@@ -1915,7 +1970,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const auto servers = list_.servers();
     int players = 0;
     for (const auto& sv : servers) players += sv.players;
+    const ServerNotice notice = list_.notice();
     const std::string online = !list_.asked()       ? "CONNECTING"
+                               : notice.active()    ? "SERVERS CLOSED \xC2\xB7 " + Upper(notice.title)
                                : !list_.reachable() ? "SERVERS NOT REACHABLE"
                                : fmt::format("{} {}  /  {} {}", servers.size(), servers.size() == 1 ? "SERVER" : "SERVERS",
                                              players, players == 1 ? "PLAYER" : "PLAYERS");
@@ -2236,6 +2293,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     }
   }
   void Join(const ServerInfo& sv) {
+    // Maintenance mode (server_list.h ServerNotice): the backend refuses every join; said at once, no round trip. On a
+    // LAN match's own backend the main one's notice says nothing.
+    if (const ServerNotice n = list_.notice(); n.active() && own_backend_.empty()) return ShowNotice(n, sv.name);
     if (sv.locked && pw_passed_ != sv.gid + "@" + sv.address) {
       pw_popup_ = true, pw_server_ = sv, pw_text_.clear(), pw_error_.clear();
       return;
@@ -2257,9 +2317,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     if (const char* v = std::getenv("BF_DEV_NO_GATE_PRECHECK"); v && *v == '1') needs.clear();
 #endif
     if (!needs.empty() && update::IsNewerVersion(needs, BfVersion())) return AskToUpdate(needs, sv.name);
-    switch (list_.Reserve(sv.gid, &needs)) {
+    ServerNotice refusal;
+    switch (list_.Reserve(sv.gid, &needs, &refusal)) {
       case ServerList::Reserved::kYes: break;
       case ServerList::Reserved::kOutdated: return AskToUpdate(needs, sv.name);
+      case ServerList::Reserved::kRefused: return ShowNotice(refusal, sv.name);
       case ServerList::Reserved::kNo:
         REXLOG_WARN("BF join: {} could not be reserved (no answer from the server list, or the server is gone)", sv.name);
         menu_error_ = "Could not join that server: the server list did not answer. Try again in a moment.";
@@ -2273,6 +2335,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     joining_map_ = sv.map;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
+    world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -2338,10 +2401,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   int browser_tab_ = 0;  // 0 official, 1 community, 2 direct connect
   bool sort_by_ping_ = false;
 
-  // Night Ops (TekRantGaming, 11 Nov 2026): a night server's maps drawn at night (NativeXRenderer D162), only while
-  // playing there: on at the join, off at another server's, at the match's end and in the tutorial.
+  // Night Ops (TekRantGaming, 11 Nov 2026): a night server's maps drawn at night. Since 16 Nov 2026 a Night Ops server
+  // keeps its night through its world (the day and night cycle held at midnight, server/gmhost.py's World), so the
+  // renderer's old night look (D162) is never switched on here; this keeps it off (a setting may have asked for it).
   static void SetJoinedServerNight(bool night) {
-    if (!kNightOps) night = false;  // night_ops.h: not in this build
+    night = false;  // the cycle draws a Night Ops server's night (NativeXRenderer D175); kNightOps still lists them
     const std::string was = rex::cvar::GetFlagByName("native_x_renderer_night");
     if (was == (night ? "true" : "false")) return;
     const bool set = rex::cvar::SetFlagByName("native_x_renderer_night", night ? "true" : "false");
@@ -2734,8 +2798,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
   // The frame rates offered (TekRantGaming, 9 Nov 2026): the game updates its world 30 times a second, so rates that divide
-  // into 30 keep motion even; up to the screen's refresh rate and a frame limit set outside the game
-  // (frame_cap.cpp: NVIDIA's Max Frame Rate, or one measured). Unlimited only without such a limit.
+  // into 30 keep motion even. Every rate and Unlimited, whatever the screen's refresh rate or a limit set outside the
+  // game (TekRantGaming, 15 Nov 2026: "unlimited frame rate truly is unlimited frame rate"; from 9 Nov they were held
+  // to the screen's rate and to NVIDIA's Max Frame Rate or one measured, frame_cap.cpp, now gone).
   int ScreenRefresh() {
     rex::ui::Window* window = window_ ? window_() : nullptr;
     if (settings_.Get("fullscreen", "off") == "on")
@@ -2745,13 +2810,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     return desktop.refresh > 0 ? int(std::lround(desktop.refresh)) : 0;
   }
   std::vector<std::string> OfferedRates() {
-    const int refresh = ScreenRefresh(), cap = SystemFrameCap();
-    int most = refresh > 0 ? refresh + 1 : 1000;  // 59.94 Hz offers 60
-    if (cap > 0) most = std::min(most, cap);
     std::vector<std::string> rates;
-    for (int r = 30; r <= 240; r += 30)
-      if (r <= 60 || r <= most) rates.push_back(std::to_string(r));
-    if (cap <= 0) rates.push_back("unlimited");
+    for (int r = 30; r <= 240; r += 30) rates.push_back(std::to_string(r));
+    rates.push_back("unlimited");
     return rates;
   }
   // The saved choice as it applies now: the highest offered rate at or below it (110 or 144 saved: 90 or 120).
@@ -2767,12 +2828,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
   void ApplyFrameRate() {
     const std::string fps = EffectiveFrameRate();
-    applied_cap_ = SystemFrameCap();
     SetFrameRate(fps == "unlimited" ? 0.0 : std::atof(fps.c_str()));
     if (fps != applied_rate_) {
-      REXLOG_INFO("BF frame rate: {} (chosen {}; screen {} Hz; a limit outside the game: {})", fps,
-                  settings_.Get("frame_rate", DefaultFrameRate()), ScreenRefresh(),
-                  applied_cap_ ? std::to_string(applied_cap_) : std::string("none"));
+      REXLOG_INFO("BF frame rate: {} (chosen {}; screen {} Hz)", fps, settings_.Get("frame_rate", DefaultFrameRate()),
+                  ScreenRefresh());
       applied_rate_ = fps;
     }
   }
@@ -3276,9 +3335,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     std::string help =
         "The most frames the game draws a second. The game updates its world 30 times a second, so these rates keep "
         "motion even. The Xbox 360 ran it at 30. Applies at once.";
-    if (const int cap = SystemFrameCap(); cap > 0)
-      help += " A frame limit of " + std::to_string(cap) + " is set outside the game (your graphics driver or a "
-              "tool), so the most offered is " + rates.back() + ".";
     SettingRow frame{"Frame rate", "Frame rate", help, rate_names,
                      int(std::find(rates.begin(), rates.end(), fps) - rates.begin())};
     if (frame.index >= int(rates.size())) frame.index = std::min(1, int(rates.size()) - 1);
@@ -3288,6 +3344,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       ApplyFrameRate();
     };
     rows.push_back(frame);
+    rows.push_back(Toggle("Frame rate", "Future frame rendering",
+                          "Renders a frame ahead for a higher frame rate, but adds input lag. Off gives the lowest "
+                          "input lag. Applies at once.",
+                          "bf_two_frames_in_flight"));
 
     // Camera: King Kong's rows; BF's camera and effects first need finding in the game's code.
     // Field of view (fov.cpp): horizontal at 16:9; the game's own is 86. Aiming down sights still narrows it.
@@ -3315,6 +3375,15 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "With Motion blur on: soldiers, vehicles and other moving things blur by their own "
                           "movement too, not only the camera's. Applies at once.",
                           "native_x_renderer_motion_blur_objects"));
+    // After 0.4.5: the renderer's own depth of field while aiming (NativeXRenderer dof.h); the game's zoom blur is gone.
+    rows.push_back(Toggle("Camera", "ADS depth of field",
+                          "While you aim down the sights, what is close to your eye (the gun) goes softly out of "
+                          "focus and what you aim at stays sharp. Off: everything stays sharp. Applies at once.",
+                          "native_x_renderer_ads_dof"));
+    rows.push_back(Choice("Camera", "Depth of field quality",
+                          "How smooth the out of focus blur is: higher takes more samples for each pixel and costs "
+                          "more. Applies at once.",
+                          "native_x_renderer_dof_quality", {{"Low", "low"}, {"Medium", "medium"}, {"High", "high"}}));
     rows.push_back(Toggle("Camera", "Hit and explosion blur",
                           "The game's screen blur from nearby explosions, bullets and low health. Applies at once.",
                           "bf_motion_blur"));
@@ -3394,6 +3463,42 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                            {"CMAA 2 Ultra", "cmaa_ultra"}});
     if (temporal) aa_row.disabled = true, aa_row.note = "The upscaler below antialiases the picture itself.";
     rows.push_back(aa_row);
+    // 13 Nov 2026, "Let's build MSAA 2x and 4x": the renderer's own multisampling of the game's view (NativeXRenderer
+    // targets.h), for what is thinner than a pixel at a distance (the radio mast, power lines), which the antialiasing
+    // above cannot put back. Works together with it.
+    // 14 Nov 2026, stage 1 of the day and night work (NativeXRenderer sky.h): a sky of the renderer's own.
+    rows.push_back(Toggle("Sky", "Day and night (experimental)",
+                          "The time of day changes the game's own light: warm and low at dusk, moonlit at night. The "
+                          "sun's direction and the shadows turn with it, and the sky follows, whichever sky is chosen "
+                          "below. In a match whose server keeps its world, the server decides this and sets the "
+                          "hour and the weather. Applies at once.",
+                          "native_x_renderer_day_night"));
+    rows.push_back(Choice("Sky", "Sky",
+                          "The game's original painted sky, or a sky drawn live with volumetric clouds that drift, a "
+                          "sun and a moon, and stars at night. Applies at once.",
+                          "native_x_renderer_sky", {{"Original", "false"}, {"Volumetric clouds", "true"}}));
+    // (The clock and the weather are not here: "take them out of the graphics settings. Players use what the server
+    // sets", 15 Nov 2026. A match's host sets them: Custom match's Weather and time, the admin's F9, a server's page.)
+    rows.push_back(Toggle("Sky", "Lightning",
+                          "A storm's lightning: flashes in the clouds, on the fog and on the ground. Off, the storm "
+                          "keeps its rain, mist and wind without them. Applies at once.",
+                          "native_x_renderer_lightning"));
+    rows.push_back(Toggle("Sky", "Rain on the lens",
+                          "While you stand in the rain, drops gather on the view and run down it; they dry off under "
+                          "cover. Off, the rain only falls in the world. Applies at once.",
+                          "native_x_renderer_rain_lens"));
+    rows.push_back(Toggle("Sky", "Wet weapon and hands",
+                          "What you hold gets wet in the rain, and at once if you go under the sea: darker, with beads "
+                          "of water that stay where they are on it. It dries in about half a minute under cover. "
+                          "Applies at once.",
+                          "native_x_renderer_wetness"));
+    rows.push_back(Choice("Image", "MSAA",
+                          "Draws the edges of everything in the world with 2 or 4 samples in each pixel, so thin "
+                          "distant things (masts, power lines, railings) stay whole instead of breaking into dots, "
+                          "and edges are smoother. Works together with Antialiasing above. Costs frame rate and "
+                          "video memory, 4x more than 2x; the first minutes after a change can stutter while the "
+                          "game's shaders are prepared again. Applies at once.",
+                          "native_x_renderer_msaa", {{"Off", "1"}, {"2x", "2"}, {"4x", "4"}}));
     // The Upscaling section (13 Nov 2026): the temporal upscalers, their mode and their own sharpness. They work on
     // the 3D view before the game's post-processing, with the picture's motion, so they also steady shimmer that the
     // antialiasing above cannot. Not offered since 0.4.4 (kTemporalUpscalers): FSR 1 and NIS below stay.
@@ -3514,6 +3619,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Your own weapon and hands in first person are not smoothed yet and can still step. "
                           "Animated things are drawn one tick behind. Off is the game's own animation.",
                           "bf_smooth_bones"));
+    // The level of detail's distance (frame_rate.cpp: each model's own switch distances times this).
+    rows.push_back(Slider("Image", "Detail distance",
+                          "How far away objects, buildings, vehicles, trees, bushes and rocks keep their detailed "
+                          "shape before they switch to simpler ones, and how far they are drawn at all. 1.00x is the "
+                          "original game's. 2x carries soldiers, vehicles and ships across the whole map; 8x carries "
+                          "buildings and trees across it too, at a cost in frame rate. Applies within a second.",
+                          "bf_lod_distance", 1.0f, 8.0f, 1.0f,
+                          [](float v) { return fmt::format("{:.1f}\xC3\x97", v); }, 2.0f));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},
@@ -4031,7 +4144,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(Toggle("HUD", "SMG aiming",
                           "What aiming does with a submachine gun. Zoom In is the game's own: the gun is pulled in "
                           "and you aim with the crosshair. Iron Sight brings the gun's own sights to your eye, as "
-                          "the rifles and pistols do, without the zoom's blur. Only your view changes: where the "
+                          "the rifles and pistols do. Only your view changes: where the "
                           "shots go is the same. Applies at once.",
                           "bf_smg_sights", "Zoom In", "Iron Sight"));
     rows.push_back(Toggle("HUD", "Iron Sight crosshair",
@@ -4469,6 +4582,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (w == "bfleft") PressBf({0x0004}), Passing(0x0004);
       else if (w == "bfrb") PressBf({0x0200}), Passing(0x0200);
       else if (w == "bflb") PressBf({0x0100}), Passing(0x0100);
+      else if (w == "bfy") PressBf({0x8000}), Passing(0x8000);  // in play: the next weapon (the wetness's tests)
+#if defined(BF_DEV_TOOLS)
+      else if (w == "changeteam") ChangeTeamNow();  // the other team's hands and weapons (the wetness's tests)
+#endif
     }
   }
 
@@ -5044,6 +5161,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     mouse_frames_ = io.MouseDelta.x != 0 || io.MouseDelta.y != 0 ? mouse_frames_ + 1 : 0;
     const bool mouse_used = mouse_frames_ >= 2 || ImGui::IsMouseClicked(ImGuiMouseButton_Left) ||
                             ImGui::IsMouseClicked(ImGuiMouseButton_Right) || io.MouseWheel != 0;
+    // Any input: the launcher's pages leave their idle frame rate (LauncherIdle, frame_rate.cpp's bf_menu_idle_fps).
+    if (key_used || pad_pressed || io.MouseDelta.x != 0 || io.MouseDelta.y != 0 || io.MouseWheel != 0 ||
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+      last_input_ms_.store(SteadyMs(), std::memory_order_relaxed);
+    }
     const Device was = device_.load(std::memory_order_relaxed);
     Device to = was;
     if (key_used || mouse_used) to = Device::kKeyboard;
@@ -5087,6 +5209,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool late = ImGui::GetTime() - name_ready_at_ > 3.0;
       if (PollNameCheck(late) || late) name_ready_at_ = 0;
     }
+    // Protect your name: the name check's answer (signed in for the protected name, with the account's progress to take
+    // back; or the name is another player's), and a claim or recovery done on the name page.
+    if (const AccountNews news = TakeAccountNews(); news.any) {
+      acct_online_ = news.protected_name ? 1 : news.other_owner ? 2 : 0;
+      if (!news.progress.empty()) TakeBackProgress(news.progress, "the name check");
+    }
+    ApplyAccountResult();
     const bool named = settings_.Get("player_name_chosen", "") == "1";
     // With the launcher before the game, the game started from it (Play, or a server picked on Home) boots hidden
     // behind our pages and signs in by itself (TekRantGaming, 10 Nov 2026: our startup videos in place of the game's own
@@ -5152,6 +5281,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::atomic<Device> device_{Device::kPad};  // the UI thread (TrackDevice) and the game's pad reads (NoteMatchDevice)
   std::atomic<bool> game_flip_y_{false};      // GameFlipY: the game's own Vertical look, for the pad hook's thread
   int mouse_frames_ = 0;
+  std::atomic<int64_t> last_input_ms_{SteadyMs()};  // the last key, mouse or controller input (IdleFor)
+  bool launcher_idling_ = false;                    // PaceLauncher
+  std::chrono::steady_clock::time_point launcher_next_{};
   double pad_at_[12] = {}, key_at_[12] = {};
   bool pad_pressed_ = false;  // pad_mutex_
   bool release_click_ = false;  // a test's click: the button goes up a frame later
@@ -5191,10 +5323,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   int name_key_ = 10;
   bool typed_logged_ = false;
   bool accept_from_key_ = false;
-  int applied_cap_ = -1;            // the outside frame limit ApplyFrameRate last saw
   std::string applied_rate_;        // the frame rate it last applied  // this frame's accept was the keyboard's Enter (MergeInput)
   bool name_caps_ = true;
   Page name_from_ = Page::kHome;
+  // Protect your name (the name page; game_menu_launcher.inc): a claim or a recovery on a worker, its outcome applied
+  // here; the code field (the name field holds a recovery code while code_mode_).
+  struct AccountResult {
+    bool ready = false, recover = false, answered = false, ok = false;
+    std::string why, name, code, progress;
+  };
+  std::mutex acct_mutex_;
+  AccountResult acct_result_;
+  std::atomic<bool> acct_busy_{false};
+  std::string acct_message_;
+  bool acct_message_bad_ = false, acct_show_code_ = false, code_mode_ = false;
+  int acct_online_ = 0;  // from this start's name check: 1 signed in for the protected name, 2 another player's name
 
   Settings settings_;
   std::function<void(bool)> fullscreen_;
@@ -5525,12 +5668,26 @@ void ApplyStartupDisplaySettings(const fs::path& user_dir) {
   if (auto it = settings.values.find("letterbox"); it != settings.values.end())
     rex::cvar::SetFlagByName("present_letterbox", it->second == "on" ? "true" : "false");
   // VSync, as King Kong's row: off lets frames show at once (tearing allowed, Vulkan's immediate or mailbox
-  // present), on waits for the screen's refresh.
-  if (auto it = settings.values.find("vsync"); it != settings.values.end()) {
-    const char* tear = it->second == "on" ? "false" : "true";
+  // present), on waits for the screen's refresh. Our renderer takes it from native_x_renderer_present_mode, before
+  // its swap chain is made (TekRantGaming, 15 Nov 2026: "on equals vsync on, off equals vsync off"; until then On
+  // set only the SDK's own presenters' options and NativeXRenderer went on with MAILBOX): on is FIFO, off IMMEDIATE
+  // (else MAILBOX, else FIFO). Not MAILBOX for off: NVIDIA's queues frames at the screen's rate (D107), and in
+  // borderless fullscreen it held TekRantGaming's RTX 4070 Ti to 120 FPS on a 120 Hz screen with Unlimited and V-Sync off
+  // (0.4.7-indev3: 8.34 ms a frame, 7 ms of it waiting for the GPU, 1 ms of work).
+  // No temporal upscaler is offered (kTemporalUpscalers): the renderer does not load AMD's and Intel's libraries at
+  // the start to ask whether this GPU runs them (15 Nov 2026: about 110 MB of DLLs loaded for nothing at each start,
+  // and a vendor library's start on a driver it was never tried with is a crash risk; the package no longer carries
+  // them, make_packages.ps1).
+  if (!kTemporalUpscalers) rex::cvar::SetFlagByName("native_x_renderer_check_temporal", "false");
+  // No saved choice is Off, as the row shows it.
+  {
+    const auto it = settings.values.find("vsync");
+    const bool on = it != settings.values.end() && it->second == "on";
+    const char* tear = on ? "false" : "true";
     rex::cvar::SetFlagByName("d3d12_allow_variable_refresh_rate_and_tearing", tear);
     rex::cvar::SetFlagByName("vulkan_allow_present_mode_immediate", tear);
     rex::cvar::SetFlagByName("vulkan_allow_present_mode_mailbox", tear);
+    rex::cvar::SetFlagByName("native_x_renderer_present_mode", on ? "vsync" : "immediate");
   }
 }
 
@@ -5589,6 +5746,7 @@ void ApplyPlayerIdentity(const fs::path& user_dir) {
     else REXLOG_INFO("BF name: bf_player_name is not allowed (profanity): not used");
   }
   SetPlayerIdentity(name, id);
+  SetAccount(settings.Get("account_code", ""), settings.Get("account_name", ""));
   StartNameCheck(name, id);
 }
 
@@ -5610,6 +5768,52 @@ std::shared_ptr<NameCheck> g_name_check;
 }  // namespace
 uint32_t OnlinePlayerId();          // live_layers.cpp
 const std::string& PlayerName();   // live_layers.cpp
+
+// ---- Protect your name (account_key.h; the backend's accounts, server/plasma.py). The player's recovery code and the
+// name it protects (settings account_code, account_name), for the name check and the stats, which run off the menu.
+namespace {
+std::mutex g_account_mutex;
+std::string g_account_code, g_account_name;
+AccountNews g_account_news;
+bool SameName(const std::string& a, const std::string& b) {
+  if (a.size() != b.size()) return false;
+  for (size_t i = 0; i < a.size(); ++i)
+    if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) return false;
+  return true;
+}
+}  // namespace
+void SetAccount(const std::string& code, const std::string& name) {
+  std::lock_guard lock(g_account_mutex);
+  g_account_code = code, g_account_name = name;
+}
+// The code, when it protects this name (any case): else empty.
+std::string AccountCodeFor(const std::string& name) {
+  std::lock_guard lock(g_account_mutex);
+  return !g_account_code.empty() && SameName(g_account_name, name) ? g_account_code : std::string();
+}
+AccountNews TakeAccountNews() {
+  std::lock_guard lock(g_account_mutex);
+  AccountNews news = g_account_news;
+  g_account_news = {};
+  return news;
+}
+// One signed request: a challenge first, then the op with the account's key, the text signed ("op|nonce|fields") and
+// its signature. False when the backend gave no challenge (a LAN backend, or one from before accounts) or no answer.
+bool SignedRegistryRequest(const std::string& code, const std::string& op, const std::string& fields, std::string& reply) {
+  std::string first;
+  if (!RegistryRequest("{\"op\": \"challenge\"}", first)) return false;
+  const std::string nonce = JsonField(first, "nonce");
+  if (nonce.size() != 32) {
+    reply = first;  // its "why": "lan" (a LAN backend keeps no accounts), "too_many"
+    return false;
+  }
+  const account::Key key = account::KeyFromCode(code);
+  const std::string text = op + "|" + nonce + (fields.empty() ? "" : "|" + fields);
+  const std::string request = "{\"op\": \"" + op + "\", \"key\": \"" + account::PublicHex(key) + "\", \"signed\": \"" +
+                              text + "\", \"sig\": \"" + account::Sign(key, text) + "\"}";
+  return RegistryRequest(request, reply);
+}
+
 void StartNameCheck(const std::string& name, uint32_t player_id) {
   if (REXCVAR_GET(server) || REXCVAR_GET(bf_online_host).empty() || name.empty()) return;
   auto check = std::make_shared<NameCheck>();
@@ -5618,13 +5822,32 @@ void StartNameCheck(const std::string& name, uint32_t player_id) {
   char id[9];
   std::snprintf(id, sizeof(id), "%08X", OnlinePlayerId());
   const std::string request = "{\"op\": \"name\", \"name\": \"" + name + "\", \"id\": \"" + id + "\"}";
-  std::thread([check, request] {
+  // A protected name signs in for it (the backend holds it for this player then, and gives the account's progress).
+  const std::string code = AccountCodeFor(name), signed_fields = name + "|" + id;
+  std::thread([check, request, code, signed_fields] {
 #if defined(_WIN32)
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 #endif
     std::string reply, answer;
-    if (RegistryRequest(request, reply)) answer = JsonField(reply, "name");
+    bool asked = false;
+    if (!code.empty()) {
+      asked = SignedRegistryRequest(code, "name", signed_fields, reply) && !JsonField(reply, "name").empty();
+      if (!asked) REXLOG_WARN("BF account: the backend took no signed name check (an older backend?): asked plainly");
+    }
+    if (!asked) reply.clear(), asked = RegistryRequest(request, reply);
+    if (asked) {
+      answer = JsonField(reply, "name");
+      AccountNews news;
+      news.any = true;
+      news.protected_name = JsonField(reply, "protected") == "true";
+      news.other_owner = JsonField(reply, "protected_by_other") == "true";
+      news.progress = JsonField(reply, "progress_text");
+      if (news.protected_name) REXLOG_INFO("BF account: signed in for the protected name {}", answer);
+      if (news.other_owner) REXLOG_INFO("BF account: the name asked for is another player's protected name");
+      std::lock_guard lock(g_account_mutex);
+      g_account_news = news;
+    }
     std::lock_guard lock(check->mutex);
     check->answer = answer;
     check->done = true;
@@ -5677,8 +5900,8 @@ void FinishNameCheck() {
 
 bool GraphicsPanelOpen();               // f8_panel.cpp
 void GraphicsPanelPad(uint16_t buttons);  // f8_panel.cpp
-// Our menus or the graphics panel (F8) have the controller and the mouse.
-bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen(); }
+// Our menus, the graphics panel (F8) or the match admin's panel (F9) have the controller and the mouse.
+bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen() || world::AdminPanelOpen(); }
 bool LauncherShowing() { return g_menu && g_menu->ShowingLauncher(); }
 bool LauncherKeyboardLast() { return g_menu && g_menu->KeyboardLast(); }
 // look.cpp (the vehicle mouse's stick): the game's own Vertical look is Inverted (GstInput Scheme2FlipY).

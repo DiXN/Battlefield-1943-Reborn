@@ -272,6 +272,64 @@ class CommsTest(unittest.TestCase):
         self.comms.tick(now + 12)
         self.assertEqual(len(self.sent(gmhost.C_BROADCAST)), 3)
 
+    def test_balance_file_tells_the_players(self):
+        import json
+        import tempfile
+        import time
+        self.join('Alpha', CA, 1, 1)
+        self.join('Bravo', CB, 1, 2)
+        self.join('Delta', CD, 2, 1)
+        self.sent()
+        path = os.path.join(tempfile.mkdtemp(prefix='bfbal_'), 'balance.txt')
+        self.comms.balance_file = path
+
+        def add(*events, mode='a'):
+            with open(path, mode, encoding='utf-8') as f:
+                for e in events:
+                    f.write(json.dumps(e) + '\n')
+
+        def chat_lines():
+            out = []
+            for addr, body in self.sent(gmhost.C_CHAT_RELAY):
+                frm, msg, ch, team = struct.unpack_from('>HHBB', body)
+                n = body[6]
+                out.append((addr, frm, ch, body[7:7 + n].decode(), body[8 + n:].decode()))
+            return out
+
+        now = time.monotonic()
+        add({'seq': 1, 'kind': 'moved', 'name': 'Alpha', 'team': 1, 'to': 2}, mode='w')
+        self.comms.tick(now)  # the host's first look: an earlier run's lines are not told
+        add({'seq': 2, 'kind': 'warn', 'name': '', 'team': 1, 'to': 2})
+        self.comms.tick(now + 1)
+        lines = chat_lines()
+        self.assertEqual(sorted({l[0] for l in lines}), [CA, CB])  # the bigger team only, twice each
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0][1:4], (0, gmhost.CHAT_TEAM, 'Server'))
+        self.assertIn('next US player', lines[0][4])
+        add({'seq': 3, 'kind': 'moved', 'name': 'Bravo', 'team': 1, 'to': 2})
+        self.comms.tick(now + 2)
+        boxes = self.host.transport.packets[:]
+        lines = chat_lines()
+        self.assertEqual(sorted({l[0] for l in lines}), [CA, CB, CD])
+        self.assertEqual(lines[0][4], 'Bravo was moved to Japan to even the teams')
+        told = [(addr, data[9:]) for addr, data in boxes if data[8] == gmhost.C_BROADCAST]
+        self.assertEqual({addr for addr, _ in told}, {CB})  # the message box: the moved player only
+        self.assertIn('No points lost', told[0][1][5:].decode())
+        add({'seq': 4, 'kind': 'refused', 'name': 'Delta', 'team': 2, 'to': 1})
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('{"seq": 5, "kind": "mo')  # half written: read once it is whole
+        self.comms.tick(now + 3)
+        told = self.sent(gmhost.C_BROADCAST)
+        self.assertEqual({addr for addr, _ in told}, {CD})
+        self.assertIn('refused', told[0][1][5:].decode())
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write('ved", "name": "Delta", "team": 2, "to": 1}\n')
+        self.comms.tick(now + 4)
+        self.assertEqual(chat_lines()[0][4], 'Delta was moved to US to even the teams')
+        add({'seq': 1, 'kind': 'moved', 'name': 'Alpha', 'team': 2, 'to': 1}, mode='w')  # the server started again
+        self.comms.tick(now + 5)
+        self.assertEqual(chat_lines()[0][4], 'Alpha was moved to US to even the teams')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

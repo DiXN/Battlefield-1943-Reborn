@@ -13,12 +13,18 @@ namespace {
 
 // Clip z and w rows almost parallel (King Kong Recompiled's LooksLikePerspectiveRows): the x, y and w rows not zero,
 // z = k w with 0.8 < k < 1.25 over the position's x, y and z, within 5 % of w's length.
-bool LooksLikePerspective(const Mat4d& m) {
+bool LooksLikePerspective(const uint8_t* constants, bool transposed) {
+  float v[16];
+  std::memcpy(v, constants, sizeof(v));
+  double rows[4][3];
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 3; ++c) rows[r][c] = transposed ? v[c * 4 + r] : v[r * 4 + c];
+  }
   auto dot3 = [](const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; };
-  const double* x = m.data();
-  const double* y = m.data() + 4;
-  const double* z = m.data() + 8;
-  const double* w = m.data() + 12;
+  const double* x = rows[0];
+  const double* y = rows[1];
+  const double* z = rows[2];
+  const double* w = rows[3];
   const double ww = dot3(w, w);
   if (!(ww > 1e-8) || !(dot3(x, x) > 1e-8) || !(dot3(y, y) > 1e-8)) return false;
   const double k = dot3(z, w) / ww;
@@ -99,7 +105,7 @@ bool CameraVote::FindMatrix(const uint8_t* constants, const uint8_t* registers, 
   for (uint32_t i = 0; i + 4 <= count; ++i) {
     if (registers[i + 3] != registers[i] + 3) continue;  // four consecutive registers
     for (bool transposed : {false, true}) {
-      if (LooksLikePerspective(MatrixAt(constants, i, transposed))) {
+      if (LooksLikePerspective(constants + size_t(i) * 16, transposed)) {
         index = i;
         layout_transposed = transposed;
         return true;

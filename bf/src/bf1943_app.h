@@ -33,6 +33,8 @@
 namespace bf1943 {
 void InstallFpeGuard();  // fpe_guard.cpp
 void RaiseTimerResolution();  // frame_rate.cpp
+void SetPacingWindow(void* native_window);  // frame_rate.cpp: the frame limit while minimised
+void NoteWindowMinimized(bool minimized);   // frame_rate.cpp (not Windows: from the window's events)
 void ExtractGameArt(const std::filesystem::path& game, const std::filesystem::path& out_dir);  // shader_prep.cpp
 void SetLevelGameRoot(const std::filesystem::path& game);  // shader_prep.cpp: the level's water height for the grass
 void HdExport(const std::filesystem::path& game);          // shader_prep.cpp: developer, the HD pack's source
@@ -54,6 +56,7 @@ std::string StartupGpuPlugin(const std::filesystem::path& user_dir);      // gam
 void HideServerWindows();                                                // server_mode.cpp
 void CreatePerfOverlay(rex::ui::ImGuiDrawer* drawer);                    // perf_overlay.cpp
 void CreateCommsOverlay(rex::ui::ImGuiDrawer* drawer);                  // comms_ui.cpp
+void CreateWorldAdminPanel(rex::ui::ImGuiDrawer* drawer);               // world_sync.cpp: the match admin's panel (F9)
 void CreateSpawnMouseOverlay(rex::ui::ImGuiDrawer* drawer);             // flash_mouse.cpp
 void CreateGraphicsPanel(rex::ui::ImGuiDrawer* drawer, rex::ui::Window* window);  // f8_panel.cpp
 void InstallHudGlyphs();                                                     // hud_glyphs.cpp
@@ -113,6 +116,10 @@ class Bf1943App : public rex::ReXApp {
     bf1943::RaiseTimerResolution();  // 1 ms sleeps for the game's waits and our frame limit (frame_rate.cpp)
     bf1943::ApplyStartupDisplaySettings(paths_.user_data_root);  // before the window is made
     bf1943::ApplyPlayerIdentity(paths_.user_data_root);          // the player's own name and XUID
+    // A dedicated server skips a guest call through a broken function pointer instead of stopping with every player in
+    // it (our SDK copy's guest_invalid_call_skip; All Maps 3, 14 and 15 Nov 2026: four such stops, by null, freed and
+    // stack addresses). Logged with the caller; the client keeps the SDK's stop.
+    if (REXCVAR_GET(server)) rex::cvar::SetFlagByName("guest_invalid_call_skip", "true");
     // Every graphics device on the high-performance GPU (King Kong's fix, gpu_preference.cpp): before the GPU plugin
     // makes its provider below, unless the player chose one (vulkan_device, d3d12_adapter). Hybrid laptops ran the game
     // on the integrated GPU (TekRantGaming, 11 Nov 2026). NativeXRenderer's own device takes the same vulkan_device.
@@ -161,6 +168,7 @@ class Bf1943App : public rex::ReXApp {
   void OnPostSetup() override {
     // The window's title (TekRantGaming, 10 Nov 2026): the game's name, not the SDK's "bf1943" and its build stamp.
     if (window()) window()->SetTitle("Battlefield 1943 Reborn");
+    if (window()) bf1943::SetPacingWindow(window()->GetNativeWindowHandle());
     bf1943::InstallFpeGuard();  // after the runtime's own signal handlers
     bf1943::HideServerWindows();  // a dedicated server shows no window (server_mode.cpp)
     // NativeXRenderer (native_x_renderer_bf1943.cpp), before the guest starts. Off unless its settings are on
@@ -180,6 +188,14 @@ class Bf1943App : public rex::ReXApp {
   // Just before the game starts: the backend's answer to the player's name (game_menu.cpp, a number added when another
   // player online has it), so the game only ever sees one name.
   void OnPreLaunchModule() override { bf1943::FinishNameCheck(); }
+
+  // The frame limit while minimised (frame_rate.cpp; Windows reads the window's own state instead).
+  void OnWindowMinimized() override { bf1943::NoteWindowMinimized(true); }
+  void OnWindowRestored() override { bf1943::NoteWindowMinimized(false); }
+  void OnWindowFocusChanged(bool focused) override {
+    if (focused) bf1943::NoteWindowMinimized(false);
+    rex::ReXApp::OnWindowFocusChanged(focused);
+  }
 
   // The game's module is launched: the time, for a game that ends while it is still starting (OnShutdown).
   void OnPostLaunchModule(rex::system::XThread* thread) override {
@@ -331,6 +347,7 @@ class Bf1943App : public rex::ReXApp {
         [this] { return window(); }, [this] { return paths_.game_data_root; });
     if (!AbOff("overlay")) bf1943::CreatePerfOverlay(drawer);  // Settings > Gameplay > Performance metrics, F2
     if (!REXCVAR_GET(server)) bf1943::CreateCommsOverlay(drawer);  // text chat top left, voice chat (comms_ui.cpp)
+    if (!REXCVAR_GET(server)) bf1943::CreateWorldAdminPanel(drawer);  // F9, a match's admin (world_sync.cpp)
     if (!REXCVAR_GET(server)) bf1943::CreateSpawnMouseOverlay(drawer);  // the deploy screen's pointer
     if (!REXCVAR_GET(server)) bf1943::CreateGraphicsPanel(drawer, window());  // F8 (f8_panel.cpp)
     if (!REXCVAR_GET(server)) bf1943::InstallHudGlyphs();  // the game's prompts in the chosen style (hud_glyphs.cpp)

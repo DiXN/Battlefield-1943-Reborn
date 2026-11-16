@@ -25,6 +25,7 @@ endif()
 # Sources
 set(BF1943_SOURCES
     src/main.cpp
+    src/cpu_check.cpp
     src/fpe_guard.cpp
     src/live_layers.cpp
     src/online_services.cpp
@@ -35,10 +36,11 @@ set(BF1943_SOURCES
     src/shader_prep.cpp
     src/frame_stats.cpp
     src/frame_rate.cpp
-    src/frame_cap.cpp
+    src/frame_throttle.cpp
     src/native_x_renderer_bf1943.cpp
     src/native_x_renderer_engine.cpp
     src/game_menu.cpp
+    src/account_key.cpp
     src/launcher_kit.cpp
     src/steam_shortcut.cpp
     src/projects_art.cpp
@@ -56,6 +58,7 @@ set(BF1943_SOURCES
     src/native_input.cpp
     src/tick_rate.cpp
     src/flash_mouse.cpp
+    src/flash_spawn.cpp
     src/lan_backend.cpp
     src/bf_font.cpp
     src/bf_list_shot.cpp
@@ -66,6 +69,7 @@ set(BF1943_SOURCES
     src/auto_join.cpp
     src/comms.cpp
     src/comms_ui.cpp
+    src/world_sync.cpp
     src/gpu_preference.cpp
     third_party/miniz/miniz.c
     src/server_mode.cpp
@@ -99,6 +103,8 @@ set(BF1943_SOURCES
     src/recoil.cpp
     src/game_install.cpp
     src/server_rotation.cpp
+    src/team_balance.cpp
+    src/server_tick_probe.cpp
     src/gm_host.cpp
     src/private_match.cpp
     src/dev_watch.cpp

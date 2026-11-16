@@ -289,6 +289,16 @@ class PosixConditionBase {
   virtual ~PosixConditionBase() = default;
   virtual bool Signal() = 0;
 
+  std::unique_lock<std::mutex> Lock() {
+    for (int i = 0; i < 256; ++i) {
+      if (mutex_.try_lock()) return std::unique_lock<std::mutex>(mutex_, std::adopt_lock);
+#if defined(__x86_64__)
+      __builtin_ia32_pause();
+#endif
+    }
+    return std::unique_lock<std::mutex>(mutex_);
+  }
+
   // A thread in WaitMultiple: registered on every handle it waits for, woken when any of them is signalled
   // (Battlefield 1943 Reborn, 14 Nov 2026: the wait used to sleep 1 ms and look again, so each idle guest job thread
   // woke about 800 times a second; four of them cost 14% of a core on an empty Linux server).
@@ -515,7 +525,7 @@ class PosixCondition<Event> : public PosixConditionBase {
   virtual ~PosixCondition() = default;
 
   bool Signal() override {
-    auto lock = std::unique_lock<std::mutex>(mutex_);
+    auto lock = Lock();
     signal_ = true;
     NotifyAll();
     return true;
@@ -546,7 +556,7 @@ class PosixCondition<Semaphore> : public PosixConditionBase {
   bool Signal() override { return Release(1, nullptr); }
 
   bool Release(uint32_t release_count, int* out_previous_count) {
-    auto lock = std::unique_lock<std::mutex>(mutex_);
+    auto lock = Lock();
     if (release_count > maximum_count_ - count_) {
       return false;
     }

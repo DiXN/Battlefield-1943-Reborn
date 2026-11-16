@@ -16,6 +16,7 @@ Layers, outermost first (see docs/02-dedicated-server-join.md):
 """
 import asyncio
 import json
+import math
 import os
 import random
 import socket
@@ -100,6 +101,87 @@ def official_code(key, name, stamp=None, nonce=None):
     nonce = os.urandom(8).hex() if nonce is None else nonce
     mac = hmac.new(key, ('%d:%s:%s' % (stamp, nonce, name)).encode('utf-8'), hashlib.sha256).hexdigest()
     return {'stamp': stamp, 'nonce': nonce, 'mac': mac}
+
+
+# ---- The build check (16 Nov 2026: a community server listed through our backend ran a modified build with bots; the
+# backend now lists a community server only when the package it runs is an official build, else it is hidden from the
+# list and Quick Match and joined by Direct connect only). The server package's program files are hashed here and the
+# backend compares their digest with the official one for that version (tools/build_manifest.py writes it at a
+# release). Only our own files: never the player's game files. Official servers prove themselves with official.key.
+
+BUILD_FOLDERS = ('bin', 'server', 'python')
+# Files an older official package had and a later one dropped: an update in place leaves them, so they are not counted.
+RETIRED_FILES = ('bin/amd_fidelityfx_vk.dll',)
+
+
+def build_files(root):
+    """{path relative to the package: SHA-256} of every program file in the package (bin, server, python), without
+    Python's own caches (made while it runs)."""
+    import hashlib
+    files = {}
+    for sub in BUILD_FOLDERS:
+        for base, dirs, names in os.walk(os.path.join(root, sub)):
+            dirs[:] = sorted(d for d in dirs if d != '__pycache__')
+            for n in sorted(names):
+                # Python's caches; an update's files moved aside while in use (manager.py, removed at a later start)
+                if n.endswith(('.pyc', '.pyo', '.old')):
+                    continue
+                path = os.path.join(base, n)
+                if os.path.relpath(path, root).replace(os.sep, '/') in RETIRED_FILES:
+                    continue
+                h = hashlib.sha256()
+                with open(path, 'rb') as f:
+                    for block in iter(lambda: f.read(1 << 20), b''):
+                        h.update(block)
+                files[os.path.relpath(path, root).replace(os.sep, '/')] = h.hexdigest()
+    return files
+
+
+def build_digest(files):
+    """One SHA-256 over every file's path and hash, in path order: the same from the package and from its manifest."""
+    import hashlib
+    h = hashlib.sha256()
+    for path in sorted(files):
+        h.update(('%s\0%s\n' % (path, files[path])).encode('utf-8'))
+    return h.hexdigest()
+
+
+def package_root():
+    return os.path.abspath(os.environ.get('BF_SERVER_ROOT') or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def build_report(root=None):
+    """What a registration says of its build: the package's version and platform and the digest of its files."""
+    root = root or package_root()
+    try:
+        with open(os.path.join(root, 'version.txt'), encoding='utf-8') as f:
+            version = (f.read().strip().splitlines() or [''])[0].strip()
+    except OSError:
+        version = ''
+    files = build_files(root)
+    return {'version': version, 'platform': 'windows' if os.name == 'nt' else 'linux', 'digest': build_digest(files),
+            'files': len(files)}
+
+
+def host_key_seed(path):
+    """This host's own key (32 random bytes, made once in the data folder by the manager): the backend knows a host
+    by it whatever its address. Never sent; the backend gets the public key and a signature."""
+    with open(path, 'rb') as f:
+        seed = bytes.fromhex(f.read().decode('ascii').strip())
+    if len(seed) != 32:
+        raise ValueError('the host key is not 32 bytes: %s' % path)
+    return seed
+
+
+def host_proof(seed, name, digest):
+    """The host key's signature over this registration's name and build digest, with a random value."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:  # python -I leaves the script's own folder out
+        sys.path.insert(0, here)
+    import ed25519
+    nonce = os.urandom(8).hex()
+    text = 'bf1943-register|%s|%s|%s' % (nonce, digest, name)
+    return {'key': ed25519.public_key(seed).hex(), 'text': text, 'sig': ed25519.sign(seed, text.encode('utf-8')).hex()}
 
 
 def read_key(path):
@@ -203,6 +285,14 @@ class Comms:
         self.broadcast_looked = 0.0
         self.broadcast_last = (0.0, b'')  # (monotonic time it leaves the screens, body): a player who links before
                                           # then gets it too (handle, C_HELLO)
+        # Team balance (bf/src/team_balance.cpp): the dedicated server writes its moves, refusals and warnings to
+        # --balance-file, one JSON object a line; each new line becomes a server chat line, and a message box for the
+        # player it is about.
+        self.balance_file = ''
+        self.balance_pos = None     # bytes of the file read (None: not looked at yet, so an old file is not told)
+        self.balance_seq = 0
+        self.balance_looked = 0.0
+        self.server_msg = 0         # the number of the host's own chat lines (each client keeps the first of each)
 
     def send(self, kind, body, addr):
         self.host.transport.sendto(COMMS + bytes([kind]) + body, addr)
@@ -218,6 +308,81 @@ class Comms:
         self.broadcast_due += [(now, body), (now + 0.35, body), (now + 0.7, body)]
         self.broadcast_last = (now + body[3], body)
         self.host.note('comms: broadcast %d (%s) to %d players: %s' % (self.broadcast_id, kind, len(self.clients), text_))
+
+    def server_chat(self, text_, team=0):
+        """A chat line from the server itself to every player (team 0) or one team's (1, 2): every game since the
+        chat's first version shows it, as from "Server"."""
+        self.server_msg = self.server_msg % 0xFFFF + 1
+        name = b'Server'
+        raw = text_.encode('utf-8')[:CHAT_MAX]
+        relay = struct.pack('>HHBBB', 0, self.server_msg, CHAT_TEAM if team else CHAT_ALL, team, len(name)) + name + \
+            bytes([len(raw)]) + raw
+        sent = 0
+        for c in self.clients.values():
+            if team and c.team != team:
+                continue
+            sent += 1
+            for _ in range(2):
+                self.send(C_CHAT_RELAY, relay, c.addr)
+        self.host.note('comms: server chat to %s (%d players): %s' % ('team %d' % team if team else 'all', sent, text_))
+
+    def tell(self, name, text_, seconds=8):
+        """A message box for one player (the server broadcast's box and chime, shown by every game since v0.4.0)."""
+        self.broadcast_id = (self.broadcast_id % 0xFFFF) + 1
+        body = struct.pack('>HBB', self.broadcast_id, 0, max(3, min(30, int(seconds)))) + short_text(text_)
+        told = 0
+        for c in self.clients.values():
+            if c.name == name:
+                told += 1
+                for _ in range(3):
+                    self.send(C_BROADCAST, body, c.addr)
+        self.host.note('comms: told %s%s: %s' % (name, '' if told else ' (not linked: chat line only)', text_))
+
+    def read_balance_file(self, now):
+        if not self.balance_file or now - self.balance_looked < 0.5:
+            return
+        self.balance_looked = now
+        try:
+            size = os.path.getsize(self.balance_file)
+        except OSError:
+            if self.balance_pos is None:
+                self.balance_pos = 0  # no file yet: everything written from now on is new
+            return
+        if self.balance_pos is None:
+            self.balance_pos = size  # as the host starts: what is there was for an earlier run
+            return
+        if size < self.balance_pos:
+            self.balance_pos, self.balance_seq = 0, 0  # the server started again and began a new file
+        if size == self.balance_pos:
+            return
+        with open(self.balance_file, 'rb') as f:
+            f.seek(self.balance_pos)
+            data = f.read(size - self.balance_pos)
+        end = data.rfind(b'\n') + 1  # whole lines only; the rest next time
+        self.balance_pos += end
+        for line in data[:end].splitlines():
+            try:
+                m = json.loads(line)
+                seq = int(m.get('seq', 0))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if seq and seq <= self.balance_seq:
+                continue
+            self.balance_seq = seq or self.balance_seq
+            self.balance_event(m)
+
+    def balance_event(self, m):
+        teams = {1: 'US', 2: 'Japan'}
+        kind, name = str(m.get('kind', '')), str(m.get('name', ''))[:64]
+        team, to = int(m.get('team') or 0), int(m.get('to') or 0)
+        if kind == 'moved' and to in teams:
+            self.server_chat('%s was moved to %s to even the teams' % (name, teams[to]))
+            self.tell(name, 'You were moved to %s to even the teams. No points lost.' % teams[to])
+        elif kind == 'refused' and to in teams:
+            self.tell(name, '%s has more players. Change Team was refused to keep the teams even.' % teams[to])
+        elif kind == 'warn' and team in teams and to in teams:
+            self.server_chat('Teams are uneven: the next %s player to go down may be moved to %s' % (teams[team], teams[to]),
+                             team)
 
     def read_broadcast_file(self, now):
         if not self.broadcast_file or now - self.broadcast_looked < 0.5:
@@ -339,6 +504,12 @@ class Comms:
             self.roster_at = 0
 
     def tick(self, now):
+        try:
+            self.read_balance_file(now)
+        except Exception as e:  # never the host's own loop for a message
+            if not getattr(self, 'balance_error', None):
+                self.balance_error = True
+                self.host.note('comms: the balance file could not be read (%s: %s)' % (type(e).__name__, e))
         try:
             self.read_broadcast_file(now)
         except Exception as e:  # never the host's own loop for a message (run bcast1: an error here stopped it)
@@ -624,6 +795,112 @@ class ServerSide(asyncio.DatagramProtocol):
         asyncio.get_running_loop().call_soon(read_again, self.transport)
 
 
+class World:
+    """The match's world: its clock and weather, asked for by every player's game (bf/src/world_sync.cpp), which then
+    draws the same hour and the same sky; an admin's game may change them while the server runs. 14 Nov 2026: "cloud
+    coverage, rate, weather percentage, day/night adjustment and time scale settings ... for servers ... giving
+    player IDs admin panel access in-game". The same as gm_host.cpp's World (a match a player's game hosts).
+
+    Asked with BF43WRLD: version 1, flags (1: a change follows), the player's name and a key (a length byte and text
+    each); for a change: day and night (a byte) and eight floats: hour, a day's minutes, cloud cover, cloud rate,
+    weather, distance fog, ground fog, wind. Answered with BF43WRLR: version, flags (1 day and night, 2 the asker is
+    an admin), the same eight floats
+    as they are now, and the clouds' two clocks as doubles (drift seconds, forming). Big endian. Last in both
+    (15 Nov 2026; a game from before it sends and reads none): the cloud base's height, metres, a float."""
+
+    def __init__(self, host):
+        self.host = host
+        self.day_night, self.hour, self.day_minutes = False, 16.0, 0.0
+        self.cover, self.rate, self.weather = 0.35, 0.33, 0.0
+        self.fog = self.ground_fog = 0.0
+        self.wind = 0.3
+        self.cloud_height = 450.0
+        self.seconds = self.evolve = 0.0
+        self.at = time.monotonic()
+        self.admins, self.key = set(), ''
+        self.night_ops = False
+
+    # Night Ops (16 Nov 2026, TekRantGaming: the night maps gone, "we would just start the match to always be at a set
+    # time the full time so could have night ops maps"): a Night Ops server's world is the day and night cycle held at
+    # this hour for the whole match; its admins may change the weather, never the time.
+    NIGHT_OPS_HOUR = 0.0  # midnight: the moon at its highest, the cycle's lightest night
+
+    def configure(self, args):
+        clamp = lambda v, lo, hi: max(lo, min(hi, float(v)))
+        self.night_ops = bool(getattr(args, 'night', False))
+        self.day_night = bool(args.day_night)
+        self.hour = clamp(args.time, 0, 24) % 24
+        self.day_minutes = clamp(args.day_minutes, 0, 1440)
+        if self.night_ops:
+            self.day_night, self.hour, self.day_minutes = True, self.NIGHT_OPS_HOUR, 0.0
+        self.cover, self.rate = clamp(args.cloud_cover, 0, 1), clamp(args.cloud_rate, 0, 1)
+        self.weather = clamp(args.weather, 0, 1)
+        self.fog, self.ground_fog = clamp(args.fog, 0, 1), clamp(args.ground_fog, 0, 1)
+        self.wind = clamp(args.wind, 0, 1)
+        self.cloud_height = clamp(args.cloud_height, 200, 1500)
+        # Player IDs as the game shows them (eight hex digits, the low half of the XUID).
+        self.admins = {a.strip().upper().rjust(8, '0') for a in args.admins.replace(';', ',').replace(' ', ',').split(',')
+                       if a.strip()}
+        self.key = args.admin_key
+        self.host.note('world: %s' % self.said())
+
+    def said(self):
+        return ('day and night %s, %.1f h, a day in %.0f min, clouds %.0f%% at rate %.0f%%, weather %.0f%%, fog %.0f%%, '
+                'ground fog %.0f%%, wind %.0f%%, cloud height %.0f m') % (
+            'on' if self.day_night else 'off', self.hour, self.day_minutes, self.cover * 100, self.rate * 100,
+            self.weather * 100, self.fog * 100, self.ground_fog * 100, self.wind * 100, self.cloud_height)
+
+    def advance(self):
+        now = time.monotonic()
+        dt, self.at = now - self.at, now
+        if self.day_night and self.day_minutes > 0:
+            self.hour = (self.hour + dt / (self.day_minutes * 60) * 24) % 24
+        self.seconds += dt
+        self.evolve += dt * self.rate
+
+    def admin(self, name, key, addr):
+        if self.key and key == self.key:
+            return True
+        return any(p.state == 'joined' and p.player and p.player.name == name and p.addr[0] == addr[0] and
+                   '%08X' % (p.player.xuid & 0xFFFFFFFF) in self.admins for p in self.host.peers.values())
+
+    def receive(self, data, addr):
+        try:
+            version, flags = data[0], data[1]
+            n = data[2]
+            name = data[3:3 + n].decode('utf-8', 'replace')
+            at = 3 + n
+            k = data[at]
+            key = data[at + 1:at + 1 + k].decode('utf-8', 'replace')
+            at += 1 + k
+            if version != 1 or at > len(data):
+                return
+            self.advance()
+            admin = self.admin(name, key, addr)
+            if flags & 1 and admin and len(data) >= at + 33:
+                day_night = data[at] != 0
+                values = [v if math.isfinite(v) else 0.0 for v in struct.unpack_from('>8f', data, at + 1)]
+                before = self.said()
+                if not self.night_ops:  # a Night Ops server's clock stays at its night (configure)
+                    self.day_night = day_night
+                    self.hour = max(0.0, values[0]) % 24
+                    self.day_minutes = max(0.0, min(1440.0, values[1]))
+                (self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                 self.wind) = (max(0.0, min(1.0, v)) for v in values[2:8])
+                if len(data) >= at + 37:
+                    height = struct.unpack_from('>f', data, at + 33)[0]
+                    if math.isfinite(height):
+                        self.cloud_height = max(200.0, min(1500.0, height))
+                if self.said() != before:
+                    self.host.note('world: %s set %s' % (name or 'an admin', self.said()))
+            reply = b'BF43WRLR' + bytes([1, (1 if self.day_night else 0) | (2 if admin else 0)]) + struct.pack(
+                '>8f2d', self.hour, self.day_minutes, self.cover, self.rate, self.weather, self.fog, self.ground_fog,
+                self.wind, self.seconds, self.evolve) + struct.pack('>f', self.cloud_height)
+            self.host.transport.sendto(reply, addr)
+        except (IndexError, struct.error):
+            pass
+
+
 class GameHost(asyncio.DatagramProtocol):
     """The host side of one listed game: listens where the backend's EGEG points joiners (I, P)."""
 
@@ -637,6 +914,7 @@ class GameHost(asyncio.DatagramProtocol):
         self.players = {}  # ticket -> Player, from the backend's EGAM
         self.peers = {}
         self.comms = Comms(self)
+        self.world = World(self)
         self.transport = None
         self.error_noted = 0  # monotonic time of the last socket error written to the log
 
@@ -671,6 +949,10 @@ class GameHost(asyncio.DatagramProtocol):
         # at once, never a game packet (those start with a flag byte, 0 or 1).
         if data[:8] in (PING, PROBE):
             self.transport.sendto(PONG + data[8:40], addr)
+            return
+        # The match's clock and weather (World): asked for from a socket of the game's own.
+        if data[:8] == b'BF43WRLD' and len(data) > 12:
+            self.world.receive(data[8:], addr)
             return
         # Voice and text chat: from a client's comms socket, never the game's tunnel address.
         if data[:8] == COMMS and addr not in self.peers and len(data) > 8:
@@ -742,6 +1024,20 @@ async def serve(args):
     listen = parse_address(args.listen)
     public = parse_address(args.public) if args.public else listen
     backend = parse_address(args.backend)
+    # The build check's report, once (hashing the package takes about a second); the host key when the manager gave one.
+    try:
+        build = build_report()
+        print('%s build %s (%s, %d files): %s' % (time.strftime('%H:%M:%S'), build['version'] or '?', build['platform'],
+                                                  build['files'], build['digest']), flush=True)
+    except OSError as e:
+        build = None
+        print('%s build check: the package could not be read (%s)' % (time.strftime('%H:%M:%S'), e), flush=True)
+    host_seed = None
+    if args.host_key_file:
+        try:
+            host_seed = host_key_seed(args.host_key_file)
+        except (OSError, ValueError) as e:
+            print('%s host key: %s' % (time.strftime('%H:%M:%S'), e), flush=True)
     while True:
         try:
             reader, writer = await asyncio.open_connection(*backend)
@@ -763,6 +1059,13 @@ async def serve(args):
             reg['address'] = list(public)
         if args.official_key_file:
             reg['official'] = official_code(read_key(args.official_key_file), args.name)
+        if build is not None:
+            reg['build'] = build
+            if host_seed:
+                try:
+                    reg['host'] = host_proof(host_seed, args.name, build['digest'])
+                except Exception as e:  # never stop a server over it: the backend then lists it not
+                    print('%s host key: no signature (%r)' % (time.strftime('%H:%M:%S'), e), flush=True)
         # Listening before the backend is told: its reachability probe comes at once.
         sock = udp_socket(listen)
         send(reg)
@@ -778,11 +1081,17 @@ async def serve(args):
         host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
                            public, sock)
         host.comms.broadcast_file = args.broadcast_file
+        host.comms.balance_file = args.balance_file
+        host.world.configure(args)
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
+        if reply.get('hidden'):
+            host.note('not listed by the backend: %s. Only an official server package is listed; update the server '
+                      'package (its manager updates itself) or download it again.' % reply['hidden'])
         state = {'state': 'registered', 'gid': reply['gid'], 'official': bool(reply.get('official')),
-                 'listed': reply.get('listed', True), 'address': reply.get('address', ''), 'reachable': None}
+                 'listed': reply.get('listed', True), 'address': reply.get('address', ''), 'reachable': None,
+                 'hidden': str(reply.get('hidden', ''))}
         write_status(args, state)
 
         reported = [args.map]
@@ -876,15 +1185,37 @@ def main():
     # registered as classic, which is what the game plays.
     ap.add_argument('--mode', choices=['classic', 'modern'], default='classic',
                     help='not used since v0.4.0: every server plays the original movement and aiming')
-    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list; players' games draw it so
-    # (NativeXRenderer D162) while they play there.
-    ap.add_argument('--night', action='store_true', help='a night server: players see its maps at night')
+    # Night Ops (TekRantGaming, 11 Nov 2026): the maps at night, shown in the server list. Since 16 Nov 2026 the night
+    # is the server's world: the day and night cycle held at midnight for the whole match (World.NIGHT_OPS_HOUR), drawn
+    # by players' games with the levels' lamps lit (NativeXRenderer D175); --day-night, --time and --day-minutes are
+    # then not used.
+    ap.add_argument('--night', action='store_true', help='a night server: its world is held at midnight (Night Ops)')
     # Where the server is (TekRantGaming, 13 Nov 2026: the browser shows the region with its flag): one of the game's
     # region codes (bf/src/regions.h, the manager's drop down). And its tick rate, for the browser: the game's own
     # 30 Hz today.
     ap.add_argument('--broadcast-file', default='',
                     help='a JSON file the server manager writes to send a message to every player on the server: '
                          '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
+    ap.add_argument('--balance-file', default='',
+                    help="the dedicated server's team balance events (its --bf_balance_events): players are told of "
+                         'moves and refused team changes')
+    # The server's world (World): its clock and weather, the same for every player; admins change it in game (F9).
+    ap.add_argument('--day-night', action='store_true', help='day and night: the light follows the server\'s clock')
+    ap.add_argument('--time', type=float, default=16.0, help='the time of day the server starts at, 0 to 24')
+    ap.add_argument('--day-minutes', type=float, default=0.0,
+                    help='minutes a whole day and night take; 0: the time stands still')
+    ap.add_argument('--cloud-cover', type=float, default=0.35, help='the cloud cover, 0 to 1')
+    ap.add_argument('--cloud-rate', type=float, default=0.33, help='how fast the clouds form and change, 0 to 1')
+    ap.add_argument('--weather', type=float, default=0.0,
+                    help='the weather, 0 fair to 1 a storm (overcast, mist, far rain shafts, lightning)')
+    ap.add_argument('--fog', type=float, default=0.0, help='the distance fog, 0 to 1')
+    ap.add_argument('--ground-fog', type=float, default=0.0, help='the ground fog, 0 to 1')
+    ap.add_argument('--wind', type=float, default=0.3, help='the wind, 0 calm to 1 a gale: how far the rain leans')
+    ap.add_argument('--cloud-height', type=float, default=450.0,
+                    help='the cloud base over the sea, metres (200 to 1500): low, the planes fly through the clouds')
+    ap.add_argument('--admins', default='',
+                    help="player IDs (as the game shows them, separated by commas) who may change the world in game")
+    ap.add_argument('--admin-key', default='', help='a key that makes the game showing it an admin; empty: none')
     ap.add_argument('--region', default='', help="the server's region code, e.g. gb, de, us-east (shown in the browser)")
     ap.add_argument('--tick', type=int, default=60, help="the server's tick rate in Hz (shown in the browser; 60 by default since 14 Nov 2026)")
     ap.add_argument('--map-file', default='', help="the server's current_map.txt (its map rotation)")
@@ -892,6 +1223,7 @@ def main():
     ap.add_argument('--description', default='', help='shown in the server browser (200 characters)')
     ap.add_argument('--unlisted', action='store_true', help='registered but not listed: Direct connect only')
     ap.add_argument('--official-key-file', default='', help='official.key: the server shows as official')
+    ap.add_argument('--host-key-file', default='', help="this host's key (the manager makes it in the data folder)")
     ap.add_argument('--status-file', default='', help="this server's state for the package's window (JSON)")
     ap.add_argument('--log', default='')
     asyncio.run(serve(ap.parse_args()))

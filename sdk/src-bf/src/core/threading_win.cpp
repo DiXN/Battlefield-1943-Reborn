@@ -454,8 +454,14 @@ DWORD WINAPI ThreadStartRoutine(LPVOID parameter) {
 std::unique_ptr<Thread> Thread::Create(CreationParameters params,
                                        std::function<void()> start_routine) {
   auto start_data = new ThreadStartData({std::move(start_routine)});
+  // Battlefield 1943 (TekRantGaming, 15 Nov 2026): the stack size as a reservation. Without the flag Windows commits
+  // the whole stack at once: every guest thread's 16 MB host stack (XThread) was charged to the commit limit, about
+  // 400 MB for Battlefield 1943's two dozen, though their pages were never touched. Reserved, a stack commits as it
+  // grows, as the main thread's does, up to the same size.
   HANDLE handle = CreateThread(NULL, params.stack_size, ThreadStartRoutine, start_data,
-                               params.create_suspended ? CREATE_SUSPENDED : 0, NULL);
+                               (params.create_suspended ? CREATE_SUSPENDED : 0) |
+                                   (params.stack_size ? STACK_SIZE_PARAM_IS_A_RESERVATION : 0),
+                               NULL);
   if (handle) {
     return std::make_unique<Win32Thread>(handle);
   } else {

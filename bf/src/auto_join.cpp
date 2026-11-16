@@ -35,6 +35,7 @@
 
 #include "capture_points.h"
 #include "comms.h"
+#include "flash_spawn.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -71,6 +72,7 @@ bool TickBlendNearestTree(uint32_t parts, const float from[3], float out[3], dou
 // game_menu.cpp
 bool GameMenuOpen();
 void SpawnMousePad(uint8_t* gamepad, bool allowed, bool out_of_world);  // flash_mouse.cpp: the deploy screen's pointer
+bool SpawnMouseActive();
 bool SpawnMouseCommand(const char* name, const char* args);    // flash_mouse.cpp: true, not to be passed on
 bool GameMenuEnabled();
 void GameMenuPad(uint16_t buttons, int16_t lx, int16_t ly);
@@ -131,6 +133,8 @@ struct Driver {
 } g;
 
 std::atomic<bool> g_walking{false};  // pressing buttons for the player (signing in, joining)
+// The team the game's scoreboard names are for (TeamNamesTick); 0 until the level's first team is read.
+std::atomic<int> g_names_team{0};
 
 // TekRantGaming, 7 Nov 2026: the player sees the game's own films and title and presses Start themselves (no bare menu over
 // them), and spawns from BF's own screens after its own loading screen (picking a class). Test runs (BF_AUTO_JOIN=1,
@@ -413,6 +417,25 @@ void StartTutorial() {
 void GameCommand(const std::string& name, const std::string& args) {
   std::lock_guard<std::mutex> lock(g.mutex);
   g.flash_calls.push_back("cmd:" + name + "|" + args);
+}
+
+// The scoreboard's team names after a change of team (TekRantGaming's 13 Nov note, and team balance's moves, 16 Nov
+// 2026). The level's HUD movie (hud_root_cq) makes _root.factionSIDs, the scoreboard's [friendly, enemy] headings
+// (USMC, IJN), once as it loads, from the game's extern.teamFactions; the in game menu's scoreboard (igm_mp_cq,
+// updateBackground) sets its flags from extern.playerTeam every time but its headings from that array, so after a
+// switch the flags were right and the names the old ones (run v41team2; tb_move4's shot 36). When the player's team
+// changes, the array is reversed, and the end of round screen's two (factionSIDsWIN, factionSIDsLOSE) with it.
+bool InMatch();
+void TeamNamesTick() {
+  if (!InMatch()) return;
+  const int team = comms::Team();
+  if (team != 1 && team != 2) return;
+  const int shown = g_names_team.exchange(team);
+  if (shown == 0 || shown == team) return;
+  REXLOG_INFO("BF scoreboard: team {} now (the names were for team {}): its team names swapped", team, shown);
+  std::lock_guard<std::mutex> lock(g.mutex);
+  for (const char* a : {"_root.factionSIDs", "_root.factionSIDsWIN", "_root.factionSIDsLOSE"})
+    g.flash_calls.push_back(std::string("reverse:") + a);
 }
 
 // For our menus: an ActionScript function of the game's menu called with no arguments ("_root.enterMainMenu").
@@ -733,8 +756,12 @@ REX_HOOK_RAW(sub_8243BB70) {
     if (name == "onStartLoading") bf1943::g.seen_loading = true;
     if (name == "gameIsReady" && bf1943::g.seen_loading) {
       const auto now = std::chrono::steady_clock::now();
+      bf1943::g_names_team = 0;  // the level's HUD made its team names again (TeamNamesTick)
       if (!bf1943::g.seen_ready) {
         bf1943::g.seen_ready = true, bf1943::g.ready_at = now;
+        // The game's own Loading complete (its time from the loading screen is a level load's length; the driver's
+        // spawn follows later, after the loading screen's last update).
+        REXLOG_INFO("BF menu driver: Loading complete (the game's gameIsReady)");
       } else if (bf1943::g.stage == bf1943::Stage::kInGame && now - bf1943::g.ready_at > std::chrono::seconds(10)) {
         // A second Loading complete in the same match: the server changed the level (its map rotation). BF sends no
         // onStartLoading then, only playerRoleReady and, once the new level is in, gameIsReady (run rottrace1).
@@ -818,6 +845,57 @@ void FlashCalls(PPCContext& ctx, uint8_t* base) {
     call = ctx;
     call.r3.u64 = load(scratch);
     sub_8295C470(call, base);
+    store(0x82D135E8, was_e8);
+    store(0x82D135EC, was_ec);
+    return;
+  }
+  if (path.rfind("reverse:", 0) == 0) {
+    // An array of the menu's reversed in place ("reverse:<path>"): its own reverse(), the array the scope
+    // (TeamNamesTick: the scoreboard's two team names). The lookup as for "method:".
+    const std::string object = path.substr(8);
+    auto load = [&](uint32_t a) { return uint32_t(base[a]) << 24 | base[a + 1] << 16 | base[a + 2] << 8 | base[a + 3]; };
+    auto store = [&](uint32_t a, uint32_t v) { for (int i = 0; i < 4; ++i) base[a + i] = uint8_t(v >> (24 - 8 * i)); };
+    const uint32_t holder = load(ui + 0x14);
+    if (!holder) return;
+    std::memset(base + scratch, 0, 128);
+    std::memcpy(base + scratch + 16, object.c_str(), std::min<size_t>(object.size(), 60));
+    std::memcpy(base + scratch + 80, "reverse", 7);
+    const uint32_t player = load(holder + 4), was_e8 = load(0x82D135E8), was_ec = load(0x82D135EC);
+    store(0x82D135E8, player);
+    store(0x82D135EC, player);
+    call.r3.u64 = scratch;
+    call.r4.u64 = scratch + 16;
+    sub_82958C20(call, base);
+    call = ctx;
+    call.r3.u64 = 0;
+    sub_82986340(call, base);
+    const uint32_t root = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = 0x82D13BB8;
+    call.r4.u64 = root;
+    call.r5.u64 = 0;
+    call.r6.u64 = scratch;
+    call.r7.u64 = 1;
+    call.r8.u64 = 1;
+    call.r9.u64 = 0;
+    sub_8297DD10(call, base);
+    const uint32_t found = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = load(scratch);
+    sub_8295C470(call, base);
+    // Only an array (the class of _root.factionSIDs and its two, run sb_names1).
+    const bool ok = root >= 0x10000 && found >= 0x10000 && found < 0xF0000000 && load(found) == 0x820BEBACu;
+    if (ok) {
+      call = ctx;
+      call.r3.u64 = scratch + 80;
+      call.r4.u64 = 0;
+      call.r5.u64 = found;
+      call.r6.u64 = 0;
+      call.r7.u64 = 0;
+      sub_82986450(call, base);
+    }
+    REXLOG_INFO("BF scoreboard: {} reversed ({:08X}, class {:08X}): {}", object, found,
+                found >= 0x10000 && found < 0xF0000000 ? load(found) : 0, ok ? "done" : "not found");
     store(0x82D135E8, was_e8);
     store(0x82D135EC, was_ec);
     return;
@@ -1072,7 +1150,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   }
   if (original) original(ctx, base);
   // Our calls into the game's menu (Flash calls, game commands) run on every player 1 read, with or without our menu.
-  if (user == 0 && state) bf1943::FlashCalls(ctx, base);
+  if (user == 0 && state) bf1943::TeamNamesTick(), bf1943::FlashCalls(ctx, base);
   if (!driver || user != 0 || !state) return;
   const bool connected = ctx.r3.u32 == 0;
   static int was_connected = -1;
@@ -1084,7 +1162,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   static uint16_t last_real = 0;
 #if defined(BF_DEV_TOOLS)
   // BF_REAL_PAD=<s>:<button>[/<hold s>],... (tests): buttons on the real pad's state, from the process start, as if
-  // pressed on the controller (a, b, start, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
+  // pressed on the controller (a, b, x, y, start, back, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
   // moment the soldier first sits in a vehicle instead (BF_SEEK_VEHICLE gets it there), and from then on each time it
   // gets in or out of one is logged.
   if (connected) {
@@ -1102,7 +1180,10 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         it.button = !std::strncmp(c, "start", 5) ? 0x0010
                     : !std::strncmp(c, "up", 2)   ? 0x0001
                     : !std::strncmp(c, "down", 4) ? 0x0002
+                    : !std::strncmp(c, "back", 4) ? 0x0020  // held: the game's scoreboard in a match
                     : *c == 'b'                   ? 0x2000
+                    : *c == 'x'                   ? 0x4000  // the end of round screen's next info screen
+                    : *c == 'y'                   ? 0x8000
                                                   : 0x1000;
         while (*c && *c != ',' && *c != '/') ++c;
         if (*c == '/') it.hold = std::atof(++c);
@@ -1290,9 +1371,18 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
     bf1943::ApplyControllerSettings(p + 4, menu || bf1943::g_walking, seated);
   bf1943::HudGlyphsTick(seated);  // hud_glyphs.cpp: the keyboard prompts follow the seat's keys
   if (!menu && !bf1943::g_walking) bf1943::LookPad(p + 4, seated);
+  // Capture native navigation before the mouse helper adds any kit/button pulses.
+  const auto nav_axis = [&](int at) { return std::abs(int(int16_t(p[at] << 8 | p[at + 1]))) > 4915; };
+  const bool spawn_navigation = (uint16_t(p[4] << 8 | p[5]) & 0xB01F) != 0 ||
+                                nav_axis(8) || nav_axis(10) || nav_axis(12) || nav_axis(14);
   // The deploy screen's pointer (flash_mouse.cpp): a level is loaded and the player is in no seat and not on foot.
   bf1943::SpawnMousePad(p + 4, bf1943::LevelLoaded() && !menu && !hidden && !bf1943::g_walking,
                         !seated && !bf1943::LocalOnFoot());
+  uint32_t spawn_ui;
+  { std::lock_guard lock(bf1943::g.mutex); spawn_ui = bf1943::g.ui; }
+  bf1943::ProcessSpawnSelection(ctx, base, spawn_ui,
+                                bf1943::LevelLoaded() && !menu && !hidden && !bf1943::g_walking && bf1943::SpawnMouseActive(),
+                                spawn_navigation);
   if (press & 0x0C00) {  // the driver's left stick (BF_SPAWN_PRESSES lsr, lsl)
     const int v = press & 0x0400 ? 32767 : -32768;
     p[8] = uint8_t(uint16_t(v) >> 8), p[9] = uint8_t(v);
@@ -1301,6 +1391,20 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   p[4] = uint8_t(buttons >> 8);
   p[5] = uint8_t(buttons);
 #if defined(BF_DEV_TOOLS)
+  // BF_LOOK_UP_TEST=<seconds>: from that many seconds after joining, the right stick held up for two seconds (the
+  // camera looks up: the sky without terrain in view).
+  {
+    static const double look_after = [] {
+      const char* v = std::getenv("BF_LOOK_UP_TEST");
+      return v && *v ? std::atof(v) : -1.0;
+    }();
+    static std::chrono::steady_clock::time_point look_joined{};
+    if (look_after >= 0 && bf1943::InMatch()) {
+      if (!look_joined.time_since_epoch().count()) look_joined = std::chrono::steady_clock::now();
+      const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - look_joined).count();
+      if (since > look_after && since < look_after + 2.0) p[14] = 0x7F, p[15] = 0xFF;
+    }
+  }
   // BF_WALK_TEST=<seconds>: in a match, the left stick full right from that many seconds after joining (frame rate
   // tests: how the soldier moves at different rates).
   static const double walk_after = [] {
@@ -1316,6 +1420,46 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         logged = true;
         REXLOG_INFO("BF walk test: left stick right (pad connected {}, walking {}, menu {})", connected,
                     bool(bf1943::g_walking), menu);
+      }
+      // How the soldier moves while it walks (14 Nov 2026, 60 Hz servers "desyncing, rubber banding"): the camera's
+      // position every pad read; each 5 s, the path's length, the speed, and the steps against the direction of travel
+      // (a pull back by the server) with the largest.
+      {
+        static float last[3] = {}, from[3] = {};
+        static bool have = false;
+        static double path = 0, worst_back = 0, worst_jump = 0;
+        static int backs = 0, reads = 0;
+        static std::chrono::steady_clock::time_point window{};
+        const auto t = std::chrono::steady_clock::now();
+        const float v[3] = {bf1943::g_dev_view_pos[0].load(), bf1943::g_dev_view_pos[1].load(),
+                            bf1943::g_dev_view_pos[2].load()};
+        if (!have) {
+          have = true, window = t;
+          std::memcpy(last, v, sizeof(v)), std::memcpy(from, v, sizeof(v));
+        } else if (v[0] != last[0] || v[2] != last[2]) {
+          const double dx = v[0] - last[0], dz = v[2] - last[2];
+          const double step = std::sqrt(dx * dx + dz * dz);
+          // The direction of travel: from the window's start to the last position.
+          const double tx = last[0] - from[0], tz = last[2] - from[2];
+          const double tl = std::sqrt(tx * tx + tz * tz);
+          if (tl > 0.5) {
+            const double along = (dx * tx + dz * tz) / tl;
+            if (along < -0.02) ++backs, worst_back = std::max(worst_back, -along);
+          }
+          worst_jump = std::max(worst_jump, step);
+          path += step, ++reads;
+          std::memcpy(last, v, sizeof(v));
+        }
+        const double seconds = std::chrono::duration<double>(t - window).count();
+        if (seconds >= 5.0) {
+          const double fx = last[0] - from[0], fz = last[2] - from[2];
+          REXLOG_INFO("BF walk test: {:.1f} s: path {:.2f} m, {:.2f} m from the start ({:.2f} m/s), {} moves, {} steps back "
+                      "(largest {:.2f} m), largest step {:.2f} m",
+                      seconds, path, std::sqrt(fx * fx + fz * fz), std::sqrt(fx * fx + fz * fz) / seconds, reads, backs,
+                      worst_back, worst_jump);
+          window = t, path = worst_back = worst_jump = 0, backs = reads = 0;
+          std::memcpy(from, last, sizeof(last));
+        }
       }
       // BF_WALK_STICK: lx (default, strafe right: the open deck at the USMC carrier spawn), lxl (strafe left),
       // ly (forward), lyb (back), rx (turn right), ry (look up).

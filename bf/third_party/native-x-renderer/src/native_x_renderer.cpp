@@ -149,6 +149,8 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
 
 // D163: kept whether the renderer runs yet or not (the level is read on a worker).
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
+void SetWorldState(const WorldState& state) { renderer::SetWorldState(state); }
+WorldState CurrentWorldState() { return renderer::CurrentWorldState(); }
 void NightModels(const NightModelLamps* models, uint32_t count) { renderer::NightModels(models, count); }
 void NightSky(const NightSkyStyle& style) { renderer::NightSky(style); }
 
@@ -211,8 +213,9 @@ bool GameMenuRecently() {
 }
 
 bool NearHudMarker(double x, double y, double radius, double* marker_x) {
-  const auto now = std::chrono::steady_clock::now();
   std::lock_guard lock(g_hud_markers_mutex);
+  if (g_hud_markers.empty()) return false;
+  const auto now = std::chrono::steady_clock::now();
   double best = radius * radius;
   bool found = false;
   for (const HudMarker& m : g_hud_markers) {
@@ -234,6 +237,8 @@ void EndViewGeometry() {
 }
 
 void RecordAttachedCameraMove(const float* position, const float* move, const float* placed);  // draw.cpp
+void RecordAdsBlend(float blend);  // dof.cpp
+void SetAdsBlend(float blend) { RecordAdsBlend(blend); }
 void RecordHideCrosshair();  // draw.cpp
 void HideCrosshair() { RecordHideCrosshair(); }
 void RecordWeaponLayerMove(const float* move, float fov_degrees);  // draw.cpp

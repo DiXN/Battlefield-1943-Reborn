@@ -327,11 +327,11 @@ bool GraphicsSystem::SetOcclusionQueryResolver(system::OcclusionQueryResolver re
   return true;
 }
 
-bool GraphicsSystem::SetSignalGate(system::GpuSignalGate gate, void* user) {
+bool GraphicsSystem::SetSignalGate(system::GpuSignalGate gate, void* user, system::GpuKickTag kick_tag) {
   if (!command_processor_) {
     return false;
   }
-  command_processor_->SetSignalGate(gate, user);
+  command_processor_->SetSignalGate(gate, user, kick_tag);
   REXGPU_INFO("Signal gate {}", gate ? "set" : "removed");
   return true;
 }

@@ -38,10 +38,36 @@ MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client say
 MULTI_CHUNK = 6000   # raw payload bytes per part
 MULTI = (0xB0000000, 0xF0000000)  # multi part response, request
 RESERVATIONS = {}  # player IP -> (GID, time): the server picked in our menu, for the next Quick Match
+# A full server refuses new joins (TekRantGaming, 15 Nov 2026: players joining a full server; the game itself lets in up
+# to 64, and a join over the game's own cap crashed a test server). A server is full when the players its host last
+# reported (every 5 s) and the players who picked it in the last JOIN_WINDOW seconds and are still on their way reach
+# its MAX-PLAYERS. PICKS keeps each address's first pick of a server (a renewal of the same pick keeps its place).
+PICKS = {}  # player IP -> (GID, time of the first pick, the server's players then)
+JOIN_WINDOW = 30
 NAMES = {}  # a name, lower case -> (player id, held until: None while its player is online), see free_name
 LEADERBOARD = {}  # a name, lower case -> {'name', 'score', 'seconds', 'captures', 'at'}: the players' own totals
 MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'}}: the scoreboard, from the players' games
 LEADERBOARD_FILE = None  # where it is kept (--leaderboard), loaded at the start
+
+# ---- Protect your name (TekRantGaming, 15 Nov 2026: "a secure your username option ... prevents anyone else from
+# taking that name ... store long term progression tracking for the user", with no email and no setup from players).
+# An account is an Ed25519 public key (the game makes the key from the player's recovery code, bf/src/account_key.cpp)
+# with a name and the player's progress. Every account request is signed over a one time challenge from here
+# ({"op": "challenge"}), so a request seen on the network cannot be used again and the code never leaves the player's
+# PC. A protected name is the account's alone: a name check or a login under it from anyone who did not sign in for
+# it gets a number (Name2), and stats for it are only taken signed. A name unused for NAME_UNUSED_DAYS is free again.
+ACCOUNTS = {}       # public key (hex) -> {'key', 'name', 'created', 'seen', 'progress': {'stats', 'seconds',
+                    #                      'score', 'captures', 'achievements'}}
+ACCOUNT_NAMES = {}  # a protected name, lower case -> its account's key
+ACCOUNTS_FILE = None  # --accounts: kept here (written within --accounts-save-every seconds of a change)
+ACCOUNTS_DIRTY = [False]
+CHALLENGES = {}     # nonce -> time given (a minute and a half to use it, once)
+CHALLENGES_BY_IP = {}  # address -> [times]: at most 120 a minute
+VERIFIED = {}       # key -> (player id, address, until): who signed in for the account's name, and from where
+CLAIMS = {}         # address -> [times]: new and renamed names, at most CLAIMS_AN_HOUR
+CLAIMS_AN_HOUR = 5
+NAME_UNUSED_DAYS = 180
+VERIFIED_FOR = 12 * 3600  # a sign in holds the name for the game's FESL login for this long (same id and address)
 
 # ---- The version players need (TekRantGaming, 13 Nov 2026: "server version check for latest version and only to allow
 # latest version on and reject and prompt outdated clicnt connections give them a popup advising and a button to update
@@ -165,6 +191,108 @@ def update_notice(mode):
                            'choose Update on the main menu. It updates itself.' % need}
 
 
+# ---- Maintenance mode (TekRantGaming, 15 Nov 2026: maintenance periods that players learn about in the game, not only
+# on Discord). A file the server manager writes (manager.py maintenance on|off, --maintenance-file here), read again
+# when it changes: {"on", "kind", "text" (custom only), "until" (UTC seconds, 0: none), "allow" [addresses]}. While it
+# is on, new connections are refused with its text: "reserve" (every join from our menus) answers {"op": "closed",
+# "kind", "title", "message"}, Quick Match finds no server, and the list carries the notice (notice_kind, notice_title,
+# notice_text, notice_seconds; a game from before it gets one row in place of the servers). Players in a match never
+# ask again and are not touched, nor are the servers' registrations, logins and Direct connect's find. The addresses in
+# "allow" (admins) are let in. With an end time the mode switches itself off then.
+NOTICE_PRESETS = {
+    'deploy': ('MAINTENANCE', 'Unable to connect: maintenance period. Check Discord for details and try again in a few '
+                              'minutes.'),
+    'update': ('UPDATE IN PROGRESS', 'Unable to connect: the servers are being updated to a new version. Check Discord '
+                                     'for details and try again in a few minutes.'),
+    'restart': ('SERVERS RESTARTING', 'Unable to connect: the servers are restarting. Try again in a few minutes.'),
+    'emergency': ('EMERGENCY FIX', 'Unable to connect: the servers are down for an urgent fix. Check Discord for '
+                                   'details and try again soon.'),
+    'custom': ('MAINTENANCE', ''),
+}
+NOTICE_TEXT_MAX = 200
+NOTICE_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?\'()/&+%#@-')
+MAINTENANCE = {'file': '', 'mtime': None, 'looked': 0.0, 'state': None, 'note': None}
+
+
+def notice_text_problem(text):
+    """Why a maintenance text cannot be shown to every player, or '' when it can. Characters every game font has, no
+    quotes or braces (the games read the replies with a small parser), and never the word "reserved": a game from
+    before this takes any answer to "reserve" that holds it as a yes."""
+    if not text or len(text) > NOTICE_TEXT_MAX:
+        return 'the text must be 1 to %d characters' % NOTICE_TEXT_MAX
+    bad = sorted(set(c for c in text if c not in NOTICE_CHARS))
+    if bad:
+        return 'the text has characters that cannot be shown: %s' % ' '.join(repr(c) for c in bad)
+    if 'reserved' in text.lower():
+        return 'the text may not hold the word "reserved"'
+    return ''
+
+
+def clean_maintenance(raw):
+    """A maintenance file's contents as the backend uses them, or None (off, or a file that does not check)."""
+    if not isinstance(raw, dict) or raw.get('on') is not True:
+        return None
+    kind = str(raw.get('kind', 'deploy'))
+    if kind not in NOTICE_PRESETS:
+        return None
+    title, text = NOTICE_PRESETS[kind]
+    if kind == 'custom':
+        text = ' '.join(str(raw.get('text', '')).split())
+    if notice_text_problem(text):
+        return None
+    try:
+        until = float(raw.get('until') or 0)
+    except (TypeError, ValueError):
+        until = 0.0
+    allow = raw.get('allow', [])
+    allow = {str(a)[:45] for a in allow if isinstance(a, str)} if isinstance(allow, list) else set()
+    return {'kind': kind, 'title': title, 'text': text, 'until': until, 'allow': allow}
+
+
+def maintenance_now(address=None):
+    """The maintenance notice for a player at `address` now ({'kind', 'title', 'text', 'seconds'}), or None: off, past
+    its end time, or the player is one of its allowed addresses. The file is looked at at most once a second."""
+    path, now = MAINTENANCE['file'], time.time()
+    if path and now - MAINTENANCE['looked'] >= 1.0:
+        MAINTENANCE['looked'] = now
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            mtime = None
+        if mtime != MAINTENANCE['mtime']:
+            MAINTENANCE['mtime'] = mtime
+            try:
+                with open(path, encoding='utf-8') as f:
+                    MAINTENANCE['state'] = clean_maintenance(json.load(f)) if mtime is not None else None
+            except (OSError, ValueError):
+                MAINTENANCE['state'] = None
+    state = MAINTENANCE['state']
+    note = MAINTENANCE['note']
+    if state and state['until'] and now >= state['until']:
+        state = None
+    if note:
+        word = ('on (%s%s)' % (state['kind'], ', until %s UTC' % time.strftime('%H:%M', time.gmtime(state['until']))
+                               if state['until'] else '') if state else 'off')
+        if word != note.get('said'):
+            note['said'] = word
+            note['say']('maintenance: %s' % word)
+    if not state or (address and address in state['allow']):
+        return None
+    text, seconds = state['text'], 0
+    if state['until']:
+        seconds = max(1, int(state['until'] - now))
+        minutes = (seconds + 59) // 60
+        text += ' Expected back in about %d minute%s.' % (minutes, '' if minutes == 1 else 's')
+    return {'kind': state['kind'], 'title': state['title'], 'text': text, 'seconds': seconds}
+
+
+def notice_row(notice):
+    """The server list's one row for a game from before maintenance mode (as update_notice): its browser shows it."""
+    return {'gid': 'notice-' + notice['kind'], 'name': 'SERVERS CLOSED: ' + notice['title'], 'address': ['0.0.0.0', 0],
+            'map': 'Wake Island', 'players': 0, 'max_players': 0, 'mode': 'classic', 'official': True, 'next_map': '',
+            'maps': [], 'night': False, 'region': '', 'tick': 60, 'description': notice['text']}
+
+
 def leaderboard_put(m, test_progression=False):
     """A player's totals from their game (our Stats & Awards): kept by name, the newest wins, at most 5,000 names."""
     name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
@@ -185,6 +313,11 @@ def leaderboard_put(m, test_progression=False):
     if len(LEADERBOARD) >= 5000 and name.lower() not in LEADERBOARD:
         return False
     LEADERBOARD[name.lower()] = entry
+    save_leaderboard()
+    return True
+
+
+def save_leaderboard():
     if LEADERBOARD_FILE:
         try:
             with open(LEADERBOARD_FILE + '.tmp', 'w', encoding='utf-8') as f:
@@ -192,12 +325,27 @@ def leaderboard_put(m, test_progression=False):
             os.replace(LEADERBOARD_FILE + '.tmp', LEADERBOARD_FILE)
         except OSError:
             pass
-    return True
 
 
 def leaderboard_top(count=50):
     rows = sorted(LEADERBOARD.values(), key=lambda e: (-e['score'], e['name'].lower()))
     return rows[:count], len(rows)
+
+
+def server_full(gid, address):
+    """(full, players, arriving, most): whether one more player would go over the server's MAX-PLAYERS."""
+    g = GAMES.get(gid, {})
+    try:
+        most = int(g.get('MAX-PLAYERS') or 24)
+        players = int(g.get('AP') or 0)
+    except (TypeError, ValueError):
+        return False, 0, 0, 0
+    now = time.time()
+    # The picks still on their way: those of the last JOIN_WINDOW seconds, less the players who arrived since the
+    # oldest of them (each pick keeps the player count it was made at), so an arrived player is not counted twice.
+    pending = [ap for a, (pg, at, ap) in PICKS.items() if pg == gid and a != address and now - at < JOIN_WINDOW]
+    arriving = max(0, len(pending) - max(0, players - min(pending))) if pending else 0
+    return players + arriving >= most, players, arriving, most
 
 
 def forget_old():
@@ -208,6 +356,8 @@ def forget_old():
         del NAMES[name]
     for address in [a for a, (_, at) in RESERVATIONS.items() if now - at > 300]:
         del RESERVATIONS[address]
+    for address in [a for a, (_, at, _) in PICKS.items() if now - at > 300]:
+        del PICKS[address]
     # A login's key: kept 10 minutes after its FESL connection closed (Theater reads it when the game links).
     for lkey in [k for k, at in Client.closed.items() if now - at > 600]:
         for table in (Client.sessions, Client.user_ids, Client.xuids, Client.closed):
@@ -223,21 +373,201 @@ def name_holder(name):
     return None
 
 
-def free_name(name, pid):
+def free_name(name, pid, address=None):
     """The player's name, or it with the smallest number nobody else holds: TekRantGaming, TekRantGaming2, TekRantGaming3 (TekRantGaming, 7 Nov 2026:
     two players with the same name in a server). Names are 15 characters at most, as gamertags; a name differing only
-    in case counts as the same one."""
+    in case counts as the same one. A protected name (an account's) is free only to the player who signed in for it
+    from this address."""
     name = name[:15]
-    holder = name_holder(name)
-    if holder is None or holder == pid:
+    if name_free_for(name, pid, address):
         return name
     for n in range(2, 1000):
         suffix = str(n)
         candidate = name[:15 - len(suffix)] + suffix
-        holder = name_holder(candidate)
-        if holder is None or holder == pid:
+        if name_free_for(candidate, pid, address):
             return candidate
     return name[:9] + str(random.randint(100000, 999999))
+
+
+# ---- accounts (Protect your name, above)
+def account_active(acct, now=None):
+    return (now or time.time()) - acct.get('seen', 0) < NAME_UNUSED_DAYS * 86400
+
+
+def protected_by(name):
+    """The account whose protected name this is, or None (none, or unused for NAME_UNUSED_DAYS)."""
+    acct = ACCOUNTS.get(ACCOUNT_NAMES.get(name.lower(), ''))
+    if acct and acct.get('name', '').lower() == name.lower() and account_active(acct):
+        return acct
+    return None
+
+
+def signed_in_for(acct, pid, address):
+    v = VERIFIED.get(acct['key'])
+    return bool(v) and v[0] == pid and v[1] == address and v[2] > time.time()
+
+
+def name_free_for(name, pid, address=None):
+    acct = protected_by(name)
+    if acct and not signed_in_for(acct, pid, address):
+        return False
+    holder = name_holder(name)
+    if acct and holder not in (None, pid):
+        # The owner signed in (from another PC, say): a 10 minute hold from an earlier name check gives way; a player
+        # online under the name now does not (two players with one name break joining, Client.handle).
+        return NAMES[name.lower()][1] is not None
+    return holder is None or holder == pid
+
+
+def valid_name(name):
+    """A name the game's name page allows: 3 to 15 letters, digits and underscores."""
+    return isinstance(name, str) and 3 <= len(name) <= 15 and all(c.isascii() and (c.isalnum() or c == '_')
+                                                                   for c in name)
+
+
+def accounts_changed():
+    ACCOUNTS_DIRTY[0] = True
+
+
+def save_accounts():
+    if not ACCOUNTS_FILE or not ACCOUNTS_DIRTY[0]:
+        return
+    ACCOUNTS_DIRTY[0] = False
+    try:
+        with open(ACCOUNTS_FILE + '.tmp', 'w', encoding='utf-8') as f:
+            json.dump({'version': 1, 'accounts': list(ACCOUNTS.values())}, f)
+        os.replace(ACCOUNTS_FILE + '.tmp', ACCOUNTS_FILE)
+    except OSError:
+        ACCOUNTS_DIRTY[0] = True
+
+
+def load_accounts(path):
+    try:
+        data = json.load(open(path, encoding='utf-8'))
+    except (OSError, ValueError):
+        return 0
+    for a in data.get('accounts', []) if isinstance(data, dict) else []:
+        try:
+            key = str(a['key'])
+            if len(key) != 64:
+                continue
+            int(key, 16)
+        except (KeyError, TypeError, ValueError):
+            continue
+        ACCOUNTS[key] = a
+        if a.get('name'):
+            other = ACCOUNTS.get(ACCOUNT_NAMES.get(a['name'].lower(), ''))
+            if not other or other.get('seen', 0) < a.get('seen', 0):
+                ACCOUNT_NAMES[a['name'].lower()] = key
+    return len(ACCOUNTS)
+
+
+async def keep_accounts_saved(every):
+    while True:
+        await asyncio.sleep(every)
+        save_accounts()
+
+
+def challenge(address):
+    """A one time nonce for a signed request; at most 120 a minute for one address."""
+    now = time.time()
+    times = [t for t in CHALLENGES_BY_IP.get(address, []) if now - t < 60]
+    if len(times) >= 120:
+        CHALLENGES_BY_IP[address] = times
+        return ''
+    times.append(now)
+    CHALLENGES_BY_IP[address] = times
+    if len(CHALLENGES) > 5000:
+        for n in [n for n, t in CHALLENGES.items() if now - t > 90]:
+            del CHALLENGES[n]
+        for a in [a for a, ts in CHALLENGES_BY_IP.items() if not ts or now - ts[-1] > 60]:
+            del CHALLENGES_BY_IP[a]
+    nonce = os.urandom(16).hex()
+    CHALLENGES[nonce] = now
+    return nonce
+
+
+def check_signed(m, op):
+    """The signed request's key and fields after "op|nonce|", or None: a signature by that key over the text, on a
+    challenge this backend gave in the last 90 seconds and never used before."""
+    import ed25519
+    key, sig, text = m.get('key'), m.get('sig'), m.get('signed')
+    if not (isinstance(key, str) and isinstance(sig, str) and isinstance(text, str)) or len(text) > 8192:
+        return None
+    parts = text.split('|')
+    if len(parts) < 2 or parts[0] != op:
+        return None
+    given = CHALLENGES.pop(parts[1], None)
+    if given is None or time.time() - given > 90:
+        return None
+    try:
+        public, signature = bytes.fromhex(key), bytes.fromhex(sig)
+    except ValueError:
+        return None
+    if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
+        return None
+    return key.lower(), parts[2:]
+
+
+def parse_progress(fields):
+    """A signed stats_put's fields: name, score, seconds, captures, stats ("Label=events,points;..."), achievements
+    ("1,7,..."). None when any is not as the game sends it."""
+    if len(fields) != 6:
+        return None
+    name, score, seconds, captures, stats_text, ach_text = fields
+    try:
+        score, seconds, captures = int(score), int(seconds), int(captures)
+    except ValueError:
+        return None
+    if not (0 <= seconds < 10 ** 10 and 0 <= captures < 10 ** 9 and abs(score) < 10 ** 12):
+        return None
+    stats = {}
+    for item in stats_text.split(';') if stats_text else []:
+        label, _, value = item.partition('=')
+        events, _, points = value.partition(',')
+        if (not 1 <= len(label) <= 48 or not all(c.isascii() and (c.isalnum() or c == '_') for c in label)
+                or not events.isdigit() or len(events) > 9 or not points.lstrip('-').isdigit() or len(points) > 13):
+            return None
+        stats[label] = '%d,%d' % (int(events), int(points))
+    if len(stats) > 128:
+        return None
+    achievements = []
+    for item in ach_text.split(',') if ach_text else []:
+        if not item.isdigit() or not 0 < int(item) <= 0xFFFFFFFF:
+            return None
+        achievements.append(int(item))
+    if len(achievements) > 256:
+        return None
+    return {'name': name, 'score': score, 'seconds': seconds, 'captures': captures, 'stats': stats,
+            'achievements': sorted(set(achievements))}
+
+
+def progress_text(p):
+    """The account's progress for the game, as one line it reads easily: score|seconds|captures|stats|achievements,
+    the stats and awards as in a signed stats_put."""
+    return '%d|%d|%d|%s|%s' % (int(p.get('score', 0)), int(p.get('seconds', 0)), int(p.get('captures', 0)),
+                               ';'.join('%s=%s' % kv for kv in sorted(p.get('stats', {}).items())),
+                               ','.join(str(a) for a in p.get('achievements', [])))
+
+
+def merge_progress(acct, got):
+    """The account's progress and the totals a game sent: the larger of each (totals only grow; a new PC that has not
+    yet taken the account's progress back must not lower it), the awards together."""
+    p = acct.setdefault('progress', {})
+    p['seconds'] = max(int(p.get('seconds', 0)), got['seconds'])
+    p['captures'] = max(int(p.get('captures', 0)), got['captures'])
+    p['score'] = max(int(p.get('score', 0)), got['score'])
+    stats = p.setdefault('stats', {})
+    for label, value in got['stats'].items():
+        n, pts = (int(x) for x in value.split(','))
+        if label in stats:
+            on, opts = (int(x) for x in stats[label].split(','))
+            n, pts = max(n, on), max(pts, opts)
+        elif len(stats) >= 256:
+            continue
+        stats[label] = '%d,%d' % (n, pts)
+    p['achievements'] = sorted(set(p.get('achievements', [])) | set(got['achievements']))
+    return p
 
 
 GAMES = {}  # GID -> game fields: --game (a dedicated server started with --server), later Theater CGAM
@@ -407,8 +737,10 @@ class Client:
                 pid = 0
             if not pid:
                 pid = 0x80000000 | self.user_id
-            if name_holder(self.persona) not in (None, pid):
-                renamed = free_name(self.persona, pid)
+            # A protected name (an account's) logs in only from the player id and address that signed in for it.
+            address = self.writer.get_extra_info('peername')[0]
+            if not name_free_for(self.persona, pid, address):
+                renamed = free_name(self.persona, pid, address)
                 if renamed == self.persona:
                     renamed = '%s%d' % (self.persona[:12], self.user_id)
                 self.note('the name %s is in use: this player is renamed %s' % (self.persona, renamed))
@@ -464,7 +796,11 @@ class Client:
             # A server picked in our menu's server browser (Registry "reserve", by the player's address).
             reserved = RESERVATIONS.get(self.peer.split(':')[0])
             gated = False
-            if reserved and time.time() - reserved[1] < 300 and reserved[0] in GAMES:
+            if maintenance_now(self.peer.split(':')[0]):
+                # Maintenance mode: no server for a new connection, and no hosting either.
+                games, gated = [], True
+                self.note('Quick Match during maintenance: no server')
+            elif reserved and time.time() - reserved[1] < 300 and reserved[0] in GAMES:
                 games = [GAMES[reserved[0]]]
             elif VERSION_GATE['required']:
                 # The version gate: every join from our menus reserves first, and "reserve" is where a game's version
@@ -472,6 +808,15 @@ class Client:
                 # Match) gets no server, and is not asked to host one.
                 games, gated = [], True
                 self.note('Quick Match without a reservation: no server (players need v%s)' % VERSION_GATE['required'])
+            else:
+                # No reservation and no gate (a LAN or community backend): the full servers are left out (see PICKS).
+                address = self.peer.split(':')[0]
+                full = [g for g in games if server_full(g['GID'], address)[0]]
+                if full:
+                    games = [g for g in games if g not in full]
+                    self.note('Quick Match: %d full server(s) left out' % len(full))
+                if games:
+                    PICKS[address] = (games[0]['GID'], time.time(), int(games[0].get('AP') or 0))
             if games:
                 status.update({'props.{}': 3, 'props.{resultType}': 'JOIN', 'props.{avgFit}': '1.0',
                                'props.{games}.[]': len(games)})
@@ -631,6 +976,141 @@ class RemoteHost:
                                        'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
 
 
+class ServerCheck:
+    """Which community servers the server list shows (TekRantGaming, 16 Nov 2026: a community server listed through our
+    backend ran a modified build with bots; "go with option B": a server that is not an official build is hidden).
+    On with --check-servers (the official backend); LAN and private backends list every server as before.
+
+    A server registering (gmhost.py) says its package's version, platform and build digest (gmhost.build_report) and
+    signs that with its host key (gmhost.host_proof). It is listed only when the digest is the official one for that
+    version and platform: the manifests in the --check-servers folder (tools/build_manifest.py, one per release
+    package). Anything else (an older package with no report, a changed file, an unknown version, a blocked host) is
+    registered but not listed: Direct connect only, never in the list or Quick Match. Official servers (official.key)
+    are not checked.
+
+    --blocked-file: {"keys": [host keys], "addresses": [IP addresses], "names": [lower case parts of a name],
+    "digests": [build digests]}, read again when it changes; a blocked server is taken off the list within a minute,
+    even one listed before."""
+
+    def __init__(self, folder, blocked_file, note):
+        self.folder, self.blocked_file, self.note = folder, blocked_file, note
+        self.seen, self.official, self.blocked = None, {}, {}
+        self.blocked_stamp = None
+
+    def reload(self):
+        """The manifests and the block list again when a file of theirs changed."""
+        try:
+            names = sorted(n for n in os.listdir(self.folder) if n.endswith('.json'))
+        except OSError:
+            names = []
+        stamps = {}
+        for n in names:
+            try:
+                stamps[n] = os.path.getmtime(os.path.join(self.folder, n))
+            except OSError:
+                pass
+        if stamps != self.seen:
+            official = {}
+            for n in stamps:
+                try:
+                    with open(os.path.join(self.folder, n), encoding='utf-8') as f:
+                        m = json.load(f)
+                    files = {str(k): str(v) for k, v in m['files'].items()}
+                    official[(str(m['version']), str(m['platform']))] = gmhost.build_digest(files)
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                    self.note('server check: manifest %s not read (%s)' % (n, e))
+            self.seen, self.official = stamps, official
+            self.note('server check: official builds %s' % (', '.join('%s %s' % k for k in sorted(official)) or 'none'))
+        try:
+            stamp = os.path.getmtime(self.blocked_file) if self.blocked_file else None
+        except OSError:
+            stamp = None
+        if stamp != self.blocked_stamp:
+            blocked = {}
+            if stamp is not None:
+                try:
+                    with open(self.blocked_file, encoding='utf-8') as f:
+                        raw = json.load(f)
+                    for k in ('keys', 'addresses', 'names', 'digests'):
+                        blocked[k] = [str(x).strip().lower() for x in raw.get(k, []) if str(x).strip()]
+                except (OSError, ValueError, AttributeError) as e:
+                    self.note('server check: block list not read (%s): the last one stays' % e)
+                    self.blocked_stamp = stamp
+                    return
+            self.blocked_stamp, self.blocked = stamp, blocked
+            self.note('server check: block list %s' % (', '.join('%d %s' % (len(v), k) for k, v in blocked.items())
+                                                       or 'empty'))
+
+    def host_key(self, m, name, digest):
+        """The registration's host key when its signature checks (over this name and digest), else ''."""
+        import ed25519
+        h = m.get('host')
+        if not isinstance(h, dict):
+            return ''
+        key, text, sig = str(h.get('key', '')), str(h.get('text', '')), str(h.get('sig', ''))
+        parts = text.split('|')
+        if len(text) > 512 or len(parts) < 4 or parts[0] != 'bf1943-register' or parts[2] != digest or \
+                '|'.join(parts[3:]) != name:
+            return ''
+        try:
+            public, signature = bytes.fromhex(key), bytes.fromhex(sig)
+        except ValueError:
+            return ''
+        if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
+            return ''
+        return key.lower()
+
+    def block_reason(self, name, address, key, digest):
+        b = self.blocked
+        if key and key in b.get('keys', []):
+            return 'its host is blocked'
+        if address and address.lower() in b.get('addresses', []):
+            return 'its address is blocked'
+        if any(part in name.lower() for part in b.get('names', [])):
+            return 'its name is blocked'
+        if digest and digest in b.get('digests', []):
+            return 'its build is blocked'
+        return ''
+
+    def verdict(self, m, name, raw_name, address):
+        """(why it is hidden, or '' when it may be listed; its host key). raw_name: the name as the host signed it."""
+        self.reload()
+        build = m.get('build') if isinstance(m.get('build'), dict) else {}
+        digest = str(build.get('digest', '')).lower()
+        key = self.host_key(m, raw_name, digest) if digest else ''
+        blocked = self.block_reason(name, address, key, digest)
+        if blocked:
+            return blocked, key
+        if not build:
+            return 'an older server package with no build check', key
+        version, platform = str(build.get('version', ''))[:24], str(build.get('platform', ''))[:16]
+        want = self.official.get((version, platform))
+        if want is None:
+            return 'version %s (%s) is not an official server package' % (version, platform), key
+        if digest != want:
+            return 'its files are not those of the official %s package' % version, key
+        if not key:
+            return 'no valid host key', key
+        return '', key
+
+    async def watch(self, every=60):
+        """Takes a server that became blocked (the block list changed) off the list."""
+        while True:
+            await asyncio.sleep(every)
+            try:
+                self.reload()
+                for gid, g in list(GAMES.items()):
+                    if g.get('TYPE') != 'G' or g.get('official') or not g.get('listed', True):
+                        continue
+                    why = self.block_reason(g.get('N', ''), g.get('from', ''), g.get('host_key', ''),
+                                            g.get('build_digest', ''))
+                    if why:
+                        g['listed'], g['hidden'] = False, why
+                        self.note('server check: game %s "%s" taken off the list: %s' % (gid, g.get('N', ''), why))
+            except Exception as e:  # never let the watch end
+                self.note('server check: %r' % e)
+
+
 class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
@@ -662,7 +1142,20 @@ class Registry:
                a v0.4.0 or newer game says its "version" and "platform" ("windows", "linux") in list, find and reserve
       player:  {"op": "name", "name", "id"} -> {"op": "name", "name"}  before logging in: the player's name, or it
                with a number when another player has it (free_name); held for that player id for 10 minutes, and
-               while they are online
+               while they are online. "protected_by_other": true when the name is another player's protected name
+    Protect your name (accounts, above): "key" (the account's public key, hex), "signed" (the text signed: the op, a
+    nonce from "challenge", then the fields, joined by "|") and "sig" (its Ed25519 signature, hex):
+      player:  {"op": "challenge"} -> {"op": "challenge", "nonce"}   one use, within 90 seconds
+      player:  {"op": "claim", signed "claim|nonce|name|player id"} -> {"op": "claim", "ok", "name"|"why"}  protect
+               a name (or move the account to a new one): why "taken" (another account's), "in_use" (another player
+               plays under it now), "too_many" (5 new names an hour from one address), "bad"
+      player:  {"op": "name", signed "name|nonce|name|player id"} -> {"op": "name", "name", "protected": true,
+               "progress"}  the name check of a player with an account: their name, held for them
+      player:  {"op": "recover", signed "recover|nonce"} -> {"op": "recover", "ok", "name", "progress"}  a recovery
+               code typed on a new PC: the account's name and progress
+      player:  {"op": "stats_put", signed "stats_put|nonce|name|score|seconds|captures|Label=events,points;...|1,7"}
+               -> {"op": "stats_put", "ok"}  totals for the leaderboard and the account (unsigned stats for a protected
+               name are refused)
     """
     ids = itertools.count(1)
 
@@ -675,6 +1168,9 @@ class Registry:
         if args and getattr(args, 'official_key_file', ''):
             self.key = gmhost.read_key(args.official_key_file)
         self.used = {}  # official codes taken (nonce -> time)
+        # The build check (ServerCheck): the official backend lists only official builds' community servers.
+        self.check = ServerCheck(args.check_servers, getattr(args, 'blocked_file', ''), self.note) \
+            if args and getattr(args, 'check_servers', '') else None
 
     def official(self, code, name):
         """An official code that checks: made with the official key, within two minutes, never seen before."""
@@ -745,9 +1241,116 @@ class Registry:
         self.log.write(line + '\n')
         self.log.flush()
 
+    # ---- Protect your name (accounts, above)
+    def name_reply(self, asked, pid, address, extra=None):
+        """The name check: the name, or it with a number (free_name), held for this player for 10 minutes."""
+        name = free_name(asked, pid, address)
+        if name_holder(name) != pid or NAMES[name.lower()][1] is not None:
+            NAMES[name.lower()] = (pid, time.time() + 600)
+        reply = {'op': 'name', 'name': name}
+        if name.lower() != asked.lower() and protected_by(asked):
+            reply['protected_by_other'] = True
+        reply.update(extra or {})
+        self.note('%s asked for the name %s: %s%s' % (address, asked, name, ' (protected)' if
+                                                      reply.get('protected') else ''))
+        return reply
+
+    def signed_name(self, m, address):
+        got = check_signed(m, 'name')
+        if not got or len(got[1]) != 2:
+            return {'op': 'name', 'name': '', 'why': 'bad'}
+        key, (asked, pid_text) = got
+        try:
+            pid = int(pid_text, 16) & 0xFFFFFFFF
+        except ValueError:
+            return {'op': 'name', 'name': '', 'why': 'bad'}
+        acct = ACCOUNTS.get(key)
+        now = time.time()
+        if acct and not acct.get('name') and valid_name(asked) and protected_by(asked) is None \
+                and name_holder(asked) in (None, pid):
+            acct['name'] = asked  # its name was freed after a long time unused: protected again if still free
+            ACCOUNT_NAMES[asked.lower()] = key
+        if acct and acct.get('name', '').lower() == asked.lower() and protected_by(acct['name']) in (None, acct):
+            acct['seen'] = int(now)
+            ACCOUNT_NAMES[acct['name'].lower()] = key
+            accounts_changed()
+            VERIFIED[key] = (pid, address, now + VERIFIED_FOR)
+            return self.name_reply(acct['name'], pid, address,
+                                   {'protected': True, 'progress': acct.get('progress', {}),
+                                    'progress_text': progress_text(acct.get('progress', {}))})
+        if pid:
+            return self.name_reply(''.join(c for c in asked if c.isalnum() or c in ' _')[:15].strip() or 'Soldier',
+                                   pid, address, {'protected': False})
+        return {'op': 'name', 'name': asked}
+
+    def claim(self, m, address):
+        got = check_signed(m, 'claim')
+        if not got or len(got[1]) != 2 or not valid_name(got[1][0]):
+            return {'op': 'claim', 'ok': False, 'why': 'bad'}
+        key, (name, pid_text) = got
+        try:
+            pid = int(pid_text, 16) & 0xFFFFFFFF
+        except ValueError:
+            return {'op': 'claim', 'ok': False, 'why': 'bad'}
+        now = time.time()
+        acct = ACCOUNTS.get(key)
+        owner = protected_by(name)
+        if owner and owner is not acct:
+            return {'op': 'claim', 'ok': False, 'why': 'taken'}
+        if not (acct and acct.get('name', '').lower() == name.lower()):
+            if name_holder(name) not in (None, pid):
+                return {'op': 'claim', 'ok': False, 'why': 'in_use'}
+            times = [t for t in CLAIMS.get(address, []) if now - t < 3600]
+            if len(times) >= CLAIMS_AN_HOUR:
+                CLAIMS[address] = times
+                return {'op': 'claim', 'ok': False, 'why': 'too_many'}
+            CLAIMS[address] = times + [now]
+            if len(ACCOUNTS) >= 200000 and not acct:
+                return {'op': 'claim', 'ok': False, 'why': 'too_many'}
+            old = ACCOUNT_NAMES.get(name.lower())
+            if old and old != key and old in ACCOUNTS:
+                ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
+            if acct:
+                if acct.get('name') and ACCOUNT_NAMES.get(acct['name'].lower()) == key:
+                    del ACCOUNT_NAMES[acct['name'].lower()]
+                held = NAMES.get(acct.get('name', '').lower())
+                if held and held[1] is not None:  # the old name's hold from its name checks: free at once
+                    del NAMES[acct['name'].lower()]
+                row = LEADERBOARD.pop(acct.get('name', '').lower(), None)  # the leaderboard row moves with it
+                if row:
+                    row['name'] = name
+                    LEADERBOARD[name.lower()] = row
+                    save_leaderboard()
+                self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
+            else:
+                acct = ACCOUNTS[key] = {'key': key, 'name': '', 'created': int(now), 'seen': int(now), 'progress': {}}
+                self.note('%s protected the name %s' % (address, name))
+            acct['name'] = name
+        acct['seen'] = int(now)
+        ACCOUNT_NAMES[name.lower()] = key
+        VERIFIED[key] = (pid, address, now + VERIFIED_FOR)
+        NAMES[name.lower()] = (pid, now + 600)
+        accounts_changed()
+        return {'op': 'claim', 'ok': True, 'name': acct['name']}
+
+    def signed_stats(self, m):
+        got = check_signed(m, 'stats_put')
+        progress = parse_progress(got[1]) if got else None
+        acct = ACCOUNTS.get(got[0]) if got else None
+        if not progress or not acct or acct.get('name', '').lower() != progress['name'].lower() \
+                or protected_by(acct['name']) is not acct:
+            return {'op': 'stats_put', 'ok': False, 'why': 'bad' if not progress else 'not_yours'}
+        p = merge_progress(acct, progress)
+        acct['seen'] = int(time.time())
+        accounts_changed()
+        ok = leaderboard_put({'name': acct['name'], 'score': p['score'], 'seconds': p['seconds'],
+                              'captures': p['captures']})
+        return {'op': 'stats_put', 'ok': ok}
+
     async def client(self, reader, writer):
         gid = None
         peer = '%s:%d' % writer.get_extra_info('peername')[:2]
+        address = writer.get_extra_info('peername')[0]
         try:
             while True:
                 line = await reader.readline()
@@ -764,6 +1367,11 @@ class Registry:
                         self.note('%s refused: an official code that does not check' % peer)
                         await writer.drain()
                         break
+                    # The build check: a community server that is not an official build is not listed.
+                    hidden, host_key = '', ''
+                    if self.check and not official:
+                        hidden, host_key = self.check.verdict(m, name, str(m.get('name', 'Server')),
+                                                              writer.get_extra_info('peername')[0])
                     n = next(Registry.ids)
                     gid, uid, pid = str(200 + n), 900 + n, next(TheaterClient.pids)
                     local = False
@@ -791,16 +1399,25 @@ class Registry:
                                   'description': ''.join(c for c in str(m.get('description', ''))
                                                          if c.isprintable())[:200],
                                   'maps': [str(x)[:32] for x in m.get('maps', []) if isinstance(x, str)][:8],
-                                  'next_map': '', 'official': official, 'listed': bool(m.get('listed', True)),
+                                  'next_map': '', 'official': official,
+                                  'listed': bool(m.get('listed', True)) and not hidden,
+                                  'hidden': hidden if m.get('listed', True) else '',
+                                  'from': writer.get_extra_info('peername')[0], 'host_key': host_key,
+                                  'build_digest': str((m.get('build') or {}).get('digest', ''))[:64].lower()
+                                  if isinstance(m.get('build'), dict) else '',
                                   'XNADDR': base64.b64encode(gmhost.xnaddr(host)).decode(),
                                   'XNKID': base64.b64encode(os.urandom(8)).decode(),
                                   'XNKEY': base64.b64encode(os.urandom(16)).decode()}
-                    writer.write((json.dumps({'op': 'registered', 'gid': gid, 'uid': uid, 'pid': pid,
-                                              'official': official, 'listed': GAMES[gid]['listed'],
-                                              'address': '%s:%d' % (host, int(port))}) + '\n').encode())
-                    self.note('%s registered "%s" at %s:%s as game %s%s%s' % (
+                    reply = {'op': 'registered', 'gid': gid, 'uid': uid, 'pid': pid, 'official': official,
+                             'listed': GAMES[gid]['listed'], 'address': '%s:%d' % (host, int(port))}
+                    if GAMES[gid]['hidden']:
+                        reply['hidden'] = GAMES[gid]['hidden']
+                    writer.write((json.dumps(reply) + '\n').encode())
+                    self.note('%s registered "%s" at %s:%s as game %s%s%s%s' % (
                         peer, name, host, port, gid, ' (official)' if official else '',
-                        '' if GAMES[gid]['listed'] else ' (not listed)'))
+                        '' if GAMES[gid]['listed'] else ' (not listed)',
+                        ': hidden, %s' % GAMES[gid]['hidden'] if GAMES[gid]['hidden'] else
+                        ' (host %s)' % host_key[:16] if host_key else ''))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
@@ -852,14 +1469,52 @@ class Registry:
                             rows.append({'name': n, 'score': 0, 'at': 0})
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
                     writer.write((json.dumps({'op': 'scoreboard', 'rows': rows[:64]}) + '\n').encode())
+                elif op == 'stats_put' and 'signed' in m:
+                    reply = self.signed_stats(m)
+                    writer.write((json.dumps(reply) + '\n').encode())
                 elif op == 'stats_put':
                     local_test = (self.test_progression and
                                   writer.get_extra_info('peername')[0].startswith('127.'))
-                    ok = leaderboard_put(m, test_progression=local_test)
-                    writer.write((json.dumps({'op': 'stats_put', 'ok': ok}) + '\n').encode())
+                    name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
+                    if name and protected_by(name):  # a protected name's stats come signed by its account only
+                        writer.write((json.dumps({'op': 'stats_put', 'ok': False, 'why': 'protected'}) + '\n').encode())
+                    else:
+                        ok = leaderboard_put(m, test_progression=local_test)
+                        writer.write((json.dumps({'op': 'stats_put', 'ok': ok}) + '\n').encode())
+                elif op == 'challenge':
+                    nonce = challenge(address)
+                    writer.write((json.dumps({'op': 'challenge', 'nonce': nonce} if nonce else
+                                             {'op': 'challenge', 'why': 'too_many'}) + '\n').encode())
+                elif op == 'claim':
+                    reply = self.claim(m, address)
+                    writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'recover':
+                    got = check_signed(m, 'recover')
+                    acct = ACCOUNTS.get(got[0]) if got else None
+                    if acct:
+                        acct['seen'] = int(time.time())
+                        if acct.get('name') and protected_by(acct['name']) is not acct:
+                            acct['name'] = ''  # unused too long, and another player has it now
+                        accounts_changed()
+                        writer.write((json.dumps({'op': 'recover', 'ok': True, 'name': acct.get('name', ''),
+                                                  'progress': acct.get('progress', {}),
+                                                  'progress_text': progress_text(acct.get('progress', {}))}) +
+                                      '\n').encode())
+                        self.note('%s recovered the account of %s' % (peer, acct.get('name') or '(no name)'))
+                    else:
+                        writer.write((json.dumps({'op': 'recover', 'ok': False}) + '\n').encode())
+                elif op == 'name' and 'signed' in m:
+                    writer.write((json.dumps(self.signed_name(m, address)) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
                     writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
+                elif op == 'reserve' and maintenance_now(address):
+                    # Maintenance mode (maintenance_now): every join refused with its text, whatever server was picked.
+                    notice = maintenance_now(address)
+                    RESERVATIONS.pop(address, None)
+                    writer.write((json.dumps({'op': 'closed', 'kind': notice['kind'], 'title': notice['title'],
+                                              'message': notice['text']}) + '\n').encode())
+                    self.note('%s refused game %s: maintenance (%s)' % (peer, str(m.get('gid', ''))[:16], notice['kind']))
                 elif op == 'reserve' and m.get('gid') in GAMES:
                     yours, platform = str(m.get('version', ''))[:24], str(m.get('platform', ''))[:16]
                     if outdated(yours, platform):
@@ -870,9 +1525,27 @@ class Registry:
                         self.note('%s refused game %s: its version %s, players need v%s' %
                                   (peer, m['gid'], 'v' + yours if yours else 'not said (before the gate)', need))
                     else:
-                        RESERVATIONS[peer.split(':')[0]] = (m['gid'], time.time())
-                        writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
-                        self.note('%s picked game %s%s' % (peer, m['gid'], ' (v%s)' % yours if yours else ''))
+                        address = peer.split(':')[0]
+                        renewal = RESERVATIONS.get(address, (None, 0))[0] == m['gid']
+                        full, players, arriving, most = server_full(m['gid'], address)
+                        if full and not renewal:
+                            # (A game that does not know "full" says the list did not answer, and joins nothing.)
+                            RESERVATIONS.pop(address, None)
+                            # (Never the server's name in "message": a name holding "reserved" would read as a yes.)
+                            writer.write((json.dumps({'op': 'full', 'gid': m['gid'], 'players': players,
+                                                      'max_players': most, 'title': 'SERVER FULL',
+                                                      'message': 'This server has %d of %d players. Pick another '
+                                                                 'server, or try again in a moment.' %
+                                                                 (min(players + arriving, most), most)}) +
+                                          '\n').encode())
+                            self.note('%s refused game %s: full (%d players, %d on their way, %d at most)' %
+                                      (peer, m['gid'], players, arriving, most))
+                        else:
+                            if not renewal:
+                                PICKS[address] = (m['gid'], time.time(), players)
+                            RESERVATIONS[address] = (m['gid'], time.time())
+                            writer.write((json.dumps({'op': 'reserved', 'gid': m['gid']}) + '\n').encode())
+                            self.note('%s picked game %s%s' % (peer, m['gid'], ' (v%s)' % yours if yours else ''))
                 elif op == 'name':
                     asked = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
                     try:
@@ -882,11 +1555,7 @@ class Registry:
                     if not asked or not pid:
                         writer.write((json.dumps({'op': 'name', 'name': asked}) + '\n').encode())
                     else:
-                        name = free_name(asked, pid)
-                        if name_holder(name) != pid or NAMES[name.lower()][1] is not None:
-                            NAMES[name.lower()] = (pid, time.time() + 600)
-                        writer.write((json.dumps({'op': 'name', 'name': name}) + '\n').encode())
-                        self.note('%s asked for the name %s: %s' % (peer, asked, name))
+                        writer.write((json.dumps(self.name_reply(asked, pid, address)) + '\n').encode())
                 elif op == 'find':
                     want = (str(m.get('address', '')), int(m.get('port', 18300) or 18300))
                     games = [for_player(g, writer, self.args) for g in GAMES.values() if g.get('TYPE') == 'G']
@@ -901,12 +1570,19 @@ class Registry:
                     # the servers' own.
                     hosts = {g.get('HN') for g in GAMES.values()}
                     online = len([p for p in Client.online if p not in hosts])
-                    reply = {'op': 'servers', 'servers': servers, 'players_online': online}
+                    reply = {'op': 'servers'}
+                    notice = maintenance_now(address)
+                    if notice:  # before "servers": the games read the first field of each name
+                        reply.update(notice_kind=notice['kind'], notice_title=notice['title'],
+                                     notice_text=notice['text'], notice_seconds=notice['seconds'])
+                        if 'notice' not in m:  # a game from before maintenance mode: one row says it
+                            servers = [notice_row(notice)]
+                    reply.update(servers=servers, players_online=online)
                     need = required_version(str(m.get('platform', '')))
                     if need:
                         reply['required_version'] = need
-                        if 'version' not in m:  # a game from before the gate: it has no pop-up, so its list says it
-                            reply['servers'] = [update_notice('classic'), update_notice('modern')]
+                        if 'version' not in m and not notice:  # a game from before the gate: it has no pop-up, so
+                            reply['servers'] = [update_notice('classic'), update_notice('modern')]  # its list says it
                     writer.write((json.dumps(reply) + '\n').encode())
                 await writer.drain()
         except (ConnectionError, ValueError, KeyError) as e:
@@ -974,7 +1650,7 @@ def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
             if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
-                         'server_version', 'local')}
+                         'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest')}
 
 
 async def http_client(reader, writer, log):
@@ -1021,6 +1697,10 @@ async def main():
                          "machine it can reach: the one it connected to when it is on this machine or network, "
                          "else --theater-host (the public address)")
     ap.add_argument('--theater-port', type=int, default=18246)
+    ap.add_argument('--check-servers', default='',
+                    help="the official builds' manifests (a folder of *.json): list only community servers that run "
+                         'one (ServerCheck); the others are Direct connect only')
+    ap.add_argument('--blocked-file', default='', help='with --check-servers: hosts never listed (ServerCheck)')
     ap.add_argument('--login-delay', type=float, default=2.0, help='seconds before the login reply')
     # Off by default: with our HTTP reply the client never finishes the ticker request (docs/01-online-flow.md).
     ap.add_argument('--http-port', type=int, default=0, help='HTTP port for the news ticker (0: off)')
@@ -1045,8 +1725,15 @@ async def main():
     ap.add_argument('--version-feed-every', type=float, default=300.0, help='seconds between two looks at the feed')
     ap.add_argument('--required-version', default='',
                     help='the version gate: players need this version (in place of --version-feed)')
+    ap.add_argument('--maintenance-file', default='',
+                    help='maintenance mode: a file the server manager writes (manager.py maintenance); while it is on, '
+                         'new joins are refused with its text (maintenance_now)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
+    ap.add_argument('--accounts', default='',
+                    help="a file keeping the players' accounts (Protect your name: protected names and progress)")
+    ap.add_argument('--accounts-save-every', type=float, default=30.0,
+                    help='seconds between two writes of the accounts file (only when something changed)')
     ap.add_argument('--test-progression', action='store_true',
                     help='store rank and achievement IDs submitted by local test clients')
     ap.add_argument('--seconds', type=int, default=0, help='stop after this many seconds (0: run until stopped)')
@@ -1063,6 +1750,10 @@ async def main():
                 LEADERBOARD[str(e['name']).lower()] = e
         except (OSError, ValueError, KeyError, TypeError):
             pass
+    global ACCOUNTS_FILE
+    ACCOUNTS_FILE = args.accounts or None
+    if ACCOUNTS_FILE and os.path.exists(ACCOUNTS_FILE):
+        load_accounts(ACCOUNTS_FILE)
     for n, address in enumerate(args.game, 1):
         host, port = address.rsplit(':', 1)
         GAMES[str(n)] = {'GID': str(n), 'LID': '1', 'I': host, 'P': int(port), 'HU': n, 'HN': 'bf1943-server-%d' % n,
@@ -1095,6 +1786,9 @@ async def main():
                                                       args.registry_port))
             log.write('%s server registry on %s:%d\n' % (time.strftime('%H:%M:%S'), args.registry_host or args.host,
                                                           args.registry_port))
+            if registry.check:
+                registry.check.reload()
+                asyncio.get_running_loop().create_task(registry.check.watch())
         if args.http_port:
             servers.append(await asyncio.start_server(lambda r, w: http_client(r, w, log), args.host, args.http_port))
             log.write('%s HTTP on %s:%d\n' % (time.strftime('%H:%M:%S'), args.host, args.http_port))
@@ -1102,6 +1796,12 @@ async def main():
             log.write('%s %s\n' % (time.strftime('%H:%M:%S'), text))
             log.flush()
         feed_task = None
+        if args.maintenance_file:
+            MAINTENANCE.update(file=args.maintenance_file, note={'said': None, 'say': gate_note})
+            maintenance_now()
+        accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
+        log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
+                                             ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
         if args.required_version:
             VERSION_GATE.update(required=args.required_version.lstrip('vV'), platforms=None, source='--required-version')
             gate_note('version gate: players need v%s (--required-version)' % VERSION_GATE['required'])
@@ -1117,6 +1817,8 @@ async def main():
             await asyncio.gather(*(srv.serve_forever() for srv in servers))
         if feed_task:
             feed_task.cancel()
+        accounts_task.cancel()
+        save_accounts()
 
 
 if __name__ == '__main__':

@@ -5358,3 +5358,108 @@ close to daylight, ngc1).
 
 **Tests:** BF_DEV_CAMERA_POINTS=x,y,z,tx,ty,tz;... (the game's look.cpp, dev builds): the camera at each stop looking at
 its point, with BF_DEV_CAMERA_TOUR's dwell; the view's row 2 is its back (BF_DEV_CAMERA_AT had the point behind).
+
+## D171 — Few cores: no recorder thread and no spinning waits; the temporal upscalers' libraries not asked (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** Battlefield 1943 Reborn's weak processor test (its client held to two cores of a Ryzen 7 7800X3D, one thread
+each, Wake Island at 90 FPS, 50 s) went from a 1% low of 82.5 FPS on 14 Nov to 34 to 37 FPS after pull request 28's
+recorder (the draws' DiligentCore calls on a thread of their own): on two cores that thread competes with the game's own
+threads. With every core free it gains nothing where the GPU is the limit, and helps where the renderer's thread is
+(the same PC at render scale 1: 1% low 196.9 FPS with it, 163.7 without; renderer CPU 2.21 against 2.82 ms a frame).
+
+**What:**
+- cpu_cores.cpp: `AvailableCores()`, the physical cores among the processors the process may run on (its affinity; a
+  dual core with Hyper-Threading is 2), read again at most once a second.
+- The recorder's thread starts only with at least `native_x_renderer_record_thread_cores` (4) cores
+  (`native_x_renderer_record_thread` still turns it off everywhere); the choice is logged.
+- The command queue's and the recorder's waits spin before they sleep only with at least `native_x_renderer_spin_cores`
+  (4) cores; on fewer the thread a spin waits for usually needs the very core the spin holds.
+- `native_x_renderer_check_temporal` (on): the start's question to AMD's FSR and Intel's XeSS libraries about what this
+  GPU runs (for a menu's upscaler choices) can be left out. Battlefield 1943 Reborn offers no temporal upscaler since
+  0.4.4, turns it off and no longer ships those libraries (161 MB).
+
+**Measured** (two cores, 90 FPS cap, 50 s each; others' load 0.7 to 1.0 core):
+
+| | 1% low | 0.1% low | frames over twice the average | client CPU |
+|---|---|---|---|---|
+| Recorder on, spins (before) | 34.0 to 36.7 FPS | 21.8 to 23.0 | 19 to 26 | 1.28 cores |
+| Recorder off, spins | 60.7 to 78.0 FPS (four runs) | 20.3 to 38.6 | 2 to 7 | 1.00 to 1.04 |
+| Recorder off, no spins (now) | 70.9 to 74.1 FPS (two runs; a third, 35.1, had a 240 ms stall) | 29.2 to 30.0 | 3 to 5 | 1.03 |
+
+Four cores at 90 FPS: 1% low 89.4 FPS with and without the recorder (it stays on). All sixteen threads, no cap:
+229.7 FPS, 1% low 193.9 (223.6 and 189.1 before; the GPU is the limit). Unlimited frame rate on two cores stays poor
+either way (47 to 71 FPS average, 1% low about 13): the processor is simply full.
+
+## D172 — The dynamic heap at 64 MB, not 256 (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** DiligentCore's dynamic heap (the draws' constant buffers and the uploads, `EngineVkCreateInfo::DynamicHeapSize`)
+is one host-visible, host-coherent buffer made at the start and kept: on a discrete card that is pinned system memory,
+on integrated graphics memory shared with the system. At 256 MB it was the third largest block in Battlefield 1943
+Reborn's process (all of it resident), for a game that also wants to run on 8 GB PCs. Measured on a Ryzen 7 7800X3D
+and RTX 4070 Ti (DiligentCore warns "Space in dynamic heap is almost exhausted" whenever it must wait for the GPU to free
+space): 16 MB, 314 such waits, all during the level's load; 32 MB, 91, all during the load; 64 MB, none on any of the
+four maps, nor with the HD texture pack, nor over two 14 spot camera tours at the Ultra settings with the pack, and the
+load took as long (7.3 s on Wake Island). Play itself never needed 16 MB.
+
+**What:** `native_x_renderer_dynamic_heap_mb` (64; 8 to 1024) sets the size. The working set in a match went from
+2.9 GB to 2.7 GB (private memory 4.58 to 4.39 GB), the frame rate the same. If a game needs more, DiligentCore only
+waits for the GPU (and says so in the log), it does not fail.
+
+## D173 — The pipeline cache let go once the stored pipelines are compiled (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** DiligentCore's pipeline cache (D42, D45) holds the driver's binaries of every pipeline compiled with it:
+80 MB for Battlefield 1943 Reborn's 2,200 stored pipelines, in system memory for the whole run, while a match uses a
+few hundred. The drivers keep caches of their own on disk: on an RTX 4070 Ti, a start with no pipeline cache at all
+compiled the 2,200 in 594 ms, with it 640 ms.
+
+**What:** once the stored pipelines are compiled and nothing is left unsaved (a first start saves the cache first,
+D135), the renderer lets go of the cache (`native_x_renderer_keep_pipeline_cache`, false, keeps it); compilations in
+flight hold their own reference. The file is still read at the next start, for a driver without a cache of its own;
+pipelines new in play are compiled without it and not added to the file (their records are, D42). Measured, a start
+with the cache file there: the heap 608 to 527 MB resident, the working set 2.62 to 2.54 GB, the same frame rate.
+
+## D174 — The guest memory mirror as a sparse buffer (2026-11-15, Claude for Battlefield 1943 Reborn)
+
+**Why:** the mirror of the guest's 512 MB of physical memory (D35, the SDK's SharedMemory design) was an ordinary
+buffer: 512 MB of graphics memory on every card, a quarter of a 2 GB one, though only what the draws read is ever
+copied in. Battlefield 1943 Reborn wrote 116 to 124 MB of it in 64 KB blocks (228 MB in 4 MB blocks) over 14 spot
+camera tours of Guadalcanal and Wake Island. The SDK's Xenos path binds its own shared memory sparsely for the same
+reason (tested here with that off: +504 MB).
+
+**What:** where the device has sparse buffers, timeline semaphores and a queue that binds sparse memory
+(`SparseResources` and `NativeFence` are now asked for, optional), the mirror is a `USAGE_SPARSE` buffer and
+`GuestMemory::EnsureMirror` binds 1 MB of a sparse `IDeviceMemory` to each 1 MB block before anything first writes
+there: the three copies into the mirror (`Upload`, `UploadUnwatched`, `WriteIfChanged`) and the two compute passes that
+write resolves into it (D140, D155; a span rounded up to 32 rows of 16 bytes a texel). The bind is recorded in order
+with the copies (the recorder's `Do`): DiligentCore flushes the context, binds, signals the fence, and the context's
+next submission waits for it on the GPU. Blocks are never unbound. Without the support, or with
+`native_x_renderer_sparse_guest_memory` false, the full buffer as before; the log says which and why. A draw reads only
+ranges requested first, which are copied (so bound) before; an unbound block reads as zeros.
+
+**Measured** (RTX 4070 Ti, Wake Island): the game's dedicated graphics memory 2,085 MB to 1,745 MB, 162 MB of the
+mirror bound after a minute of play (164 MB on a Guadalcanal tour with the HD texture pack); every draw drawn (836
+of 836); screenshots of the same camera spots the same; no errors. Frame rates in interleaved runs, sparse against full:
+all cores 225.2 and 228.4 FPS against 218.2 and 229.3; two cores 170.7 and 175.0 against 172.6 and 171.1 (the same
+within noise).
+
+## D175 — Night: the lights follow the day and night cycle; the old night look only on request (2026-11-16, Claude for Battlefield 1943 Reborn)
+
+**Why:** pull request 32 (D-numbers in its own notes: the renderer's own sky, clouds, weather and the day and night
+cycle, `SkyLightAt`) darkens the game's light at night with a moon and stars of its own, so the separate night maps
+(D162's moonlit grade over the finished picture, D169's sky) are no longer wanted: TekRantGaming, 16 Nov 2026, the night
+maps removed, the lights kept, and Night Ops servers kept as the cycle held at night. The lights (D163: the levels'
+lamps, the effects' light, the models' lamps; D170: firelight, beams, lit buildings) ran only with
+`native_x_renderer_night`, which nothing turns on any more.
+
+**What:** `g_cycle_dark`, set with the outdoor light from the world's hour (`SkyLightAt`'s sun elevation): 0 by day,
+a smoothstep from 4 degrees up to 6 degrees under, 1 after; 0 when the world has no day and night. `NightLightsAmount`
+is 1 with `native_x_renderer_night` (the old look, kept for tests), else that darkness, and `NightPassOn` (above 0.01)
+replaces the cvar at every switch of the night pass: the world's depth copy, the effects' layer, the night camera,
+the models' lamps, the pass's arming and its log. The pass's new `NightSettings::grade` (the shader's `skyp.z`) is 1
+for the old look and 0 for the cycle: the scene stays as the cycle drew it (no moonlit grade, no haze, no D169 sky),
+and only the lamps, the lamp glows and the effects' light are added, their strengths times the darkness. D169's sky
+capture stays with the old look only.
+
+**Tested** (Battlefield 1943 Reborn dev build, local servers, Wake Island at the airfield): a Night Ops server's world
+held at 0 h, 24 lamps lit round the player and their bulbs glowing (run n175isl); a normal server at 18:45, the
+airfield's lamps lit (c175dusk); at noon no night pass at all (c175noon).

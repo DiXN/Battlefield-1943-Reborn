@@ -592,10 +592,14 @@ std::vector<std::string> Init(int argc, char** argv) {
           },
           entry.description);
     } else {
+      // Battlefield 1943 Reborn, 14 Nov 2026: an option given twice takes its last value. CLI11 refused a second one
+      // ("at most 1"), and since it applies options only after the whole parse, that one error dropped every option
+      // on the command line (a test run with --bf_voice_volume=0 twice drew without NativeXRenderer).
       app.add_option_function<std::string>(
-          "--" + entry.name,
-          [&entry](const std::string& val) { ApplyFromSource(entry, val, Source::kCommandLine); },
-          entry.description);
+             "--" + entry.name,
+             [&entry](const std::string& val) { ApplyFromSource(entry, val, Source::kCommandLine); },
+             entry.description)
+          ->multi_option_policy(CLI::MultiOptionPolicy::TakeLast);
     }
   }
 

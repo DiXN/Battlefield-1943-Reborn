@@ -35,6 +35,9 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_unwatch_rewritten, true, "NativeXRenderer"
 REXCVAR_DEFINE_BOOL(native_x_renderer_map_guest_memory, true, "NativeXRenderer",
                     "Every guest memory page read once on a thread of its own when the draw path starts, so that the "
                     "renderer's copies of new data (a screen's textures) do not map each page as they read it (D108)");
+REXCVAR_DEFINE_BOOL(native_x_renderer_sparse_guest_memory, true, "NativeXRenderer",
+                    "The guest memory mirror as a sparse buffer, memory bound 1 MB at a time where the renderer first "
+                    "writes (D174), where the GPU and its driver support it; off: all 512 MB in graphics memory");
 REXCVAR_DEFINE_BOOL(native_x_renderer_compare_unwatched, true, "NativeXRenderer",
                     "Pages left unwatched (D97) are compared with a copy of what the mirror holds, kept on the CPU, "
                     "instead of by hash (D110)");
@@ -114,8 +117,8 @@ bool GuestMemory::TraceLine() {
   return lines.fetch_add(1) < 400;
 }
 
-GuestMemory::GuestMemory(rex::memory::Memory& memory, IRenderDevice* device, IDeviceContext* context)
-    : SharedMemory(memory), device_(device), context_(context) {
+GuestMemory::GuestMemory(rex::memory::Memory& memory, IRenderDevice* device, Recorder* recorder)
+    : SharedMemory(memory), device_(device), recorder_(recorder) {
   if (TracePage()) {
     trace_callback_ = memory.RegisterPhysicalMemoryInvalidationCallback(
         [](void* self, uint32_t start, uint32_t length, bool exact) -> std::pair<uint32_t, uint32_t> {
@@ -150,7 +153,59 @@ bool GuestMemory::Initialize() {
   desc.Usage = USAGE_DEFAULT;
   desc.BindFlags = BIND_SHADER_RESOURCE | BIND_UNORDERED_ACCESS | BIND_INDEX_BUFFER;
   desc.Mode = BUFFER_MODE_RAW;
-  device_->CreateBuffer(desc, nullptr, &buffer_);
+  // D174: sparse where it can be: Battlefield 1943 writes about 120 MB of the 512 (in 64 KB blocks; 1 MB blocks are
+  // bound), so a full buffer kept some 300 to 390 MB of graphics memory for nothing.
+  {
+    const DeviceFeatures& features = device_->GetDeviceInfo().Features;
+    const SparseResourceProperties& sparse = device_->GetAdapterInfo().SparseResources;
+    const bool queue_binds = (recorder_->context()->GetDesc().QueueType & COMMAND_QUEUE_TYPE_SPARSE_BINDING) ==
+                             COMMAND_QUEUE_TYPE_SPARSE_BINDING;
+    const uint64_t block = uint64_t(1) << kBlockLog2;
+    const char* why = nullptr;
+    if (!REXCVAR_GET(native_x_renderer_sparse_guest_memory)) why = "off (native_x_renderer_sparse_guest_memory)";
+    else if (!features.SparseResources) why = "no sparse resources";
+    else if (!(sparse.CapFlags & SPARSE_RESOURCE_CAP_FLAG_BUFFER)) why = "no sparse buffers";
+    else if (!features.NativeFence) why = "no timeline semaphores";
+    else if (!queue_binds) why = "its queue binds no sparse memory";
+    else if (sparse.StandardBlockSize == 0 || block % sparse.StandardBlockSize) why = "its sparse block size";
+    if (!why) {
+      BufferDesc sparse_desc = desc;
+      sparse_desc.Usage = USAGE_SPARSE;
+      device_->CreateBuffer(sparse_desc, nullptr, &buffer_);
+      if (buffer_) {
+        DeviceMemoryCreateInfo memory_info;
+        memory_info.Desc.Name = "NativeXRenderer guest memory pages";
+        memory_info.Desc.Type = DEVICE_MEMORY_TYPE_SPARSE;
+        memory_info.Desc.PageSize = block;
+        memory_info.InitialSize = block;
+        IDeviceObject* compatible[] = {buffer_};
+        memory_info.ppCompatibleResources = compatible;
+        memory_info.NumResources = 1;
+        device_->CreateDeviceMemory(memory_info, &sparse_memory_);
+        FenceDesc fence_desc;
+        fence_desc.Name = "NativeXRenderer guest memory binds";
+        fence_desc.Type = FENCE_TYPE_GENERAL;
+        device_->CreateFence(fence_desc, &sparse_fence_);
+      }
+      if (buffer_ && sparse_memory_ && sparse_fence_) {
+        sparse_ = true;
+        block_bound_.assign(kBufferSize >> kBlockLog2, 0);
+      } else {
+        why = "the sparse buffer or its memory could not be made";
+        buffer_.Release();
+        sparse_memory_.Release();
+        sparse_fence_.Release();
+      }
+    }
+    if (sparse_) {
+      REXLOG_INFO("[native_x_renderer] guest memory mirror: sparse, 1 MB of graphics memory bound where it is first "
+                  "written (D174)");
+    } else {
+      REXLOG_INFO("[native_x_renderer] guest memory mirror: all {} MB in graphics memory ({}; D174)", kBufferSize >> 20,
+                  why);
+      device_->CreateBuffer(desc, nullptr, &buffer_);
+    }
+  }
   if (!buffer_) {
     REXLOG_ERROR("[native_x_renderer] could not create the {} MB guest memory buffer", kBufferSize >> 20);
     return false;
@@ -306,7 +361,8 @@ bool GuestMemory::UploadUnwatched(uint32_t page_first, uint32_t page_count) {
   if (const uint32_t trace = TracePage(); trace >= page_first && trace < page_first + page_count && TraceLine())
     REXLOG_INFO("[native_x_renderer] trace {:08X}: uploaded unwatched (pages {:X} count {})", trace << 12, page_first,
                 page_count);
-  context_->UpdateBuffer(buffer_, start, length, copy_ + start, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  EnsureMirror(start, length);
+  recorder_->UpdateBuffer(buffer_, start, length, copy_ + start);
   for (uint32_t page = page_first; page < page_first + page_count; ++page) {
     copy_valid_[page] = true;
     // No hash of what the mirror holds now: once watched again, the page is copied at its first request.
@@ -424,10 +480,11 @@ void GuestMemory::EndFrame() {
   compare_unwatched_ = copy_ && REXCVAR_GET(native_x_renderer_compare_unwatched);
 }
 
-bool GuestMemory::WriteIfChanged(IDeviceContext* context, uint32_t address, const uint8_t* data, uint32_t size) {
+bool GuestMemory::WriteIfChanged(uint32_t address, const uint8_t* data, uint32_t size) {
   if (!size || address >= kBufferSize || size > kBufferSize - address) return false;
   if (!std::memcmp(memory().TranslatePhysical(address), data, size)) return false;
-  context->UpdateBuffer(buffer_, address, size, data, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  EnsureMirror(address, size);
+  recorder_->UpdateBuffer(buffer_, address, size, data);
   uploaded_bytes_ += size;
   ++copies_;
   ++total_copies_;
@@ -442,6 +499,57 @@ bool GuestMemory::WriteIfChanged(IDeviceContext* context, uint32_t address, cons
   }
   MemoryInvalidationCallback(address, size, true);
   return true;
+}
+
+void GuestMemory::EnsureMirror(uint32_t start, uint32_t length) {
+  if (!sparse_ || !length || start >= kBufferSize) return;
+  length = std::min(length, kBufferSize - start);
+  const uint32_t first = start >> kBlockLog2, last = (start + length - 1) >> kBlockLog2;
+  std::vector<SparseBufferMemoryBindRange> ranges;
+  for (uint32_t block = first; block <= last; ++block) {
+    if (block_bound_[block]) continue;
+    const uint64_t memory_offset = uint64_t(blocks_bound_) << kBlockLog2;
+    const uint64_t needed = memory_offset + (uint64_t(1) << kBlockLog2);
+    if (sparse_memory_->GetCapacity() < needed && !sparse_memory_->Resize(needed)) {
+      static bool logged = false;
+      if (!logged) {
+        logged = true;
+        REXLOG_ERROR("[native_x_renderer] guest memory mirror: no graphics memory for another 1 MB at {:#x} (D174); "
+                     "that block reads as zeros",
+                     block << kBlockLog2);
+      }
+      continue;
+    }
+    block_bound_[block] = 1;
+    ++blocks_bound_;
+    ranges.push_back(SparseBufferMemoryBindRange{uint64_t(block) << kBlockLog2, memory_offset,
+                                                 uint64_t(1) << kBlockLog2, sparse_memory_});
+  }
+  if (ranges.empty()) return;
+  const uint64_t value = ++sparse_fence_value_;
+  // In order with the copies recorded around it: the bind first (it flushes the context), then what the context
+  // submits next waits for it on the GPU.
+  recorder_->Do([buffer = buffer_.RawPtr(), fence = sparse_fence_.RawPtr(), value,
+                 ranges = std::move(ranges)](IDeviceContext* context) {
+    SparseBufferMemoryBindInfo bind;
+    bind.pBuffer = buffer;
+    bind.pRanges = ranges.data();
+    bind.NumRanges = uint32_t(ranges.size());
+    BindSparseResourceMemoryAttribs attribs;
+    attribs.pBufferBinds = &bind;
+    attribs.NumBufferBinds = 1;
+    IFence* fences[] = {fence};
+    attribs.ppSignalFences = fences;
+    attribs.pSignalFenceValues = &value;
+    attribs.NumSignalFences = 1;
+    context->BindSparseResourceMemory(attribs);
+    context->DeviceWaitForFence(fence, value);
+  });
+  const uint32_t mb = mirror_bound_mb();
+  if (mb >= bound_logged_mb_ + 32) {
+    bound_logged_mb_ = mb;
+    REXLOG_INFO("[native_x_renderer] guest memory mirror: {} MB bound (D174)", mb);
+  }
 }
 
 void GuestMemory::Upload(uint32_t page_first, uint32_t page_count) {
@@ -462,7 +570,8 @@ void GuestMemory::Upload(uint32_t page_first, uint32_t page_count) {
     page_hashes_[page_first + i] = XXH3_64bits(snapshot_.data() + (size_t(i) << page_shift), page_size);
     copy_valid_[page_first + i] = false;  // the unwatched pages' copy no longer holds what the mirror does (D110)
   }
-  context_->UpdateBuffer(buffer_, start, length, snapshot_.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+  EnsureMirror(start, length);
+  recorder_->UpdateBuffer(buffer_, start, length, snapshot_.data());
   uploaded_bytes_ += length;
   ++copies_;
   ++total_copies_;
@@ -478,12 +587,12 @@ uint64_t GuestMemory::MirrorHash(uint32_t start, uint32_t length) const {
   return XXH3_64bits(page_hashes_.data() + first, size_t(last - first + 1) * sizeof(uint64_t));
 }
 
-void GuestMemory::PrepareForRead(IDeviceContext* context) {
+void GuestMemory::PrepareForRead() {
   if (in_read_state_) return;
   StateTransitionDesc barrier{buffer_, RESOURCE_STATE_UNKNOWN,
                               RESOURCE_STATE_SHADER_RESOURCE | RESOURCE_STATE_INDEX_BUFFER,
                               STATE_TRANSITION_FLAG_UPDATE_STATE};
-  context->TransitionResourceStates(1, &barrier);
+  recorder_->Do([barrier](IDeviceContext* context) mutable { context->TransitionResourceStates(1, &barrier); });
   in_read_state_ = true;
 }
 

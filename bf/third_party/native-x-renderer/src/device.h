@@ -11,6 +11,7 @@
 #include "RefCntAutoPtr.hpp"
 #include "RenderDevice.h"
 #include "SwapChain.h"
+#include "recorder.h"
 
 namespace native_x_renderer {
 
@@ -40,7 +41,8 @@ class Device {
   bool Create(void* native_window, bool half_precision = false);
 
   Diligent::IRenderDevice* device() const { return device_; }
-  Diligent::IDeviceContext* context() const { return context_; }
+  Diligent::IDeviceContext* context() { return recorder_.context(); }
+  Recorder& recorder() { return recorder_; }
   // Asked for again at each use: after a failure the swap chain is a new one (RebuildSwapChain).
   Diligent::ISwapChain* swap_chain() const { return swap_chain_; }
   // The image to draw the frame into (the swap chain's current one, acquired if need be). If the swap chain fails
@@ -117,6 +119,7 @@ class Device {
   // D159: a size the surface did not take (UpdateSize), not asked for again until the SDK's size changes.
   uint32_t refused_width_ = 0, refused_height_ = 0;
   int real_size_notes_ = 0;
+  Recorder recorder_;
 };
 
 }  // namespace native_x_renderer

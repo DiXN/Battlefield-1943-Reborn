@@ -301,6 +301,7 @@ void CommandProcessor::WorkerThreadMain() {
     assert_true(read_ptr_index_ != write_ptr_index);
 
     // Execute. Note that we handle wraparound transparently.
+    gate_tag_ = kick_tag_.load();
     read_ptr_index_ = ExecutePrimaryBuffer(read_ptr_index_, write_ptr_index);
 
     // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
@@ -391,6 +392,7 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr, uint32_t block_s
 }
 
 void CommandProcessor::UpdateWritePointer(uint32_t value) {
+  if (auto kick_tag = kick_tag_fn_.load(std::memory_order_acquire)) kick_tag_.store(kick_tag(signal_gate_user_));
   write_ptr_index_ = value;
   write_ptr_index_event_->Set();
 }
@@ -418,7 +420,8 @@ void CommandProcessor::WriteRegister(uint32_t index, uint32_t value) {
 
   // Volatile for the WAIT_REG_MEM loop.
   const_cast<volatile uint32_t&>(regs.values[index]) = value;
-  if (!regs.GetRegisterInfo(index)) {
+  auto* gpu_log = ::rex::GetLoggerRaw(::rex::log::gpu());
+  if (gpu_log && gpu_log->should_log(spdlog::level::debug) && !regs.GetRegisterInfo(index)) {
     REXGPU_DEBUG("GPU: Write to unknown register ({:04X} = {:08X})", index, value);
   }
 
@@ -775,10 +778,12 @@ bool CommandProcessor::ExecutePacketType0(memory::RingBuffer* reader, uint32_t p
 
   uint32_t base_index = (packet & 0x7FFF);
   uint32_t write_one_reg = (packet >> 15) & 0x1;
+  if (!write_one_reg) {
+    WriteRegisterRangeFromRing(reader, base_index, count);
+    return true;
+  }
   for (uint32_t m = 0; m < count; m++) {
-    uint32_t reg_data = reader->ReadAndSwap<uint32_t>();
-    uint32_t target_index = write_one_reg ? base_index : base_index + m;
-    WriteRegister(target_index, reg_data);
+    WriteRegister(base_index, reader->ReadAndSwap<uint32_t>());
   }
 
   return true;
@@ -1059,11 +1064,11 @@ void CommandProcessor::PassSignalGate(GateSite site) {
   auto gate = signal_gate_.load(std::memory_order_acquire);
   if (!gate) return;
   if (REXCVAR_GET(gpu_signal_gate_stats) <= 0) {
-    gate(signal_gate_user_);
+    gate(signal_gate_user_, gate_tag_);
     return;
   }
   auto start = std::chrono::steady_clock::now();
-  gate(signal_gate_user_);
+  gate(signal_gate_user_, gate_tag_);
   gate_stats_[site].passes.fetch_add(1, std::memory_order_relaxed);
   gate_stats_[site].waited_ns.fetch_add(
       uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()),

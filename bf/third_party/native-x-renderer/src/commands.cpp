@@ -21,6 +21,8 @@
 #include <immintrin.h>
 #endif
 
+#include "cpu_cores.h"
+
 namespace native_x_renderer {
 namespace {
 
@@ -116,16 +118,17 @@ const Command* CommandQueue::Peek(uint32_t ahead) const {
   return &slots_[index % kSlots];
 }
 
-void CommandQueue::WaitIdle() {
+void CommandQueue::WaitIdle(uint64_t limit) {
   if (!threaded_) return;
-  WaitConsumed(produced_.load(std::memory_order_seq_cst), gate_waits_, gate_wait_ns_);
+  WaitConsumed(std::min(limit, produced_.load(std::memory_order_seq_cst)), gate_waits_, gate_wait_ns_);
 }
 
 void CommandQueue::WaitConsumed(uint64_t target, std::atomic<uint64_t>& waits, std::atomic<uint64_t>& wait_ns) {
   if (consumed_.load(std::memory_order_acquire) >= target || !running_.load(std::memory_order_acquire)) return;
   auto start = Clock::now();
-  // The thread is usually a few commands away: spin briefly before sleeping.
-  for (uint32_t i = 0; i < 4096 && consumed_.load(std::memory_order_acquire) < target; ++i) Pause();
+  // The thread is usually a few commands away: spin briefly before sleeping (with enough cores: cpu_cores.h).
+  const uint32_t spins = SpinWaitsAllowed() ? 4096 : 0;
+  for (uint32_t i = 0; i < spins && consumed_.load(std::memory_order_acquire) < target; ++i) Pause();
   if (consumed_.load(std::memory_order_acquire) < target) {
     std::unique_lock lock(mutex_);
     while (running_.load(std::memory_order_acquire)) {
@@ -156,14 +159,25 @@ void RaiseCurrentThreadPriority() {
 #endif
 }
 
+void CommandQueue::Complete(uint64_t consumed) {
+  consumed_.store(consumed, std::memory_order_seq_cst);
+  if (consumed >= wake_at_.load(std::memory_order_seq_cst)) {
+    std::lock_guard lock(mutex_);
+    wake_at_.store(UINT64_MAX, std::memory_order_seq_cst);
+    consumed_cv_.notify_all();
+  }
+}
+
 void CommandQueue::Run() {
   rex::thread::set_current_thread_name("NativeXRenderer");
   if (raise_priority_) RaiseCurrentThreadPriority();  // D136
   uint64_t consumed = consumed_.load(std::memory_order_relaxed);
   while (!stop_.load(std::memory_order_acquire)) {
     if (produced_.load(std::memory_order_acquire) == consumed) {
-      // Empty: spin briefly (the game's thread is usually inside its next call), then sleep.
-      for (uint32_t i = 0; i < 1024 && produced_.load(std::memory_order_acquire) == consumed; ++i) Pause();
+      // Empty: spin briefly (the game's thread is usually inside its next call), then sleep (spin only with enough
+      // cores: cpu_cores.h).
+      const uint32_t spins = SpinWaitsAllowed() ? 1024 : 0;
+      for (uint32_t i = 0; i < spins && produced_.load(std::memory_order_acquire) == consumed; ++i) Pause();
       if (produced_.load(std::memory_order_acquire) == consumed) {
         std::unique_lock lock(mutex_);
         consumer_sleeping_.store(true, std::memory_order_seq_cst);
@@ -184,12 +198,7 @@ void CommandQueue::Run() {
     running_index_ = consumed;
     execute_(slots_[consumed % kSlots]);
     ++consumed;
-    consumed_.store(consumed, std::memory_order_seq_cst);
-    if (consumed >= wake_at_.load(std::memory_order_seq_cst)) {
-      std::lock_guard lock(mutex_);
-      wake_at_.store(UINT64_MAX, std::memory_order_seq_cst);
-      consumed_cv_.notify_all();
-    }
+    Complete(consumed);
   }
   std::lock_guard lock(mutex_);
   running_.store(false, std::memory_order_release);

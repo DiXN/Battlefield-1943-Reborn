@@ -14,6 +14,10 @@ updates, the game's files, the logs.
     manager.py start [n] | stop [n] | restart [n]
     manager.py broadcast --kind restart --minutes 5 [--server n] [--no-restart]
     manager.py broadcast --kind custom --text "Teams are balanced after this round"
+    manager.py maintenance on --preset deploy [--minutes 15] [--allow ADDRESS]
+    manager.py maintenance on --text "Back after the new maps are in" | off | status
+                                                 maintenance mode on the machine that runs the main backend: new joins
+                                                 are refused with the text; players in a match play on
     manager.py update                            look for a new release now, and install it
     manager.py install <package or folder>       the game's files, from the host's own copy of the game
     manager.py quit [--keep-servers]             stops the manager (and, without the option, its servers)
@@ -144,6 +148,10 @@ def update_target():
 LOGS = os.path.join(DATA, 'logs')
 CONFIG = os.path.join(DATA, 'server.json')
 STATE = os.path.join(LOGS, 'manager.json')  # the running manager: its pid, its port, the token of this machine's tools
+# Maintenance mode (TekRantGaming, 15 Nov 2026): the switch our own backend reads (plasma.py --maintenance-file,
+# maintenance_now). Kept in the data folder, so it holds through a restart of the backend or of the manager; a deploy
+# to a new folder copies it with server.json.
+MAINTENANCE_FILE = os.path.join(DATA, 'maintenance.json')
 
 
 def read_text(path, default=''):
@@ -160,6 +168,71 @@ def write_atomic(path, text):
     with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
     os.replace(tmp, path)
+
+
+def notices():
+    """plasma.py, for its maintenance presets and its text check: one list for the backend and the manager."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import plasma
+    return plasma
+
+
+def read_maintenance():
+    """The maintenance switch as it is on disk ({} when there is none)."""
+    try:
+        raw = json.loads(read_text(MAINTENANCE_FILE, '') or '{}')
+    except ValueError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def maintenance_words(raw=None):
+    """One line for the switch: on or off, the preset, the time left, the text the players see."""
+    raw = read_maintenance() if raw is None else raw
+    state = notices().clean_maintenance(raw)
+    if state and state['until'] and time.time() >= state['until']:
+        return 'maintenance: off (its end time has passed)'
+    if not state:
+        return 'maintenance: off' + (' (the file does not check: %s)' % MAINTENANCE_FILE if raw.get('on') else '')
+    left = (', %s left' % time_words(60 * ((int(state['until'] - time.time()) + 59) // 60)) if state['until']
+            else ', until switched off')
+    allow = ', let in: %s' % ', '.join(sorted(state['allow'])) if state['allow'] else ''
+    return 'maintenance: on (%s%s%s). Players see: %s: %s' % (state['kind'], left, allow, state['title'], state['text'])
+
+
+def set_maintenance(on, kind='', text='', minutes=0.0, allow=()):
+    """Maintenance mode on or off: checked, then written where the backend reads it. Returns the line for it."""
+    plasma = notices()
+    if not on:
+        raw = dict(read_maintenance(), on=False)
+    else:
+        text = ' '.join(str(text or '').split())
+        kind = str(kind or ('custom' if text else 'deploy'))
+        if kind not in plasma.NOTICE_PRESETS:
+            raise RuntimeError('There is no such preset: %s (%s).' % (kind, ', '.join(plasma.NOTICE_PRESETS)))
+        if kind == 'custom':
+            problem = plasma.notice_text_problem(text)
+            if problem:
+                raise RuntimeError('That text cannot be shown to the players: %s.' % problem)
+        elif text:
+            raise RuntimeError('A preset has its own text: leave out --text, or use --preset custom.')
+        try:
+            minutes = float(minutes or 0)
+        except (TypeError, ValueError):
+            raise RuntimeError('The minutes must be a number.')
+        if minutes < 0 or minutes > 24 * 60:
+            raise RuntimeError('The minutes must be 0 (until switched off) to 1440.')
+        allow = [str(a).strip() for a in allow or () if str(a).strip()]
+        for a in allow:
+            try:
+                socket.inet_pton(socket.AF_INET6 if ':' in a else socket.AF_INET, a)
+            except OSError:
+                raise RuntimeError('%s is not an address.' % a)
+        raw = {'on': True, 'kind': kind, 'text': text if kind == 'custom' else '',
+               'until': int(time.time() + minutes * 60) if minutes else 0, 'allow': allow, 'since': int(time.time())}
+    write_atomic(MAINTENANCE_FILE, json.dumps(raw, indent=1) + '\n')
+    return maintenance_words(raw)
 
 
 def package_version(root=None):
@@ -203,7 +276,13 @@ def game_installed():
 
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
-            'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0}
+            'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0,
+            'team_balance': True, 'balance_gap': 2, 'balance_min_players': 4, 'balance_delay': 20,
+            'balance_block_stacking': True,
+            # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
+            # the player IDs who may change them in game.
+            'day_night': False, 'time': 16.0, 'day_minutes': 0, 'cloud_cover': 35, 'cloud_rate': 33, 'weather': 0,
+            'fog': 0, 'ground_fog': 0, 'wind': 30, 'cloud_height': 450, 'admins': ''}
 
 
 def clean_text(value, limit):
@@ -232,7 +311,28 @@ def clean_config(raw):
             entry['max_players'] = max(2, min(24, int(s.get('max_players') or 24)))
         entry['listed'] = s.get('listed') is not False
         entry['night'] = s.get('night') is True
+        entry['day_night'] = s.get('day_night') is True
+        with contextlib.suppress(TypeError, ValueError):
+            entry['time'] = max(0.0, min(23.75, float(s.get('time', 16.0))))
+        for key, top in (('day_minutes', 1440), ('cloud_cover', 100), ('cloud_rate', 100), ('weather', 100), ('fog', 100),
+                         ('ground_fog', 100), ('wind', 100)):
+            with contextlib.suppress(TypeError, ValueError):
+                entry[key] = max(0, min(top, int(s.get(key, entry[key]))))
+        with contextlib.suppress(TypeError, ValueError):
+            entry['cloud_height'] = max(200, min(1500, int(s.get('cloud_height', entry['cloud_height']))))
+        entry['admins'] = ','.join(a for a in (''.join(c for c in part if c in '0123456789abcdefABCDEF').upper()[:8]
+                                               for part in str(s.get('admins') or '').replace(';', ',').replace(' ', ',').split(','))
+                                   if a)[:400]
         entry['autostart'] = s.get('autostart') is not False
+        # Team balance (TekRantGaming, 15 Nov 2026: matches ended 7 against 3; bf/src/team_balance.cpp): on unless
+        # turned off. A player who has died on the bigger team moves to the other once the teams are balance_gap or
+        # more apart for balance_delay seconds, with balance_min_players on the server; balance_block_stacking refuses
+        # a Change Team that would leave them so.
+        entry['team_balance'] = s.get('team_balance') is not False
+        entry['balance_block_stacking'] = s.get('balance_block_stacking') is not False
+        for key, low, high in (('balance_gap', 2, 6), ('balance_min_players', 2, 24), ('balance_delay', 5, 300)):
+            with contextlib.suppress(TypeError, ValueError):
+                entry[key] = max(low, min(high, int(s.get(key) if s.get(key) is not None else entry[key])))
         # A rate of its own (13 Nov 2026, TekRantGaming: one 60 Hz test server beside the official 30 Hz ones); 0 takes
         # the manager's rate (Network's Tick rate).
         with contextlib.suppress(TypeError, ValueError):
@@ -537,6 +637,18 @@ class Manager:
     def official_key(self):
         return os.path.join(DATA, 'official.key')
 
+    def host_key(self):
+        """This host's own key (gmhost.host_proof), made once: the main backend knows the host by it."""
+        path = os.path.join(DATA, 'host.key')
+        if not os.path.exists(path):
+            try:
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, 'w') as f:
+                    f.write(os.urandom(32).hex())
+            except FileExistsError:
+                pass
+        return path
+
     def own_backend(self):
         """'official', 'lan' or '': which backend of our own this package runs."""
         if self.flags['official']:
@@ -555,7 +667,7 @@ class Manager:
             if not mode or self.backend:
                 return
             args = [sys.executable, '-I', os.path.join(HERE, 'plasma.py'), '--host', BACKEND_BIND or '0.0.0.0',
-                    '--log', os.path.join(LOGS, 'backend.log')]
+                    '--log', os.path.join(LOGS, 'backend.log'), '--maintenance-file', MAINTENANCE_FILE]
             public = self.public_address()
             if mode == 'lan':
                 args.append('--lan')
@@ -565,12 +677,20 @@ class Manager:
                 if not os.path.exists(self.official_key()):
                     raise RuntimeError('This is the official server package, and official.key is not in %s. Copy it in '
                                        'from your own copy (it is never in a download).' % DATA)
+                # The players' accounts (Protect your name) and the leaderboard: kept in this package's data folder, so
+                # a restart of the backend loses neither.
                 args += ['--theater-host', public or (lan_addresses() or ['127.0.0.1'])[0],
-                         '--official-key-file', self.official_key()]
+                         '--official-key-file', self.official_key(),
+                         '--accounts', os.path.join(DATA, 'accounts.json'),
+                         '--leaderboard', os.path.join(DATA, 'leaderboard.json')]
                 if self.cfg['required_version']:
                     args += ['--required-version', self.cfg['required_version']]
                 elif self.cfg['version_gate']:
                     args += ['--version-feed', FEED]
+                # The build check (16 Nov 2026): only official builds' community servers are listed. The official
+                # builds' manifests (tools/build_manifest.py) go in the data folder's attest folder at each release.
+                args += ['--check-servers', os.path.join(DATA, 'attest'),
+                         '--blocked-file', os.path.join(DATA, 'blocked_servers.json')]
             self.backend = spawn(args, output=os.path.join(LOGS, 'backend.out'))
             self.backend_mode = mode
             self.note('the %s started (PID %d)' % ('main backend' if mode == 'official' else 'LAN backend', self.backend.pid))
@@ -586,6 +706,12 @@ class Manager:
                 '--log_file=' + os.path.join(directory, 'server.log'), '--fullscreen=false', '--window_start=hidden',
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
                 '--bf_round_end_delay=%d' % s['round_end_delay']]
+        # Team balance: the server's own switches, and the file its moves go to for the host to tell the players.
+        game += ['--bf_team_balance=%s' % ('true' if s['team_balance'] else 'false'),
+                 '--bf_balance_gap=%d' % s['balance_gap'], '--bf_balance_min_players=%d' % s['balance_min_players'],
+                 '--bf_balance_delay=%d' % s['balance_delay'],
+                 '--bf_balance_block_stacking=%s' % ('true' if s['balance_block_stacking'] else 'false'),
+                 '--bf_balance_events=' + os.path.join(directory, 'balance.txt')]
         # The game simulates at the rate set here: the server's own, else the manager's.
         tick = s.get('tick') or self.cfg['tick']
         game.append('--bf_tick_rate=%d' % tick)
@@ -603,7 +729,8 @@ class Manager:
                 '--map-file', os.path.join(directory, 'user', 'current_map.txt'),
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
                 '--max-players', str(s['max_players']), '--tick', str(tick),
-                '--broadcast-file', os.path.join(directory, 'broadcast.json')]
+                '--broadcast-file', os.path.join(directory, 'broadcast.json'),
+                '--balance-file', os.path.join(directory, 'balance.txt'), '--host-key-file', self.host_key()]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]
         if s['description']:
@@ -612,6 +739,15 @@ class Manager:
             host.append('--unlisted')
         if s['night'] and self.flags['night_ops']:
             host.append('--night')
+        host += ['--time', str(s['time']), '--day-minutes', str(s['day_minutes']),
+                 '--cloud-cover', str(s['cloud_cover'] / 100), '--cloud-rate', str(s['cloud_rate'] / 100),
+                 '--weather', str(s['weather'] / 100), '--fog', str(s['fog'] / 100),
+                 '--ground-fog', str(s['ground_fog'] / 100), '--wind', str(s['wind'] / 100),
+                 '--cloud-height', str(s['cloud_height'])]
+        if s['day_night']:
+            host.append('--day-night')
+        if s['admins']:
+            host += ['--admins', s['admins']]
         if self.flags['official']:
             if not os.path.exists(self.official_key()):
                 raise RuntimeError('This is the official server package, and official.key is not in %s. Copy it in '
@@ -745,7 +881,7 @@ class Manager:
         out = {'n': n, 'name': s['name'], 'port': s['port'], 'wanted': bool(state.get('wanted')), 'state': 'stopped',
                'players': 0, 'names': [], 'map': '', 'next_map': '', 'why': state.get('why', ''), 'reachable': None,
                'reachable_local': None, 'address': '', 'since': state.get('since', 0), 'listed': s['listed'],
-               'official': False}
+               'official': False, 'hidden': ''}
         if state.get('wanted') and not (game_up and host_up):
             wait = state.get('wait_until', 0) - time.time()
             out['state'] = 'waiting' if wait > 0 else 'restarting'
@@ -761,7 +897,7 @@ class Manager:
             out['state'] = 'running'
         elif status.get('state') == 'refused':
             out['state'], out['why'] = 'refused', str(status.get('why', ''))
-        for key in ('players', 'map', 'next_map', 'reachable', 'reachable_local', 'address', 'official'):
+        for key in ('players', 'map', 'next_map', 'reachable', 'reachable_local', 'address', 'official', 'hidden'):
             if key in status:
                 out[key] = status[key]
         if isinstance(status.get('names'), list):
@@ -1122,8 +1258,16 @@ class Manager:
                 'maps': [{'key': k, 'title': t} for k, t, _ in MAPS],
                 'presets': PRESETS, 'tick': self.cfg['tick'], 'data': DATA, 'root': ROOT, 'max_servers': MAX_SERVERS,
                 'backend_ports': list(BACKEND_PORTS), 'now': int(time.time()),
+                'maintenance': self.maintenance_line(),
                 'autostart': autostart_enabled(),
             }
+
+    def maintenance_line(self):
+        """The switch for the page: never a page that fails because plasma.py could not be loaded."""
+        try:
+            return maintenance_words()
+        except Exception as e:  # noqa: BLE001 (a plasma.py that does not load: said, the rest of the page works)
+            return 'maintenance: not known (%s: %s)' % (type(e).__name__, e)
 
     def set_config(self, new):
         """The settings from the page: checked, kept, saved. What a running server reads only at its start (its name,
@@ -1407,6 +1551,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ident = m.broadcast(str(data.get('kind', 'custom')), int(data.get('seconds') or 0), str(data.get('text', '')),
                                 servers or None, bool(data.get('restart')))
             return {'countdown': ident}
+        elif path == '/api/maintenance':
+            if data.get('on') and not m.own_backend():
+                raise RuntimeError('This machine runs no backend of its own: maintenance mode is switched on the '
+                                   'machine that runs the main backend.')
+            words = set_maintenance(bool(data.get('on')), str(data.get('kind', '')), str(data.get('text', '')),
+                                    data.get('minutes') or 0, data.get('allow') or [])
+            m.note(words)
+            return {'maintenance': words}
         elif path == '/api/broadcast/cancel':
             m.cancel_countdown(str(data.get('id', '')))
         elif path == '/api/update/check':
@@ -1669,6 +1821,13 @@ def main():
     b.add_argument('--text', default='')
     b.add_argument('--server', type=int, action='append', default=[])
     b.add_argument('--no-restart', action='store_true', help='a restart or update countdown that only tells the players')
+    mt = sub.add_parser('maintenance', help='maintenance mode: new joins refused with a message the players see')
+    mt.add_argument('action', choices=['on', 'off', 'status'], nargs='?', default='status')
+    mt.add_argument('--preset', choices=['deploy', 'update', 'restart', 'emergency', 'custom'], default='',
+                    help='the message (default: deploy, or custom with --text)')
+    mt.add_argument('--text', default='', help='a custom message, at most 200 characters')
+    mt.add_argument('--minutes', type=float, default=0, help='switches itself off after this long (0: never)')
+    mt.add_argument('--allow', action='append', default=[], help='a player address let in anyway (an admin)')
     sub.add_parser('update', help='look for a new release now, and install it')
     i = sub.add_parser('install', help='the game\'s files from your own copy of the game')
     i.add_argument('path')
@@ -1709,6 +1868,17 @@ def main():
             ask('/api/broadcast', {'kind': args.kind, 'seconds': int(args.minutes * 60), 'text': args.text,
                                    'servers': args.server, 'restart': args.kind == 'restart' and not args.no_restart})
             print('sent')
+            return 0
+        if command == 'maintenance':
+            if args.action == 'status':
+                print(maintenance_words())
+                return 0
+            fields = {'on': args.action == 'on', 'kind': args.preset, 'text': args.text, 'minutes': args.minutes,
+                      'allow': args.allow}
+            if running_manager():  # the running manager writes it, and keeps a note of it in its log
+                print(ask('/api/maintenance', fields)['maintenance'])
+            else:  # no manager: the file itself (the backend, when it starts, reads it)
+                print(set_maintenance(fields['on'], fields['kind'], fields['text'], fields['minutes'], fields['allow']))
             return 0
         if command == 'update':
             reply = ask('/api/update/apply', {}, timeout=600)
