@@ -682,7 +682,9 @@ class Manager:
                 args += ['--theater-host', public or (lan_addresses() or ['127.0.0.1'])[0],
                          '--official-key-file', self.official_key(),
                          '--accounts', os.path.join(DATA, 'accounts.json'),
-                         '--leaderboard', os.path.join(DATA, 'leaderboard.json')]
+                         '--leaderboard', os.path.join(DATA, 'leaderboard.json'),
+                         # the website's totals (server/stats.py): players who joined a match, hours played
+                         '--stats', os.path.join(DATA, 'stats.json')]
                 if self.cfg['required_version']:
                     args += ['--required-version', self.cfg['required_version']]
                 elif self.cfg['version_gate']:
