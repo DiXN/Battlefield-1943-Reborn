@@ -140,6 +140,9 @@ constexpr uint32_t kRoundEndRestart = 0x8232F1BC;
 
 namespace bf1943 {
 void NoteLevelChange();  // modern_mode.cpp: the new level's data gets the server's movement and aiming values again
+void TeamBalanceRoundOver();    // team_balance.cpp: nothing moves between a round's end and the next level
+void TeamBalanceLevelChange();  // team_balance.cpp: a new level, a new round
+void TeamBalanceTick(PPCContext& ctx, uint8_t* base);  // team_balance.cpp: once a second
 }  // namespace bf1943
 
 namespace bf1943 {
@@ -168,6 +171,7 @@ REX_EXTERN(__imp__sub_82413900);
 REX_HOOK_RAW(sub_82413900) {
   __imp__sub_82413900(ctx, base);
   if (!REXCVAR_GET(server)) return;
+  bf1943::TeamBalanceRoundOver();
   std::lock_guard lock(g.mutex);
   Parse();
   // One map: the same one again (else the server stayed on the end of round screen).
@@ -221,6 +225,7 @@ REX_HOOK_RAW(sub_823F7168) {
   if (!name) {
     REXLOG_INFO("BF rotation: the game changes the level to {} (lr {:08X})", asked.empty() ? "its own" : asked,
                 uint32_t(ctx.lr));
+    bf1943::TeamBalanceLevelChange();
     return __imp__sub_823F7168(ctx, base);
   }
   {
@@ -236,6 +241,7 @@ REX_HOOK_RAW(sub_823F7168) {
   __imp__sub_823F7168(call, base);
   ctx.r3 = call.r3;
   bf1943::NoteLevelChange();  // the new level's data: the modern mode's values again (modern_mode.cpp)
+  bf1943::TeamBalanceLevelChange();
   WriteCurrent(next);
 }
 
@@ -535,6 +541,7 @@ REX_HOOK_RAW(sub_824123F0) {
                  ThreadCostNow());
   bf1943::ModernModeTick(base);
   bf1943::GmHostStart();
+  bf1943::TeamBalanceTick(ctx, base);  // team_balance.cpp: an uneven match evened, a player who has died at a time
   std::string next;
   {
     std::lock_guard lock(g.mutex);
@@ -576,6 +583,7 @@ REX_HOOK_RAW(sub_824123F0) {
   call.r4.u64 = 1;
   __imp__sub_823F7168(call, base);
   bf1943::NoteLevelChange();  // the new level's data: the modern mode's values again (modern_mode.cpp)
+  bf1943::TeamBalanceLevelChange();
   REXLOG_INFO("BF rotation: changing level to {} ({}), the pause between rounds over", TitleOf(next), next);
   WriteCurrent(next);
 }

@@ -256,6 +256,7 @@
   <div class="field"><span style="display:block;font:600 11px var(--body);letter-spacing:.12em;text-transform:uppercase;color:#6b6450;margin-bottom:5px">Maps, in the order they are played</span><div class="maps" id="e-maps"></div></div>
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
   <label class="check" id="e-night-box"><input type="checkbox" id="e-night"><span>Night Ops: players see the maps at night</span></label>
+  <label class="check"><input type="checkbox" id="e-balance"><span>Team balance<br><small>When one team has 2 or more players more for 20 seconds, a player who has died on it moves to the other team, with no points lost. A Change Team that would make the teams uneven is refused.</small></span></label>
   <label class="check"><input type="checkbox" id="e-daynight"><span>Day and night: the light, the shadows and the sky follow the server's clock<br><small>Admins can change all of these while the server runs, with F9 in the game.</small></span></label>
   <div class="grid2">
     <label class="field"><span>Time of day at the start (0 to 24)</span><input type="number" id="e-time" min="0" max="23.75" step="0.25"></label>
@@ -529,7 +530,7 @@ function openEdit(n) {
   const fresh = n > state.config.servers.length;
   const used = state.config.servers.map(x => x.port);
   let port = 18300; while (used.includes(port)) port++;
-  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 24, autostart: true } : state.config.servers[n - 1];
+  const sv = fresh ? { name: 'Battlefield 1943 Reborn ' + n, description: '', maps: state.maps.map(m => m.key), round_end_delay: 45, listed: true, night: false, port: port, max_players: 24, autostart: true, team_balance: true } : state.config.servers[n - 1];
   $('edit-title').textContent = fresh ? 'A new server' : 'Server ' + n;
   $('e-name').value = sv.name; $('e-description').value = sv.description; $('e-port').value = sv.port;
   $('e-max').replaceChildren(...[8, 12, 16, 20, 24].map(m => h('option', { value: m, text: m + ' players' })));
@@ -543,7 +544,7 @@ function openEdit(n) {
   $('e-tick').replaceChildren(h('option', { value: 0, text: 'As under Network (' + state.tick + ' Hz)' }),
     ...[[60, 'Recommended'], [30, 'Original'], [75, 'Experimental'], [100, 'Experimental']].map(([hz, word]) => h('option', { value: hz, text: hz + ' Hz - ' + word })));
   $('e-tick').value = String([30, 60, 75, 100].includes(sv.tick) ? sv.tick : 0);
-  $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart;
+  $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
   $('e-daynight').checked = sv.day_night === true; $('e-time').value = sv.time ?? 16; $('e-dayminutes').value = sv.day_minutes ?? 0;
   $('e-cloud').value = sv.cloud_cover ?? 35; $('e-cloudrate').value = sv.cloud_rate ?? 33; $('e-weather').value = sv.weather ?? 0;
   $('e-fog').value = sv.fog ?? 0; $('e-groundfog').value = sv.ground_fog ?? 0; $('e-wind').value = sv.wind ?? 30;
@@ -575,7 +576,11 @@ async function saveEdit(restart) {
   const port = Number($('e-port').value);
   const servers = state.config.servers.map(x => Object.assign({}, x));
   if (servers.some((x, i) => i !== editing - 1 && x.port === port)) return toast('Another server has port ' + port + '.', true);
-  servers[editing - 1] = { name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
+  // The balance's numbers are kept as server.json has them (no fields here); its switch is the checkbox.
+  const kept = {};
+  for (const k of ['balance_gap', 'balance_min_players', 'balance_delay', 'balance_block_stacking'])
+    if (servers[editing - 1] && servers[editing - 1][k] !== undefined) kept[k] = servers[editing - 1][k];
+  servers[editing - 1] = { ...kept, team_balance: $('e-balance').checked, name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
     night: $('e-night').checked, port: port, max_players: Number($('e-max').value), autostart: $('e-autostart').checked,
     tick: Number($('e-tick').value) || 0,
     day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,

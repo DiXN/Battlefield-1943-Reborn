@@ -133,6 +133,8 @@ struct Driver {
 } g;
 
 std::atomic<bool> g_walking{false};  // pressing buttons for the player (signing in, joining)
+// The team the game's scoreboard names are for (TeamNamesTick); 0 until the level's first team is read.
+std::atomic<int> g_names_team{0};
 
 // TekRantGaming, 7 Nov 2026: the player sees the game's own films and title and presses Start themselves (no bare menu over
 // them), and spawns from BF's own screens after its own loading screen (picking a class). Test runs (BF_AUTO_JOIN=1,
@@ -415,6 +417,25 @@ void StartTutorial() {
 void GameCommand(const std::string& name, const std::string& args) {
   std::lock_guard<std::mutex> lock(g.mutex);
   g.flash_calls.push_back("cmd:" + name + "|" + args);
+}
+
+// The scoreboard's team names after a change of team (TekRantGaming's 13 Nov note, and team balance's moves, 16 Nov
+// 2026). The level's HUD movie (hud_root_cq) makes _root.factionSIDs, the scoreboard's [friendly, enemy] headings
+// (USMC, IJN), once as it loads, from the game's extern.teamFactions; the in game menu's scoreboard (igm_mp_cq,
+// updateBackground) sets its flags from extern.playerTeam every time but its headings from that array, so after a
+// switch the flags were right and the names the old ones (run v41team2; tb_move4's shot 36). When the player's team
+// changes, the array is reversed, and the end of round screen's two (factionSIDsWIN, factionSIDsLOSE) with it.
+bool InMatch();
+void TeamNamesTick() {
+  if (!InMatch()) return;
+  const int team = comms::Team();
+  if (team != 1 && team != 2) return;
+  const int shown = g_names_team.exchange(team);
+  if (shown == 0 || shown == team) return;
+  REXLOG_INFO("BF scoreboard: team {} now (the names were for team {}): its team names swapped", team, shown);
+  std::lock_guard<std::mutex> lock(g.mutex);
+  for (const char* a : {"_root.factionSIDs", "_root.factionSIDsWIN", "_root.factionSIDsLOSE"})
+    g.flash_calls.push_back(std::string("reverse:") + a);
 }
 
 // For our menus: an ActionScript function of the game's menu called with no arguments ("_root.enterMainMenu").
@@ -735,6 +756,7 @@ REX_HOOK_RAW(sub_8243BB70) {
     if (name == "onStartLoading") bf1943::g.seen_loading = true;
     if (name == "gameIsReady" && bf1943::g.seen_loading) {
       const auto now = std::chrono::steady_clock::now();
+      bf1943::g_names_team = 0;  // the level's HUD made its team names again (TeamNamesTick)
       if (!bf1943::g.seen_ready) {
         bf1943::g.seen_ready = true, bf1943::g.ready_at = now;
         // The game's own Loading complete (its time from the loading screen is a level load's length; the driver's
@@ -823,6 +845,57 @@ void FlashCalls(PPCContext& ctx, uint8_t* base) {
     call = ctx;
     call.r3.u64 = load(scratch);
     sub_8295C470(call, base);
+    store(0x82D135E8, was_e8);
+    store(0x82D135EC, was_ec);
+    return;
+  }
+  if (path.rfind("reverse:", 0) == 0) {
+    // An array of the menu's reversed in place ("reverse:<path>"): its own reverse(), the array the scope
+    // (TeamNamesTick: the scoreboard's two team names). The lookup as for "method:".
+    const std::string object = path.substr(8);
+    auto load = [&](uint32_t a) { return uint32_t(base[a]) << 24 | base[a + 1] << 16 | base[a + 2] << 8 | base[a + 3]; };
+    auto store = [&](uint32_t a, uint32_t v) { for (int i = 0; i < 4; ++i) base[a + i] = uint8_t(v >> (24 - 8 * i)); };
+    const uint32_t holder = load(ui + 0x14);
+    if (!holder) return;
+    std::memset(base + scratch, 0, 128);
+    std::memcpy(base + scratch + 16, object.c_str(), std::min<size_t>(object.size(), 60));
+    std::memcpy(base + scratch + 80, "reverse", 7);
+    const uint32_t player = load(holder + 4), was_e8 = load(0x82D135E8), was_ec = load(0x82D135EC);
+    store(0x82D135E8, player);
+    store(0x82D135EC, player);
+    call.r3.u64 = scratch;
+    call.r4.u64 = scratch + 16;
+    sub_82958C20(call, base);
+    call = ctx;
+    call.r3.u64 = 0;
+    sub_82986340(call, base);
+    const uint32_t root = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = 0x82D13BB8;
+    call.r4.u64 = root;
+    call.r5.u64 = 0;
+    call.r6.u64 = scratch;
+    call.r7.u64 = 1;
+    call.r8.u64 = 1;
+    call.r9.u64 = 0;
+    sub_8297DD10(call, base);
+    const uint32_t found = call.r3.u32;
+    call = ctx;
+    call.r3.u64 = load(scratch);
+    sub_8295C470(call, base);
+    // Only an array (the class of _root.factionSIDs and its two, run sb_names1).
+    const bool ok = root >= 0x10000 && found >= 0x10000 && found < 0xF0000000 && load(found) == 0x820BEBACu;
+    if (ok) {
+      call = ctx;
+      call.r3.u64 = scratch + 80;
+      call.r4.u64 = 0;
+      call.r5.u64 = found;
+      call.r6.u64 = 0;
+      call.r7.u64 = 0;
+      sub_82986450(call, base);
+    }
+    REXLOG_INFO("BF scoreboard: {} reversed ({:08X}, class {:08X}): {}", object, found,
+                found >= 0x10000 && found < 0xF0000000 ? load(found) : 0, ok ? "done" : "not found");
     store(0x82D135E8, was_e8);
     store(0x82D135EC, was_ec);
     return;
@@ -1077,7 +1150,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   }
   if (original) original(ctx, base);
   // Our calls into the game's menu (Flash calls, game commands) run on every player 1 read, with or without our menu.
-  if (user == 0 && state) bf1943::FlashCalls(ctx, base);
+  if (user == 0 && state) bf1943::TeamNamesTick(), bf1943::FlashCalls(ctx, base);
   if (!driver || user != 0 || !state) return;
   const bool connected = ctx.r3.u32 == 0;
   static int was_connected = -1;
@@ -1089,7 +1162,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   static uint16_t last_real = 0;
 #if defined(BF_DEV_TOOLS)
   // BF_REAL_PAD=<s>:<button>[/<hold s>],... (tests): buttons on the real pad's state, from the process start, as if
-  // pressed on the controller (a, b, start, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
+  // pressed on the controller (a, b, x, y, start, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
   // moment the soldier first sits in a vehicle instead (BF_SEEK_VEHICLE gets it there), and from then on each time it
   // gets in or out of one is logged.
   if (connected) {
@@ -1108,6 +1181,8 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
                     : !std::strncmp(c, "up", 2)   ? 0x0001
                     : !std::strncmp(c, "down", 4) ? 0x0002
                     : *c == 'b'                   ? 0x2000
+                    : *c == 'x'                   ? 0x4000  // the end of round screen's next info screen
+                    : *c == 'y'                   ? 0x8000
                                                   : 0x1000;
         while (*c && *c != ',' && *c != '/') ++c;
         if (*c == '/') it.hold = std::atof(++c);

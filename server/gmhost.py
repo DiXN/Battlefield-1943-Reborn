@@ -285,6 +285,14 @@ class Comms:
         self.broadcast_looked = 0.0
         self.broadcast_last = (0.0, b'')  # (monotonic time it leaves the screens, body): a player who links before
                                           # then gets it too (handle, C_HELLO)
+        # Team balance (bf/src/team_balance.cpp): the dedicated server writes its moves, refusals and warnings to
+        # --balance-file, one JSON object a line; each new line becomes a server chat line, and a message box for the
+        # player it is about.
+        self.balance_file = ''
+        self.balance_pos = None     # bytes of the file read (None: not looked at yet, so an old file is not told)
+        self.balance_seq = 0
+        self.balance_looked = 0.0
+        self.server_msg = 0         # the number of the host's own chat lines (each client keeps the first of each)
 
     def send(self, kind, body, addr):
         self.host.transport.sendto(COMMS + bytes([kind]) + body, addr)
@@ -300,6 +308,81 @@ class Comms:
         self.broadcast_due += [(now, body), (now + 0.35, body), (now + 0.7, body)]
         self.broadcast_last = (now + body[3], body)
         self.host.note('comms: broadcast %d (%s) to %d players: %s' % (self.broadcast_id, kind, len(self.clients), text_))
+
+    def server_chat(self, text_, team=0):
+        """A chat line from the server itself to every player (team 0) or one team's (1, 2): every game since the
+        chat's first version shows it, as from "Server"."""
+        self.server_msg = self.server_msg % 0xFFFF + 1
+        name = b'Server'
+        raw = text_.encode('utf-8')[:CHAT_MAX]
+        relay = struct.pack('>HHBBB', 0, self.server_msg, CHAT_TEAM if team else CHAT_ALL, team, len(name)) + name + \
+            bytes([len(raw)]) + raw
+        sent = 0
+        for c in self.clients.values():
+            if team and c.team != team:
+                continue
+            sent += 1
+            for _ in range(2):
+                self.send(C_CHAT_RELAY, relay, c.addr)
+        self.host.note('comms: server chat to %s (%d players): %s' % ('team %d' % team if team else 'all', sent, text_))
+
+    def tell(self, name, text_, seconds=8):
+        """A message box for one player (the server broadcast's box and chime, shown by every game since v0.4.0)."""
+        self.broadcast_id = (self.broadcast_id % 0xFFFF) + 1
+        body = struct.pack('>HBB', self.broadcast_id, 0, max(3, min(30, int(seconds)))) + short_text(text_)
+        told = 0
+        for c in self.clients.values():
+            if c.name == name:
+                told += 1
+                for _ in range(3):
+                    self.send(C_BROADCAST, body, c.addr)
+        self.host.note('comms: told %s%s: %s' % (name, '' if told else ' (not linked: chat line only)', text_))
+
+    def read_balance_file(self, now):
+        if not self.balance_file or now - self.balance_looked < 0.5:
+            return
+        self.balance_looked = now
+        try:
+            size = os.path.getsize(self.balance_file)
+        except OSError:
+            if self.balance_pos is None:
+                self.balance_pos = 0  # no file yet: everything written from now on is new
+            return
+        if self.balance_pos is None:
+            self.balance_pos = size  # as the host starts: what is there was for an earlier run
+            return
+        if size < self.balance_pos:
+            self.balance_pos, self.balance_seq = 0, 0  # the server started again and began a new file
+        if size == self.balance_pos:
+            return
+        with open(self.balance_file, 'rb') as f:
+            f.seek(self.balance_pos)
+            data = f.read(size - self.balance_pos)
+        end = data.rfind(b'\n') + 1  # whole lines only; the rest next time
+        self.balance_pos += end
+        for line in data[:end].splitlines():
+            try:
+                m = json.loads(line)
+                seq = int(m.get('seq', 0))
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if seq and seq <= self.balance_seq:
+                continue
+            self.balance_seq = seq or self.balance_seq
+            self.balance_event(m)
+
+    def balance_event(self, m):
+        teams = {1: 'US', 2: 'Japan'}
+        kind, name = str(m.get('kind', '')), str(m.get('name', ''))[:64]
+        team, to = int(m.get('team') or 0), int(m.get('to') or 0)
+        if kind == 'moved' and to in teams:
+            self.server_chat('%s was moved to %s to even the teams' % (name, teams[to]))
+            self.tell(name, 'You were moved to %s to even the teams. No points lost.' % teams[to])
+        elif kind == 'refused' and to in teams:
+            self.tell(name, '%s has more players. Change Team was refused to keep the teams even.' % teams[to])
+        elif kind == 'warn' and team in teams and to in teams:
+            self.server_chat('Teams are uneven: the next %s player to go down may be moved to %s' % (teams[team], teams[to]),
+                             team)
 
     def read_broadcast_file(self, now):
         if not self.broadcast_file or now - self.broadcast_looked < 0.5:
@@ -421,6 +504,12 @@ class Comms:
             self.roster_at = 0
 
     def tick(self, now):
+        try:
+            self.read_balance_file(now)
+        except Exception as e:  # never the host's own loop for a message
+            if not getattr(self, 'balance_error', None):
+                self.balance_error = True
+                self.host.note('comms: the balance file could not be read (%s: %s)' % (type(e).__name__, e))
         try:
             self.read_broadcast_file(now)
         except Exception as e:  # never the host's own loop for a message (run bcast1: an error here stopped it)
@@ -982,6 +1071,7 @@ async def serve(args):
         host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
                            public, sock)
         host.comms.broadcast_file = args.broadcast_file
+        host.comms.balance_file = args.balance_file
         host.world.configure(args)
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
@@ -1094,6 +1184,9 @@ def main():
     ap.add_argument('--broadcast-file', default='',
                     help='a JSON file the server manager writes to send a message to every player on the server: '
                          '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
+    ap.add_argument('--balance-file', default='',
+                    help="the dedicated server's team balance events (its --bf_balance_events): players are told of "
+                         'moves and refused team changes')
     # The server's world (World): its clock and weather, the same for every player; admins change it in game (F9).
     ap.add_argument('--day-night', action='store_true', help='day and night: the light follows the server\'s clock')
     ap.add_argument('--time', type=float, default=16.0, help='the time of day the server starts at, 0 to 24')

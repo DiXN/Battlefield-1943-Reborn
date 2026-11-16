@@ -277,6 +277,8 @@ def game_installed():
 def new_server(name, port):
     return {'name': name, 'description': '', 'maps': [k for k, _, _ in MAPS], 'round_end_delay': 45, 'listed': True,
             'night': False, 'port': port, 'max_players': 24, 'autostart': True, 'tick': 0,
+            'team_balance': True, 'balance_gap': 2, 'balance_min_players': 4, 'balance_delay': 20,
+            'balance_block_stacking': True,
             # The server's world (gmhost.py's World; 14 Nov 2026): its clock and weather, per cent where it says, and
             # the player IDs who may change them in game.
             'day_night': False, 'time': 16.0, 'day_minutes': 0, 'cloud_cover': 35, 'cloud_rate': 33, 'weather': 0,
@@ -322,6 +324,15 @@ def clean_config(raw):
                                                for part in str(s.get('admins') or '').replace(';', ',').replace(' ', ',').split(','))
                                    if a)[:400]
         entry['autostart'] = s.get('autostart') is not False
+        # Team balance (TekRantGaming, 15 Nov 2026: matches ended 7 against 3; bf/src/team_balance.cpp): on unless
+        # turned off. A player who has died on the bigger team moves to the other once the teams are balance_gap or
+        # more apart for balance_delay seconds, with balance_min_players on the server; balance_block_stacking refuses
+        # a Change Team that would leave them so.
+        entry['team_balance'] = s.get('team_balance') is not False
+        entry['balance_block_stacking'] = s.get('balance_block_stacking') is not False
+        for key, low, high in (('balance_gap', 2, 6), ('balance_min_players', 2, 24), ('balance_delay', 5, 300)):
+            with contextlib.suppress(TypeError, ValueError):
+                entry[key] = max(low, min(high, int(s.get(key) if s.get(key) is not None else entry[key])))
         # A rate of its own (13 Nov 2026, TekRantGaming: one 60 Hz test server beside the official 30 Hz ones); 0 takes
         # the manager's rate (Network's Tick rate).
         with contextlib.suppress(TypeError, ValueError):
@@ -695,6 +706,12 @@ class Manager:
                 '--log_file=' + os.path.join(directory, 'server.log'), '--fullscreen=false', '--window_start=hidden',
                 '--server', '--cl=-dedicated -level ' + MAP_LEVEL[maps[0]], '--bf_map_rotation=' + ','.join(maps),
                 '--bf_round_end_delay=%d' % s['round_end_delay']]
+        # Team balance: the server's own switches, and the file its moves go to for the host to tell the players.
+        game += ['--bf_team_balance=%s' % ('true' if s['team_balance'] else 'false'),
+                 '--bf_balance_gap=%d' % s['balance_gap'], '--bf_balance_min_players=%d' % s['balance_min_players'],
+                 '--bf_balance_delay=%d' % s['balance_delay'],
+                 '--bf_balance_block_stacking=%s' % ('true' if s['balance_block_stacking'] else 'false'),
+                 '--bf_balance_events=' + os.path.join(directory, 'balance.txt')]
         # The game simulates at the rate set here: the server's own, else the manager's.
         tick = s.get('tick') or self.cfg['tick']
         game.append('--bf_tick_rate=%d' % tick)
@@ -712,7 +729,8 @@ class Manager:
                 '--map-file', os.path.join(directory, 'user', 'current_map.txt'),
                 '--status-file', os.path.join(directory, 'status.json'), '--log', os.path.join(directory, 'host.log'),
                 '--max-players', str(s['max_players']), '--tick', str(tick),
-                '--broadcast-file', os.path.join(directory, 'broadcast.json'), '--host-key-file', self.host_key()]
+                '--broadcast-file', os.path.join(directory, 'broadcast.json'),
+                '--balance-file', os.path.join(directory, 'balance.txt'), '--host-key-file', self.host_key()]
         if self.cfg['region']:
             host += ['--region', self.cfg['region']]
         if s['description']:
