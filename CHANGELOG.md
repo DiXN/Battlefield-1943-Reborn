@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.7.1 (17 November 2026): a hotfix
+
+Earlier versions update to it by themselves, and the servers only let the newest version in.
+
+- **Promoted community servers.** When you join a community server we've promoted to the Reborn list, you now see
+  whose server it is, where to report problems, and the server's own description. Tick "Don't show this again" to skip
+  it next time.
+- **Fewer server crashes.** Fixed two crashes that could take a whole server down mid match.
+
 ## 0.4.7 (16 November 2026): stats, leaderboards and achievements, clan tags, protect your name, a news window
 
 An **alpha playtest** build: expect bugs, crashes and changes, and stats that reset. Earlier versions update to it by
