@@ -379,9 +379,8 @@ bool Gtao::CreateComputePass(Pass& pass, const char* name, const std::string& de
   return pass.srb != nullptr;
 }
 
-Gtao::Pass* Gtao::ApplyPass(TEXTURE_FORMAT format, bool show, uint32_t samples) {
-  // samples: the colour target's (host MSAA, targets.h: the factor goes into every sample of a pixel).
-  auto key = std::make_pair(format, uint32_t(show ? 1 : 0) | std::max(samples, 1u) << 1);
+Gtao::Pass* Gtao::ApplyPass(TEXTURE_FORMAT format, bool show) {
+  auto key = std::make_pair(format, show);
   auto it = apply_passes_.find(key);
   if (it != apply_passes_.end()) {
     Pass& pass = it->second;
@@ -395,7 +394,6 @@ Gtao::Pass* Gtao::ApplyPass(TEXTURE_FORMAT format, bool show, uint32_t samples) 
   info.PSODesc.PipelineType = PIPELINE_TYPE_GRAPHICS;
   info.GraphicsPipeline.NumRenderTargets = 1;
   info.GraphicsPipeline.RTVFormats[0] = format;
-  info.GraphicsPipeline.SmplDesc.Count = Uint8(std::max(samples, 1u));
   info.GraphicsPipeline.DSVFormat = TEX_FORMAT_UNKNOWN;
   info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
@@ -839,7 +837,7 @@ bool Gtao::Apply(IDeviceContext* context, const Inputs& in) {
   if (!ok || !temporal) history_frame_ = UINT64_MAX;
 
   // Into the scene's colour: one triangle over the picture.
-  Pass* apply = ok ? ApplyPass(in.color->GetDesc().Format, s.mode >= 2, in.color->GetTexture()->GetDesc().SampleCount) : nullptr;
+  Pass* apply = ok ? ApplyPass(in.color->GetDesc().Format, s.mode >= 2) : nullptr;
   if (apply) {
     ITextureView* color = in.color;
     context->SetRenderTargets(1, &color, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);

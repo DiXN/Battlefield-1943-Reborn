@@ -1391,20 +1391,6 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   p[4] = uint8_t(buttons >> 8);
   p[5] = uint8_t(buttons);
 #if defined(BF_DEV_TOOLS)
-  // BF_LOOK_UP_TEST=<seconds>: from that many seconds after joining, the right stick held up for two seconds (the
-  // camera looks up: the sky without terrain in view).
-  {
-    static const double look_after = [] {
-      const char* v = std::getenv("BF_LOOK_UP_TEST");
-      return v && *v ? std::atof(v) : -1.0;
-    }();
-    static std::chrono::steady_clock::time_point look_joined{};
-    if (look_after >= 0 && bf1943::InMatch()) {
-      if (!look_joined.time_since_epoch().count()) look_joined = std::chrono::steady_clock::now();
-      const double since = std::chrono::duration<double>(std::chrono::steady_clock::now() - look_joined).count();
-      if (since > look_after && since < look_after + 2.0) p[14] = 0x7F, p[15] = 0xFF;
-    }
-  }
   // BF_WALK_TEST=<seconds>: in a match, the left stick full right from that many seconds after joining (frame rate
   // tests: how the soldier moves at different rates).
   static const double walk_after = [] {
@@ -1420,46 +1406,6 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         logged = true;
         REXLOG_INFO("BF walk test: left stick right (pad connected {}, walking {}, menu {})", connected,
                     bool(bf1943::g_walking), menu);
-      }
-      // How the soldier moves while it walks (14 Nov 2026, 60 Hz servers "desyncing, rubber banding"): the camera's
-      // position every pad read; each 5 s, the path's length, the speed, and the steps against the direction of travel
-      // (a pull back by the server) with the largest.
-      {
-        static float last[3] = {}, from[3] = {};
-        static bool have = false;
-        static double path = 0, worst_back = 0, worst_jump = 0;
-        static int backs = 0, reads = 0;
-        static std::chrono::steady_clock::time_point window{};
-        const auto t = std::chrono::steady_clock::now();
-        const float v[3] = {bf1943::g_dev_view_pos[0].load(), bf1943::g_dev_view_pos[1].load(),
-                            bf1943::g_dev_view_pos[2].load()};
-        if (!have) {
-          have = true, window = t;
-          std::memcpy(last, v, sizeof(v)), std::memcpy(from, v, sizeof(v));
-        } else if (v[0] != last[0] || v[2] != last[2]) {
-          const double dx = v[0] - last[0], dz = v[2] - last[2];
-          const double step = std::sqrt(dx * dx + dz * dz);
-          // The direction of travel: from the window's start to the last position.
-          const double tx = last[0] - from[0], tz = last[2] - from[2];
-          const double tl = std::sqrt(tx * tx + tz * tz);
-          if (tl > 0.5) {
-            const double along = (dx * tx + dz * tz) / tl;
-            if (along < -0.02) ++backs, worst_back = std::max(worst_back, -along);
-          }
-          worst_jump = std::max(worst_jump, step);
-          path += step, ++reads;
-          std::memcpy(last, v, sizeof(v));
-        }
-        const double seconds = std::chrono::duration<double>(t - window).count();
-        if (seconds >= 5.0) {
-          const double fx = last[0] - from[0], fz = last[2] - from[2];
-          REXLOG_INFO("BF walk test: {:.1f} s: path {:.2f} m, {:.2f} m from the start ({:.2f} m/s), {} moves, {} steps back "
-                      "(largest {:.2f} m), largest step {:.2f} m",
-                      seconds, path, std::sqrt(fx * fx + fz * fz), std::sqrt(fx * fx + fz * fz) / seconds, reads, backs,
-                      worst_back, worst_jump);
-          window = t, path = worst_back = worst_jump = 0, backs = reads = 0;
-          std::memcpy(from, last, sizeof(last));
-        }
       }
       // BF_WALK_STICK: lx (default, strafe right: the open deck at the USMC carrier spawn), lxl (strafe left),
       // ly (forward), lyb (back), rx (turn right), ry (look up).

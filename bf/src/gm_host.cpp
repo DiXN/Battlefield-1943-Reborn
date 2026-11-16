@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -55,30 +54,6 @@ REXCVAR_DEFINE_STRING(bf_gm_description, "", "BF1943", "The match's description 
 REXCVAR_DEFINE_STRING(bf_gm_password, "", "BF1943",
                       "The match's password (Custom Match): only a player whose game showed it first is let in; empty: "
                       "none");
-// The match's world: its clock and weather, kept here and asked for by every player's game (world_sync.cpp), so all
-// see the same hour and the same sky; an admin's game may change them while the match runs. 14 Nov 2026: "cloud
-// coverage, rate, weather percentage, day/night adjustment and time scale settings and sliders for servers and in
-// the create match menu ... in-game admin controls for whoever creates a custom match ... giving player IDs admin
-// panel access in-game". server/gmhost.py keeps the same for the server package.
-REXCVAR_DEFINE_BOOL(bf_world_day_night, false, "BF1943/World", "The match has day and night: the light follows its clock");
-REXCVAR_DEFINE_DOUBLE(bf_world_time, 16.0, "BF1943/World", "The match's time of day at its start, 0 to 24");
-REXCVAR_DEFINE_DOUBLE(bf_world_day_minutes, 0.0, "BF1943/World",
-                      "Minutes a whole day and night take in the match; 0: the time stands still");
-REXCVAR_DEFINE_DOUBLE(bf_world_cloud_cover, 0.35, "BF1943/World", "The match's cloud cover, 0 to 1");
-REXCVAR_DEFINE_DOUBLE(bf_world_cloud_rate, 0.33, "BF1943/World",
-                      "How fast the match's clouds form and change, 0 to 1");
-REXCVAR_DEFINE_DOUBLE(bf_world_weather, 0.0, "BF1943/World", "The match's weather, 0 fair to 1 a storm");
-REXCVAR_DEFINE_DOUBLE(bf_world_fog, 0.0, "BF1943/World", "The match's distance fog, 0 to 1");
-REXCVAR_DEFINE_DOUBLE(bf_world_ground_fog, 0.0, "BF1943/World", "The match's ground fog, 0 to 1");
-REXCVAR_DEFINE_DOUBLE(bf_world_wind, 0.3, "BF1943/World", "The match's wind, 0 calm to 1 a gale");
-REXCVAR_DEFINE_DOUBLE(bf_world_cloud_height, 450.0, "BF1943/World",
-                      "The match's cloud base over the sea, metres (200 to 1500): low, the planes fly through the clouds");
-REXCVAR_DEFINE_STRING(bf_world_admins, "", "BF1943/World",
-                      "Player IDs (as the game's settings show them, separated by commas) whose games may change the "
-                      "match's world while it runs");
-REXCVAR_DEFINE_STRING(bf_world_admin_key, "", "BF1943/World",
-                      "A key that makes the game showing it an admin of the match's world (the game that starts a "
-                      "private match makes one for itself); empty: none");
 REXCVAR_DEFINE_BOOL(bf_gm_listed, false, "BF1943", "Listed in the server browser (else joined by Direct connect only)");
 REXCVAR_DEFINE_INT32(bf_gm_max_players, 24, "BF1943", "The most players the backend sends to the match");
 REXCVAR_DEFINE_STRING(bf_gm_status_file, "", "BF1943",
@@ -421,147 +396,6 @@ class Host {
     peers.clear();
   }
 
-  // ---- the match's world (the cvars above). Asked for with "BF43WRLD": version 1, flags (1: a change follows), the
-  // player's name and a key (each a length byte and text), then for a change: day and night (a byte) and eight
-  // floats: hour, day's minutes, cloud cover, cloud rate, weather, distance fog, ground fog, wind. Answered with
-  // "BF43WRLR": version, flags (1 day and night, 2 the asker is an admin), the same eight floats as they are now, and
-  // the clouds' two clocks as
-  // doubles (drift seconds, forming). Big endian. Nothing is kept per asker. Last in both (15 Nov 2026; a game from
-  // before it sends and reads none): the cloud base's height, metres, a float.
-  struct World {
-    bool started = false, day_night = false;
-    double hour = 16, day_minutes = 0, cover = 0.35, rate = 0.33, weather = 0, fog = 0, ground_fog = 0, wind = 0.3, seconds = 0,
-           evolve = 0, cloud_height = 450;
-    Clock::time_point at;
-  } world;
-  void WorldAdvance() {
-    const auto now = Clock::now();
-    if (!world.started) {
-      world.started = true, world.at = now;
-      world.day_night = REXCVAR_GET(bf_world_day_night);
-      world.hour = std::fmod(std::max(REXCVAR_GET(bf_world_time), 0.0), 24.0);
-      world.day_minutes = std::clamp(REXCVAR_GET(bf_world_day_minutes), 0.0, 1440.0);
-      world.cover = std::clamp(REXCVAR_GET(bf_world_cloud_cover), 0.0, 1.0);
-      world.rate = std::clamp(REXCVAR_GET(bf_world_cloud_rate), 0.0, 1.0);
-      world.weather = std::clamp(REXCVAR_GET(bf_world_weather), 0.0, 1.0);
-      world.fog = std::clamp(REXCVAR_GET(bf_world_fog), 0.0, 1.0);
-      world.ground_fog = std::clamp(REXCVAR_GET(bf_world_ground_fog), 0.0, 1.0);
-      world.wind = std::clamp(REXCVAR_GET(bf_world_wind), 0.0, 1.0);
-      world.cloud_height = std::clamp(REXCVAR_GET(bf_world_cloud_height), 200.0, 1500.0);
-      Note(fmt::format("world: day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, weather "
-                       "{:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m",
-                       world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100, world.rate * 100,
-                       world.weather * 100, world.fog * 100, world.ground_fog * 100, world.wind * 100,
-                       world.cloud_height));
-    }
-    const double dt = std::chrono::duration<double>(now - world.at).count();
-    world.at = now;
-    if (world.day_night && world.day_minutes > 0) world.hour = std::fmod(world.hour + dt / (world.day_minutes * 60) * 24, 24.0);
-    world.seconds += dt;
-    world.evolve += dt * world.rate;
-  }
-  // A joined player from that address (the game's own socket has another port: the IP and the name) whose ID, the
-  // low half of its XUID as eight hex digits, is in bf_world_admins.
-  bool WorldAdmin(const std::string& name, const std::string& key, const sockaddr_in& from) {
-    const std::string own_key = REXCVAR_GET(bf_world_admin_key);
-    if (!own_key.empty() && key == own_key) return true;
-    std::string admins = REXCVAR_GET(bf_world_admins);
-    if (admins.empty()) return false;
-    for (char& c : admins) c = char(std::toupper(static_cast<unsigned char>(c)));
-    for (const auto& p : peers) {
-      if (p->state != Peer::State::kJoined || !p->player || p->player->name != name ||
-          p->addr.sin_addr.s_addr != from.sin_addr.s_addr) {
-        continue;
-      }
-      const std::string id = fmt::format("{:08X}", uint32_t(p->player->xuid & 0xFFFFFFFFull));
-      for (size_t at = 0; at < admins.size();) {
-        size_t end = admins.find_first_of(", ;", at);
-        if (end == std::string::npos) end = admins.size();
-        std::string one = admins.substr(at, end - at);
-        while (one.size() < 8 && !one.empty()) one.insert(one.begin(), '0');
-        if (one == id) return true;
-        at = end + 1;
-      }
-    }
-    return false;
-  }
-  void WorldDatagram(const Bytes& data, const sockaddr_in& from) {
-    size_t at = 8;
-    auto u8 = [&]() -> int { return at < data.size() ? uint8_t(data[at++]) : (at = Bytes::npos, 0); };
-    auto text = [&]() {
-      const int n = u8();
-      if (at == Bytes::npos || at + size_t(n) > data.size()) return at = Bytes::npos, std::string();
-      std::string s = data.substr(at, size_t(n));
-      at += size_t(n);
-      return s;
-    };
-    auto f32 = [&]() -> double {
-      if (at == Bytes::npos || at + 4 > data.size()) return at = Bytes::npos, 0.0;
-      const uint32_t bits = Get32(data, at);
-      at += 4;
-      float v;
-      std::memcpy(&v, &bits, 4);
-      return std::isfinite(v) ? double(v) : 0.0;
-    };
-    const int version = u8(), flags = u8();
-    const std::string name = text(), key = text();
-    if (at == Bytes::npos || version != 1) return;
-    WorldAdvance();
-    const bool admin = WorldAdmin(name, key, from);
-    if ((flags & 1) && admin) {
-      const int day_night = u8();
-      const double hour = f32(), minutes = f32(), cover = f32(), rate = f32(), weather = f32(), fog = f32(),
-                   ground_fog = f32(), wind = f32();
-      double cloud_height = world.cloud_height;
-      if (at != Bytes::npos && at + 4 <= data.size()) cloud_height = std::clamp(f32(), 200.0, 1500.0);
-      if (at != Bytes::npos) {
-        const bool changed = world.day_night != (day_night != 0) || std::abs(world.hour - hour) > 0.01 ||
-                             world.day_minutes != minutes || world.cover != cover || world.rate != rate ||
-                             world.weather != weather || world.fog != fog || world.ground_fog != ground_fog ||
-                             world.wind != wind || world.cloud_height != cloud_height;
-        world.day_night = day_night != 0;
-        world.hour = std::fmod(std::max(hour, 0.0), 24.0);
-        world.day_minutes = std::clamp(minutes, 0.0, 1440.0);
-        world.cover = std::clamp(cover, 0.0, 1.0);
-        world.rate = std::clamp(rate, 0.0, 1.0);
-        world.weather = std::clamp(weather, 0.0, 1.0);
-        world.fog = std::clamp(fog, 0.0, 1.0);
-        world.ground_fog = std::clamp(ground_fog, 0.0, 1.0);
-        world.wind = std::clamp(wind, 0.0, 1.0);
-        world.cloud_height = cloud_height;
-        if (changed)
-          Note(fmt::format("world: {} set day and night {}, {:.1f} h, a day in {:.0f} min, clouds {:.0f}% at rate {:.0f}%, "
-                           "weather {:.0f}%, fog {:.0f}%, ground fog {:.0f}%, wind {:.0f}%, cloud height {:.0f} m",
-                           name.empty() ? "an admin" : name,
-                           world.day_night ? "on" : "off", world.hour, world.day_minutes, world.cover * 100,
-                           world.rate * 100, world.weather * 100, world.fog * 100, world.ground_fog * 100,
-                           world.wind * 100, world.cloud_height));
-      }
-    }
-    Bytes reply = "BF43WRLR";
-    reply += char(1);
-    reply += char((world.day_night ? 1 : 0) | (admin ? 2 : 0));
-    for (double v : {world.hour, world.day_minutes, world.cover, world.rate, world.weather, world.fog, world.ground_fog,
-                     world.wind}) {
-      const float f = float(v);
-      uint32_t bits;
-      std::memcpy(&bits, &f, 4);
-      Put32(reply, bits);
-    }
-    for (double v : {world.seconds, world.evolve}) {
-      uint64_t bits;
-      std::memcpy(&bits, &v, 8);
-      Put64(reply, bits);
-    }
-    {
-      const float f = float(world.cloud_height);
-      uint32_t bits;
-      std::memcpy(&bits, &f, 4);
-      Put32(reply, bits);
-    }
-    sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
-  }
-
   void Datagram(const Bytes& data, const sockaddr_in& from) {
     // The server browser's ping and the backend's reachability probe (SERVERS-PLAN.md sections 5 and 6): answered at
     // once, never a game packet (those start with a flag byte, 0 or 1).
@@ -596,10 +430,6 @@ class Host {
       const Bytes reply = right ? "BF43PSOK" : "BF43PSNO";
       sendto(sock, reply.data(), int(reply.size()), 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
       Note(fmt::format("password: {} {}", name.empty() ? "a player" : name, right ? "showed the right one" : "showed a wrong one"));
-      return;
-    }
-    if (data.compare(0, 8, "BF43WRLD") == 0) {
-      WorldDatagram(data, from);
       return;
     }
     Peer* peer = Find(from);

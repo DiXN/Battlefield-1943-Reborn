@@ -6,10 +6,7 @@
 // (game_menu.cpp), and friends join it by Direct connect with the address its page copies. The server ends with the
 // player's game (bf_gm_parent_pid) or when the player leaves the match.
 
-#include <random>
-
 #include "private_match.h"
-#include "world_sync.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -156,13 +153,6 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
   g.port = o.port ? o.port : FreePort();
   const std::string first = o.maps.empty() ? "wake" : o.maps.front();
   const fs::path dir = MatchDir();
-  // A key of this match's own: the server takes this game, which shows it, for an admin of its world.
-  std::string admin_key;
-  {
-    std::random_device rd;
-    for (int i = 0; i < 4; ++i) admin_key += fmt::format("{:08x}", uint32_t(rd()));
-  }
-  world::SetAdminKey(admin_key);
   std::ostringstream args;
   args << "\"" << fs::path(exe).string() << "\""
        << " --game_data_root=\"" << g.game.string() << "\""
@@ -181,12 +171,6 @@ bool StartPrivateMatch(const PrivateMatchOptions& o, std::string* why) {
        << " --bf_gm_listed=" << (o.listed && !o.lan ? "true" : "false") << " --bf_gm_upnp=" << (o.upnp && !o.lan && !LoopbackOnly() ? "true" : "false")
        << (o.lan ? " --bf_lan_backend=true" : "")
        << (o.password.empty() ? std::string() : " --bf_gm_password=\"" + Clean(o.password) + "\"")
-       << " --bf_world_day_night=" << (o.day_night ? "true" : "false") << " --bf_world_time=" << o.time
-       << " --bf_world_day_minutes=" << o.day_minutes << " --bf_world_cloud_cover=" << o.cloud_cover
-       << " --bf_world_cloud_rate=" << o.cloud_rate << " --bf_world_weather=" << o.weather
-       << " --bf_world_fog=" << o.fog << " --bf_world_ground_fog=" << o.ground_fog << " --bf_world_wind=" << o.wind
-       << " --bf_world_cloud_height=" << o.cloud_height
-       << " --bf_world_admin_key=" << admin_key
        << " --bf_gm_status_file=\"" << (dir / "status.json").string() << "\""
        << " --bf_gm_parent_pid=" << GetCurrentProcessId();
   std::wstring command = Wide(args.str());

@@ -68,10 +68,6 @@ REXCVAR_DEFINE_BOOL(native_x_renderer_tick_interpolation, false, "NativeXRendere
 
 namespace native_x_renderer {
 
-// A developer's: the next draws logged (renderer.cpp names the moment).
-std::atomic<int> g_dump_next_draws{0};
-void DumpNextDraws(int count) { g_dump_next_draws.store(count, std::memory_order_relaxed); }
-
 using namespace Diligent;
 namespace rg = rex::graphics;
 namespace xenos = rex::graphics::xenos;
@@ -868,29 +864,16 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       return out;
     }();
     const uint64_t vs_hash = vertex_shader->ucode_data_hash();
-    // The draws that follow a moment the renderer names (DumpNextDraws): the same line for each.
-    if (g_dump_next_draws.load(std::memory_order_relaxed) > 0) {
-      const int left = g_dump_next_draws.fetch_sub(1, std::memory_order_relaxed);
-      REXLOG_INFO("[native_x_renderer] next draw {}: prim {} count {} index type {}; VS {:016X} PS {:016X}; surface "
-                  "{:08X} color {:08X} depth {:08X} modecontrol {:08X} depthcontrol {:08X} blend {:08X}",
-                  left, uint32_t(primitives.guest_primitive_type), primitives.guest_draw_vertex_count,
-                  uint32_t(primitives.index_buffer_type), vs_hash, pixel_shader ? pixel_shader->ucode_data_hash() : 0,
-                  regs[0x2000], regs[0x2001], regs[0x2002], regs[0x2208], regs[0x2200], regs[0x2201]);
-    }
     if (after_s >= 0) {
       static const auto first = std::chrono::steady_clock::now();
       static int dumped = 0;
       if (dumped < 900 && std::chrono::duration<double>(std::chrono::steady_clock::now() - first).count() > after_s) {
         ++dumped;
-        float vp[4];
-        std::memcpy(vp, &regs[0x210F], sizeof(vp));
         REXLOG_INFO("[native_x_renderer] draw dump {}: prim {} count {} index type {}; VS {:016X} PS {:016X}; surface "
-                    "{:08X} color {:08X} depth {:08X} modecontrol {:08X} depthcontrol {:08X}; scissor {:08X} {:08X}; "
-                    "viewport scale {:.1f} {:.1f} offset {:.1f} {:.1f}",
+                    "{:08X} color {:08X} depth {:08X} modecontrol {:08X} depthcontrol {:08X}",
                     dumped, uint32_t(primitives.guest_primitive_type), primitives.guest_draw_vertex_count,
                     uint32_t(primitives.index_buffer_type), vs_hash, pixel_shader ? pixel_shader->ucode_data_hash() : 0,
-                    regs[0x2000], regs[0x2001], regs[0x2002], regs[0x2208], regs[0x2200], regs[0x2081], regs[0x2082],
-                    vp[0], vp[2], vp[1], vp[3]);
+                    regs[0x2000], regs[0x2001], regs[0x2002], regs[0x2208], regs[0x2200]);
       }
     }
     // NXR_DUMP_VS=<hash>: that vertex shader's microcode (the SDK's disassembly) and the fetch constants of its first
@@ -1006,24 +989,6 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     }();
     if (pixel_shader && std::find(skip_ps.begin(), skip_ps.end(), pixel_shader->ucode_data_hash()) != skip_ps.end())
       return false;
-  }
-  // Battlefield 1943's sky (runs sky4 to skyB, Wake Island, 14 Nov 2026), drawn after the view's opaque draws in
-  // layers: a haze of 588 and 180 vertices blended over what is there (pixel shader 0365AC9437C0240E), the sky dome
-  // (8ABF56776060E64C: six draws of 7,000 to 8,000 vertices; E059F66662ECF0A4 draws the same into the half size
-  // effects layer, which is laid back over the picture), a tint added over it (471C5A0705715DB7, 240 vertices) and
-  // its painted clouds as sprites (E20CB2628975A77D). With a sky of the renderer's own (sky.h) none is drawn; the
-  // last two only into a target of the output's size (the effects layer keeps what else they may draw there).
-  if (vertex_shader->ucode_data_hash() == 0x00AB67BFF5297087ull) {  // the sky dome: its camera (DomeCamera)
-    std::memcpy(dome_m_, &regs[rg::XE_GPU_REG_SHADER_CONSTANT_000_X], sizeof(dome_m_));
-    dome_frame_ = device_->frames_presented();
-  }
-  if (skip_game_sky_ && pixel_shader) {
-    const uint64_t ps = pixel_shader->ucode_data_hash();
-    if (ps == 0x8ABF56776060E64Cull || ps == 0x0365AC9437C0240Eull || ps == 0xE059F66662ECF0A4ull) return false;
-    if ((ps == 0x471C5A0705715DB7ull || ps == 0xE20CB2628975A77Dull) && targets[0] &&
-        targets[0]->guest_width == jitter_size_[0] && targets[0]->guest_height == jitter_size_[1]) {
-      return false;
-    }
   }
   if (!primitives.host_draw_vertex_count) return false;
   PRIMITIVE_TOPOLOGY topology;
@@ -1146,24 +1111,9 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
   // Render targets: the colors the pixel shader writes with a non-empty mask, depth if tested.
   uint32_t color_mask = pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets()) : 0;
   ITextureView* render_target_views[4] = {};
-  ITextureView* depth_view = nullptr;
   uint32_t render_target_count = 0, samples = 0;
   PipelineState state;
   state.Reset();
-  HostTarget* depth = (depth_control.z_enable || depth_control.stencil_enable) ? targets[4] : nullptr;
-  // Host MSAA (targets.h): into the targets' multisampled twins when every target the draw binds has one, of one
-  // sample count; else into their one-sample textures.
-  uint32_t msaa = 0;
-  bool msaa_alike = true;
-  auto twin = [&](const HostTarget* t) {
-    const uint32_t n = t->msaa_view ? t->msaa_samples : 1;
-    if (msaa && msaa != n) msaa_alike = false;
-    msaa = n;
-  };
-  for (uint32_t i = 0; i < 4; ++i)
-    if (((color_mask >> (4 * i)) & 0xF) && targets[i]) twin(targets[i]);
-  if (depth) twin(depth);
-  const bool multisampled = msaa_alike && msaa > 1;
   for (uint32_t i = 0; i < 4; ++i) {
     if (!((color_mask >> (4 * i)) & 0xF)) continue;
     HostTarget* target = targets[i];
@@ -1171,26 +1121,24 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
       color_mask &= ~(0xFu << (4 * i));
       continue;
     }
-    render_target_views[i] = HostMsaaDrawView(target, multisampled, true);
+    render_target_views[i] = target->view;
     state.rtv_formats[i] = uint16_t(target->format);
     render_target_count = i + 1;
-    samples = multisampled ? msaa : target->samples;
+    samples = target->samples;
   }
+  HostTarget* depth = (depth_control.z_enable || depth_control.stencil_enable) ? targets[4] : nullptr;
   if (!render_target_count && !depth) {
     ++stats_.no_targets;
     return false;
   }
   if (depth) {
-    const uint32_t depth_samples = multisampled ? msaa : depth->samples;
-    if (samples && depth_samples != samples) {
+    if (samples && depth->samples != samples) {
       NATIVE_X_RENDERER_WARN_ONCE("[native_x_renderer] color and depth targets with different sample counts");
       ++stats_.failed;
       return false;
     }
-    samples = depth_samples;
+    samples = depth->samples;
     state.dsv_format = uint16_t(depth->format);
-    depth_view = HostMsaaDrawView(depth, multisampled,
-                                  (depth_control.z_enable && depth_control.z_write_enable) || depth_control.stencil_enable);
   }
   // The target the draw's size and scale are taken from: the first color target, else depth.
   const HostTarget* sized = depth;
@@ -1556,12 +1504,6 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
     // D154: a model placed from another camera than the frame's, moved onto it (SetAttachedCameraMove).
     if (!stage) MoveAttached(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, mapped_start);
     if (!stage) MoveWeaponLayer(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, mapped_start);
-    if (!stage) {
-      ClassifyWeapon(reinterpret_cast<const uint32_t*>(&regs[0]), first, constants.float_bitmap, viewport_info.z_min,
-                     viewport_info.z_max);
-    }
-    ApplyOutdoorLight(shader->ucode_data_hash(), stage, reinterpret_cast<const uint32_t*>(&regs[0]), first,
-                      constants.float_bitmap, mapped_start);
     // NXR_NEAR_DUMP=<seconds>,<frames> (a diagnosis aid): from that many seconds after the first draw, on that many
     // frames, every draw whose vertex shader's first perspective block is a near projection (near plane under half a
     // metre: first person models and the nearest scenery): its shader, the block's register and every float constant
@@ -1685,44 +1627,6 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
           const auto& binding = texture_bindings[i];
           view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                  binding.dimension, binding.is_signed);
-          NoteShadowMap(stage, binding.fetch_constant, view);
-        view = WetView(stage, binding.fetch_constant, view, *shader, regs);
-        {  // NXR_WEAPON_LOG=2 (research): 95 s in, each pixel shader's textures with the draw's depth range, once
-          static const bool log2 = [] {
-            const char* v = std::getenv("NXR_WEAPON_LOG");
-            return v && *v == '2';
-          }();
-          if (log2 && stage == 1 && view) {
-            static const auto since = std::chrono::steady_clock::now();
-            static std::set<uint64_t> said2;
-            const auto f = regs.GetTextureFetch(binding.fetch_constant);
-            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count() > 95.0 &&
-                f.size_2d.width + 1 >= 256 && said2.size() < 400 &&
-                said2.insert(shader->ucode_data_hash() * 131 + binding.fetch_constant * 7 + uint64_t(viewport_info.z_max * 1000)).second) {
-              REXLOG_INFO("[native_x_renderer] tex: PS {:016X} z {:.4f} {:.4f} fetch {} format {} {}x{} base {:05X} cam0 {}",
-                          shader->ucode_data_hash(), viewport_info.z_min, viewport_info.z_max, binding.fetch_constant,
-                          uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1, uint32_t(f.base_address),
-                          weapon_draw_ ? 1 : 0);
-            }
-          }
-        }
-        // NXR_WEAPON_LOG=1 (research for the wetness): the first person weapon's and hands' textures, each once.
-        if (stage == 1 && weapon_draw_ && view) {
-          static const bool log = [] {
-            const char* v = std::getenv("NXR_WEAPON_LOG");
-            return v && *v == '1';
-          }();
-          static std::set<uint64_t> said;
-          const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-          const uint64_t key = shader->ucode_data_hash() * 31 + binding.fetch_constant + (uint64_t(fetch.base_address) << 8);
-          if (log && said.size() < 120 && said.insert(key).second) {
-            const TextureDesc& d = static_cast<ITextureView*>(view)->GetTexture()->GetDesc();
-            REXLOG_INFO("[native_x_renderer] weapon texture: PS {:016X} fetch {} guest format {} {}x{} base {:05X}; host "
-                        "{}x{} format {} mips {} name {}", shader->ucode_data_hash(), binding.fetch_constant,
-                        uint32_t(fetch.format), fetch.size_2d.width + 1, fetch.size_2d.height + 1,
-                        uint32_t(fetch.base_address), d.Width, d.Height, int(d.Format), d.MipLevels, d.Name ? d.Name : "");
-          }
-        }
         }
         binding_objects_.push_back(view);
         continue;
@@ -1731,44 +1635,6 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
         const auto& binding = texture_bindings[i];
         IDeviceObject* view = textures_->View(binding.fetch_constant, regs.GetTextureFetch(binding.fetch_constant),
                                               binding.dimension, binding.is_signed);
-        NoteShadowMap(stage, binding.fetch_constant, view);
-        view = WetView(stage, binding.fetch_constant, view, *shader, regs);
-        {  // NXR_WEAPON_LOG=2 (research): 95 s in, each pixel shader's textures with the draw's depth range, once
-          static const bool log2 = [] {
-            const char* v = std::getenv("NXR_WEAPON_LOG");
-            return v && *v == '2';
-          }();
-          if (log2 && stage == 1 && view) {
-            static const auto since = std::chrono::steady_clock::now();
-            static std::set<uint64_t> said2;
-            const auto f = regs.GetTextureFetch(binding.fetch_constant);
-            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count() > 95.0 &&
-                f.size_2d.width + 1 >= 256 && said2.size() < 400 &&
-                said2.insert(shader->ucode_data_hash() * 131 + binding.fetch_constant * 7 + uint64_t(viewport_info.z_max * 1000)).second) {
-              REXLOG_INFO("[native_x_renderer] tex: PS {:016X} z {:.4f} {:.4f} fetch {} format {} {}x{} base {:05X} cam0 {}",
-                          shader->ucode_data_hash(), viewport_info.z_min, viewport_info.z_max, binding.fetch_constant,
-                          uint32_t(f.format), f.size_2d.width + 1, f.size_2d.height + 1, uint32_t(f.base_address),
-                          weapon_draw_ ? 1 : 0);
-            }
-          }
-        }
-        // NXR_WEAPON_LOG=1 (research for the wetness): the first person weapon's and hands' textures, each once.
-        if (stage == 1 && weapon_draw_ && view) {
-          static const bool log = [] {
-            const char* v = std::getenv("NXR_WEAPON_LOG");
-            return v && *v == '1';
-          }();
-          static std::set<uint64_t> said;
-          const auto fetch = regs.GetTextureFetch(binding.fetch_constant);
-          const uint64_t key = shader->ucode_data_hash() * 31 + binding.fetch_constant + (uint64_t(fetch.base_address) << 8);
-          if (log && said.size() < 120 && said.insert(key).second) {
-            const TextureDesc& d = static_cast<ITextureView*>(view)->GetTexture()->GetDesc();
-            REXLOG_INFO("[native_x_renderer] weapon texture: PS {:016X} fetch {} guest format {} {}x{} base {:05X}; host "
-                        "{}x{} format {} mips {} name {}", shader->ucode_data_hash(), binding.fetch_constant,
-                        uint32_t(fetch.format), fetch.size_2d.width + 1, fetch.size_2d.height + 1,
-                        uint32_t(fetch.base_address), d.Width, d.Height, int(d.Format), d.MipLevels, d.Name ? d.Name : "");
-          }
-        }
         if (pipeline->texture_objects[stage][i] != view) {
           recorder.Do([variable, view](IDeviceContext*) { variable->Set(view); });
           pipeline->texture_objects[stage][i] = view;
@@ -1815,7 +1681,7 @@ bool DrawPath::DrawInternal(const StateTracker::Program& vertex_program, const S
 
   // Record the draw. The targets are bound only when they change (D30).
   std::array<ITextureView*, 5> views{render_target_views[0], render_target_views[1], render_target_views[2],
-                                     render_target_views[3], depth_view};
+                                     render_target_views[3], depth ? depth->view : nullptr};
   if (!bound_valid_ || bound_count_ != render_target_count || bound_ != views) {
     recorder.Do([views, count = render_target_count](IDeviceContext* context) mutable {
       context->SetRenderTargets(count, views.data(), views[4], RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
@@ -2598,332 +2464,6 @@ void RecordWeaponLayerMove(const float* move, float fov_degrees) {
   g_weapon_move_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
   g_weapon_move_on.store(true, std::memory_order_relaxed);
 }
-namespace {
-// Where each of Battlefield 1943's shaders takes its outdoor light from (tools/light_constants.py).
-struct LightRegisters {
-  uint64_t hash;
-  uint8_t pixel, dir, hemisphere_dir, top, bottom, key, specular, camera, shadow;
-};
-constexpr LightRegisters kLightRegisters[] = {
-#include "bf_lights.inc"
-};
-}  // namespace
-
-namespace {
-// The rotation's basis for a direction: its columns the direction itself (toward the light), the horizontal to its
-// right and the third.
-void LightBasis(double azimuth, double elevation, double out[3][3]) {
-  const double ce = std::cos(elevation), se = std::sin(elevation), ca = std::cos(azimuth), sa = std::sin(azimuth);
-  const double f[3] = {ce * sa, se, ce * ca}, r[3] = {ca, 0.0, -sa}, u[3] = {-se * sa, ce, -se * ca};
-  for (int i = 0; i < 3; ++i) out[i][0] = f[i], out[i][1] = r[i], out[i][2] = u[i];
-}
-bool Invert3(const double a[3][3], double inv[3][3]) {
-  const double det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
-                     a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
-  if (std::abs(det) < 1e-30) return false;
-  inv[0][0] = (a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det;
-  inv[0][1] = (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det;
-  inv[0][2] = (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det;
-  inv[1][0] = (a[1][2] * a[2][0] - a[1][0] * a[2][2]) / det;
-  inv[1][1] = (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det;
-  inv[1][2] = (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det;
-  inv[2][0] = (a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det;
-  inv[2][1] = (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det;
-  inv[2][2] = (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det;
-  return true;
-}
-// Battlefield 1943's shadow pass (runs shad1 and shad2, Wake Island): a 1024 x 1024 depth target with no colour.
-bool IsShadowPass(const uint32_t* regs) {
-  return regs[0x2082] == 0x04000400 && (regs[0x2000] & 0x3FFF) == 0x410 && regs[0x2001] == 0;
-}
-}  // namespace
-
-void DrawPath::SetOutdoorLight(const OutdoorLight& light) {
-  outdoor_light_ = light;
-  // The turn once a frame, before its first draw: within a frame the casters and what receives their shadows must
-  // get the same one (this is called before every draw).
-  const uint64_t frame = device_->frames_presented();
-  if (frame == shadow_turn_frame_ && shadow_turn_frame_valid_) return;
-  shadow_turn_frame_ = frame, shadow_turn_frame_valid_ = true;
-  LatchShadowTurn();
-}
-
-// The game's shadows turned to another sun (14 Nov 2026, "Yes, move the sun"). What the game does (run shad2): three
-// cascades (on Wake Island 28, 79 and 370 m wide), each drawn in turn into the shadow pass's target with a clip
-// matrix L (world to clip, orthographic, in the casters' c0 to c3, as it is or times the object's world matrix), and
-// what receives shadows gets diag(0.5, -0.5, 1) L of each in its vertex shader. Its shadows fall from a steeper sun
-// than the one it shades with (Wake Island: 63 degrees up against 35).
-//
-// For a sun elsewhere the world is turned about a pivot p near the camera before the game's matrix: L' = L M with
-// M x = p + R (x - p), R taking the new direction of the light to the game's. In clip space that is one matrix for
-// a cascade, C = T(q) A R A^-1 T(-q) with A the linear part of L and q = L p, so L' = C L: with the pivot chosen by
-// its clip coordinates (the cascade's middle, at the camera's depth of the last frame) C needs nothing of this
-// frame's, and the casters' matrices (C times theirs) and the receivers' (diag C diag^-1 times theirs) stay each
-// other's exactly. The game still chooses what casts shadows for its own sun: what it leaves out casts none.
-void DrawPath::LatchShadowTurn() {
-  shadow_turn_.on = false;
-  shadow_turn_.dir[3] = 0.0f;  // 1 once the direction is set
-  const OutdoorLight& light = outdoor_light_;
-  if (!light.on || !light.turn || !seen_shadow_valid_ || !seen_camera_valid_ || !game_light_dir_valid_) return;
-  const double kPi = 3.14159265358979;
-  auto angles = [](const double d[3], double& azimuth, double& elevation) {
-    const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    if (len < 1e-12) return false;
-    elevation = std::asin(std::clamp(d[1] / len, -1.0, 1.0));
-    azimuth = std::atan2(d[0], d[2]);
-    return true;
-  };
-  double clip[3][3][4];
-  for (int i = 0; i < 3; ++i)
-    for (int c = 0; c < 4; ++c) {
-      clip[i][0][c] = 2.0 * seen_shadow_[i][0][c];
-      clip[i][1][c] = -2.0 * seen_shadow_[i][1][c];
-      clip[i][2][c] = seen_shadow_[i][2][c];
-    }
-  // Where the game's shadows fall from: what the first cascade's x and y do not see.
-  const double* x = clip[0][0];
-  const double* y = clip[0][1];
-  double from[3] = {x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]};
-  if (from[1] < 0.0) from[0] = -from[0], from[1] = -from[1], from[2] = -from[2];
-  const double game_light[3] = {game_light_dir_[0], game_light_dir_[1], game_light_dir_[2]};
-  double shadow_az, shadow_el, light_az, light_el;
-  if (!angles(from, shadow_az, shadow_el) || !angles(game_light, light_az, light_el)) return;
-  double turn_az = std::remainder(double(light.azimuth) - light_az, 2.0 * kPi);
-  const double turn_el = double(light.elevation) - light_el;
-  // The shading's direction always; the shadows only when they are turned at all (the game's own hour stays the
-  // game's own picture to the last bit).
-  const double ce = std::cos(light.elevation);
-  shadow_turn_.dir[0] = float(ce * std::sin(light.azimuth));
-  shadow_turn_.dir[1] = float(std::sin(light.elevation));
-  shadow_turn_.dir[2] = float(ce * std::cos(light.azimuth));
-  shadow_turn_.dir[3] = 1.0f;
-  if (std::abs(turn_az) < 0.002 && std::abs(turn_el) < 0.002) return;
-  // The shadows keep their lead over the light, but not flatter than 40 degrees (the cascades are only so deep)
-  // and not steeper than 75 (at noon nothing would cast a shadow to see).
-  double new_el = std::clamp(shadow_el + turn_el, 40.0 * kPi / 180.0, 75.0 * kPi / 180.0);
-  new_el += (80.0 * kPi / 180.0 - new_el) * std::clamp(double(light.steep), 0.0, 1.0);
-  double game_basis[3][3], new_basis[3][3], rotation[3][3];
-  LightBasis(shadow_az, shadow_el, game_basis);
-  LightBasis(shadow_az + turn_az, new_el, new_basis);
-  for (int r = 0; r < 3; ++r)
-    for (int c = 0; c < 3; ++c)
-      rotation[r][c] = game_basis[r][0] * new_basis[c][0] + game_basis[r][1] * new_basis[c][1] + game_basis[r][2] * new_basis[c][2];
-  const double d[3] = {0.5, -0.5, 1.0};
-  for (int i = 0; i < 3; ++i) {
-    double a[3][3], inv[3][3], ar[3][3], g[3][3];
-    for (int r = 0; r < 3; ++r)
-      for (int c = 0; c < 3; ++c) a[r][c] = clip[i][r][c];
-    if (!Invert3(a, inv)) return;
-    for (int r = 0; r < 3; ++r)
-      for (int c = 0; c < 3; ++c) ar[r][c] = a[r][0] * rotation[0][c] + a[r][1] * rotation[1][c] + a[r][2] * rotation[2][c];
-    for (int r = 0; r < 3; ++r)
-      for (int c = 0; c < 3; ++c) g[r][c] = ar[r][0] * inv[0][c] + ar[r][1] * inv[1][c] + ar[r][2] * inv[2][c];
-    const double depth = clip[i][2][0] * seen_camera_[0] + clip[i][2][1] * seen_camera_[1] + clip[i][2][2] * seen_camera_[2] +
-                         clip[i][2][3];
-    for (int r = 0; r < 3; ++r) {
-      const double move = (r == 2 ? depth : 0.0) - g[r][2] * depth;
-      for (int c = 0; c < 3; ++c) {
-        shadow_turn_.caster[i][r][c] = float(g[r][c]);
-        shadow_turn_.receiver[i][r][c] = float(g[r][c] * d[r] / d[c]);
-        shadow_turn_.inverse[i][r][c] = float(inv[r][c]);
-      }
-      shadow_turn_.caster[i][r][3] = float(move);
-      shadow_turn_.receiver[i][r][3] = float(move * d[r]);
-    }
-  }
-  shadow_turn_.on = true;
-  static bool said = false;
-  if (!said) {
-    said = true;
-    REXLOG_INFO("[native_x_renderer] outdoor light: the game's shadows fall from {:.1f} degrees up, azimuth {:.1f}; its "
-                "light from {:.1f}, {:.1f}; turned by {:.1f} around and {:.1f} up",
-                shadow_el * 180.0 / kPi, shadow_az * 180.0 / kPi, light_el * 180.0 / kPi, light_az * 180.0 / kPi,
-                turn_az * 180.0 / kPi, turn_el * 180.0 / kPi);
-  }
-}
-
-// The outdoor light's constants of a draw's shader, changed in its uploaded constants (SetOutdoorLight): the
-// colours multiplied, the direction replaced, the shadow pass's and the shadow receivers' matrices turned. The
-// values are read from the register file: the mapped buffer is slow to read back.
-void DrawPath::ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uint32_t* regs, uint32_t first,
-                                 const uint64_t* float_bitmap, uint8_t* mapped) {
-  auto used = [&](uint32_t reg) { return reg < 255 && (float_bitmap[reg >> 6] & (uint64_t(1) << (reg & 63))); };
-  if (!stage) draw_shadow_valid_ = false;
-  auto at = [&](uint32_t reg) {
-    uint32_t index = uint32_t(std::popcount(float_bitmap[reg >> 6] & ((uint64_t(1) << (reg & 63)) - 1)));
-    for (uint32_t i = 0; i < (reg >> 6); ++i) index += uint32_t(std::popcount(float_bitmap[i]));
-    return mapped + size_t(index) * 16;
-  };
-  // Three rows of a matrix (three registers from `reg`) multiplied from the left by a 3 x 4 one, its fourth row
-  // 0, 0, 0, 1 as the rows' own.
-  auto turn = [&](uint32_t reg, const float by[3][4]) {
-    float rows[3][4], out[4];
-    std::memcpy(rows, &regs[first + (reg << 2)], sizeof(rows));
-    for (uint32_t r = 0; r < 3; ++r) {
-      if (!used(reg + r)) continue;
-      for (int c = 0; c < 4; ++c) out[c] = by[r][0] * rows[0][c] + by[r][1] * rows[1][c] + by[r][2] * rows[2][c];
-      out[3] += by[r][3];
-      std::memcpy(at(reg + r), out, sizeof(out));
-    }
-  };
-  // A caster in the shadow pass: its clip matrix is in c0 to c3 (viewProjMatrix or worldViewProjMatrix in every
-  // shader of the pass). Its cascade is the one whose linear part leaves a rotation with one scale of the matrix's.
-  if (!stage && shadow_turn_.on && IsShadowPass(regs) && used(0) && used(1) && used(2)) {
-    float rows[3][4];
-    std::memcpy(rows, &regs[first], sizeof(rows));
-    int best = -1;
-    float best_error = 0.05f;
-    for (int i = 0; i < 3; ++i) {
-      float w[3][3], scale = 0.0f, error = 0.0f;
-      for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) {
-          w[r][c] = shadow_turn_.inverse[i][r][0] * rows[0][c] + shadow_turn_.inverse[i][r][1] * rows[1][c] +
-                    shadow_turn_.inverse[i][r][2] * rows[2][c];
-          scale += w[r][c] * w[r][c];
-        }
-      scale /= 3.0f;
-      if (scale < 1e-12f) continue;
-      for (int r = 0; r < 3; ++r)
-        for (int c = r; c < 3; ++c) {
-          const float dot = (w[r][0] * w[c][0] + w[r][1] * w[c][1] + w[r][2] * w[c][2]) / scale;
-          error = std::max(error, std::abs(dot - (r == c ? 1.0f : 0.0f)));
-        }
-      if (error < best_error) best_error = error, best = i;
-    }
-    if (best >= 0) turn(0, shadow_turn_.caster[best]);
-    return;
-  }
-  // The game's painted sky by the hour: its dome, the dome's half size copy, the tint over it and its cloud sprites
-  // (the shaders SetSkipGameSky names) each scale their colour by colorScale, pixel constant 0.
-  if (stage && outdoor_light_.on && outdoor_light_.game_sky && used(0) &&
-      (shader_hash == 0x8ABF56776060E64Cull || shader_hash == 0xE059F66662ECF0A4ull ||
-       shader_hash == 0x471C5A0705715DB7ull || shader_hash == 0xE20CB2628975A77Dull)) {
-    float v[4];
-    std::memcpy(v, &regs[first], sizeof(v));
-    v[0] *= outdoor_light_.painted[0], v[1] *= outdoor_light_.painted[1], v[2] *= outdoor_light_.painted[2];
-    std::memcpy(at(0), v, sizeof(v));
-    return;
-  }
-  const LightRegisters* end = std::end(kLightRegisters);
-  const LightRegisters* r = std::lower_bound(std::begin(kLightRegisters), end, shader_hash,
-                                             [](const LightRegisters& a, uint64_t h) { return a.hash < h; });
-  if (r == end || r->hash != shader_hash || r->pixel != stage) return;
-  if (stage && used(r->dir)) {
-    std::memcpy(game_light_dir_, &regs[first + (uint32_t(r->dir) << 2)], sizeof(game_light_dir_));
-    game_light_dir_valid_ = true;
-  }
-  // The cascades' transforms and the camera's place are taken together from one draw (its vertex shader's and its
-  // pixel shader's): the first person weapon's are in a space of its own with the camera at 0, and a pair from
-  // two spaces put the pivot hundreds of metres off (runs sun3 to sun8: the shadows gone).
-  if (stage && used(r->camera) && draw_shadow_valid_) {
-    std::memcpy(seen_camera_, &regs[first + (uint32_t(r->camera) << 2)], sizeof(seen_camera_));
-    std::memcpy(seen_shadow_, draw_shadow_, sizeof(seen_shadow_));
-    seen_camera_valid_ = seen_shadow_valid_ = true;
-    // The shadow map for the rain's cover, once a frame, from a draw of the world's (its camera is not at 0): the
-    // transforms as this draw's vertex shader got them (turned, if the shadows are), the view when it is bound.
-    const uint64_t frame = device_->frames_presented();
-    if (shadow_map_.frame != frame &&
-        std::abs(seen_camera_[0]) + std::abs(seen_camera_[1]) + std::abs(seen_camera_[2]) > 1.0f) {
-      for (int i = 0; i < 3; ++i)
-        for (int row = 0; row < 3; ++row)
-          for (int col = 0; col < 4; ++col) {
-            float v = draw_shadow_[i][row][col];
-            if (shadow_turn_.on) {
-              const float (*by)[4] = shadow_turn_.receiver[i];
-              v = by[row][0] * draw_shadow_[i][0][col] + by[row][1] * draw_shadow_[i][1][col] +
-                  by[row][2] * draw_shadow_[i][2][col] + (col == 3 ? by[row][3] : 0.0f);
-            }
-            shadow_map_.cascades[i][row][col] = v;
-          }
-      shadow_map_pending_ = true;
-    }
-  }
-  // What receives shadows: the three cascades' transforms, three rows each.
-  if (!stage && r->shadow < 245 && used(r->shadow) && used(r->shadow + 4u) && used(r->shadow + 8u)) {
-    for (uint32_t i = 0; i < 3; ++i)
-      std::memcpy(draw_shadow_[i], &regs[first + ((uint32_t(r->shadow) + 4 * i) << 2)], sizeof(draw_shadow_[i]));
-    draw_shadow_valid_ = true;
-    if (shadow_turn_.on)
-      for (uint32_t i = 0; i < 3; ++i) turn(uint32_t(r->shadow) + 4 * i, shadow_turn_.receiver[i]);
-  }
-  // The wet weapon shines ("almost glass-like"): the sun's specular colour its shaders get is made stronger by how
-  // wet it is (up to three times), on top of what the day's light makes of it.
-  auto wet_shine = [&] {
-    if (!stage || !weapon_draw_ || !used(r->specular) || wet_count_ * wet_show_ <= 0.01f) return;
-    float v[4];
-    std::memcpy(v, at(r->specular), sizeof(v));
-    const float more = 1.0f + 2.0f * wet_count_ * wet_show_;
-    v[0] *= more, v[1] *= more, v[2] *= more;
-    std::memcpy(at(r->specular), v, sizeof(v));
-  };
-  if (!outdoor_light_.on) {
-    wet_shine();
-    return;
-  }
-  auto scale = [&](uint8_t reg, const float* by) {
-    if (!used(reg)) return;
-    float v[4];
-    std::memcpy(v, &regs[first + (uint32_t(reg) << 2)], sizeof(v));
-    v[0] *= by[0], v[1] *= by[1], v[2] *= by[2];
-    std::memcpy(at(reg), v, sizeof(v));
-  };
-  scale(r->key, outdoor_light_.key);
-  scale(r->specular, outdoor_light_.key);
-  wet_shine();
-  scale(r->top, outdoor_light_.sky);
-  scale(r->bottom, outdoor_light_.ground);
-  if (shadow_turn_.dir[3] != 0.0f && used(r->dir)) {
-    float v[4];
-    std::memcpy(v, &regs[first + (uint32_t(r->dir) << 2)], sizeof(v));
-    v[0] = shadow_turn_.dir[0], v[1] = shadow_turn_.dir[1], v[2] = shadow_turn_.dir[2];
-    std::memcpy(at(r->dir), v, sizeof(v));
-  }
-}
-
-// Whether this draw is the first person weapon's or hands' (for their wetness). Battlefield 1943 draws what is
-// within 7.5 m in a depth range of its own (the viewport's 1 to 0.0133: run wlog2), the weapon and the hands among
-// it, with a field of view of their own. The world's field of view is taken once a frame from a draw of a farther
-// range; a draw of the nearest range whose own differs from it by 2% or more is the weapon's.
-void DrawPath::ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, float z_min, float z_max) {
-  weapon_draw_ = false;
-  if (wet_tint_ < 0 && wet_count_ * wet_show_ < 0.01f) return;  // nothing to be wet
-  const bool nearest = z_min > 0.99f && z_max > 0.005f && z_max < 0.05f;
-  const uint64_t frame = device_->frames_presented();
-  const bool farther = !nearest && z_max < z_min && z_min < 0.05f && world_py_frame_ != frame;
-  if (!nearest && !farther) return;
-  uint8_t numbers[256];
-  uint32_t n = 0;
-  for (uint32_t i = 0; i < 4; ++i) {
-    uint64_t bits = float_bitmap[i];
-    while (bits) {
-      numbers[n++] = uint8_t((i << 6) + uint32_t(std::countr_zero(bits)));
-      bits &= bits - 1;
-    }
-  }
-  if (n < 4) return;
-  std::array<uint8_t, 256 * 16> values;
-  for (uint32_t k = 0; k < n; ++k) std::memcpy(values.data() + k * 16, &regs[first + (uint32_t(numbers[k]) << 2)], 16);
-  uint32_t index = 0;
-  bool transposed = false;
-  if (!CameraVote::FindMatrix(values.data(), numbers, n, index, transposed)) return;
-  GtaoProjection p;
-  // (A field of view between 19 and 147 degrees: other matrices are found too, run chk3.)
-  if (!GtaoProjection::FromMatrix(CameraVote::MatrixAt(values.data(), index, transposed), p) || !(p.py > 0.3f && p.py < 6.0f)) {
-    return;
-  }
-  if (farther) {
-    world_py_ = p.py, world_py_frame_ = frame;
-    return;
-  }
-  weapon_draw_ = world_py_ > 0.0f && std::abs(p.py - world_py_) > 0.02f * world_py_;
-  weapon_constants_ = n;
-  static int said = 0;
-  if (weapon_draw_ && said < 2) {
-    ++said;
-    REXLOG_INFO("[native_x_renderer] wetness: a weapon's draw (its view's py {:.3f}, the world's {:.3f})", p.py, world_py_);
-  }
-}
-
 void DrawPath::MoveWeaponLayer(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped) {
   if (!g_weapon_move_on.load(std::memory_order_relaxed)) return;
   static std::atomic<uint32_t> s_calls{0}, s_few{0}, s_nomatrix{0}, s_noproj{0};
@@ -3468,135 +3008,6 @@ uint64_t DrawPath::texture_loads_unchanged() const {
 uint64_t DrawPath::textures_unsupported() const { return guest_textures_ ? guest_textures_->stats().unsupported : 0; }
 uint64_t DrawPath::texture_count() const { return guest_textures_ ? guest_textures_->stats().textures : 0; }
 uint64_t DrawPath::texture_host_bytes() const { return guest_textures_ ? guest_textures_->stats().host_bytes : 0; }
-
-// The game's shadow map's view (ShadowMap): outdoorLightShadowmapTexture is the pixel shader's texture 0 in every
-// shader that has it (tools/light_constants.py's tables).
-void DrawPath::NoteShadowMap(uint32_t stage, uint32_t fetch_constant, IDeviceObject* view) {
-  if (!shadow_map_pending_ || stage != 1 || fetch_constant != 0 || !view) return;
-  shadow_map_pending_ = false;
-  shadow_map_.view = static_cast<ITextureView*>(view);
-  shadow_map_.frame = device_->frames_presented();
-  static int said = 0;
-  if (said < 2) {
-    ++said;
-    const TextureDesc& d = shadow_map_.view->GetTexture()->GetDesc();
-    const TextureViewDesc& v = shadow_map_.view->GetDesc();
-    REXLOG_INFO("[native_x_renderer] shadow map: texture type {} {}x{}x{} format {}, view dimension {} slices {} from {}; "
-                "cascade 0 rows {:.5f} {:.5f} {:.5f} {:.3f} | {:.5f} {:.5f} {:.5f} {:.3f} | {:.5f} {:.5f} {:.5f} {:.3f}",
-                int(d.Type), d.Width, d.Height, d.ArraySize, int(d.Format), int(v.TextureDim), v.NumArraySlices,
-                v.FirstArraySlice, shadow_map_.cascades[0][0][0], shadow_map_.cascades[0][0][1],
-                shadow_map_.cascades[0][0][2], shadow_map_.cascades[0][0][3], shadow_map_.cascades[0][1][0],
-                shadow_map_.cascades[0][1][1], shadow_map_.cascades[0][1][2], shadow_map_.cascades[0][1][3],
-                shadow_map_.cascades[0][2][0], shadow_map_.cascades[0][2][1], shadow_map_.cascades[0][2][2],
-                shadow_map_.cascades[0][2][3]);
-  }
-}
-
-// The wet copy of a texture of the first person weapon's (draw.h), or the texture itself: only in a weapon's draw,
-// only its colour texture (or the developer's tinted one), only a DXT1 texture of 512 texels or more (a draw taken
-// for the weapon's by mistake has other things there).
-IDeviceObject* DrawPath::WetView(uint32_t stage, uint32_t fetch_constant, IDeviceObject* view,
-                                 const rg::SpirvShader& shader, const rg::RegisterFile& regs) {
-  if (stage != 1 || !weapon_draw_ || !view || !seen_camera_valid_) return view;
-  const bool tint = wet_tint_ >= 0;
-  // Which texture: not by its number (the weapon's shaders differ: in some texture 2 is a small tiled detail, run
-  // chk5) but by what it is: the one of 1024 texels or more, mapped once over the model. (The developer's check with
-  // a number under 90 takes that texture whatever it is.)
-  const bool by_number = tint && wet_tint_ < 90;
-  if (by_number && fetch_constant != uint32_t(wet_tint_)) return view;
-  if (!tint && wet_count_ * wet_show_ < 0.01f) return view;
-  auto* original = static_cast<ITextureView*>(view);
-  const TextureDesc& d = original->GetTexture()->GetDesc();
-  static bool said = false;
-  if (!said) {
-    said = true;
-    REXLOG_INFO("[native_x_renderer] wetness: the weapon's texture {}: type {} {}x{}x{} format {}", fetch_constant,
-                int(d.Type), d.Width, d.Height, d.ArraySize, int(d.Format));
-  }
-  if ((d.Type != RESOURCE_DIM_TEX_2D && !(d.Type == RESOURCE_DIM_TEX_2D_ARRAY && d.ArraySize == 1)) ||
-      d.Width < (by_number ? 32u : 256u) || d.Height < (by_number ? 32u : 256u) ||
-      (d.Format != TEX_FORMAT_BC1_UNORM && d.Format != TEX_FORMAT_BC3_UNORM)) {
-    return view;
-  }
-  // The hands' draws, whose texture gets no drops: their material has a 512 x 256 texture among its others, the
-  // weapons' have none (runs wet1 and wlog2). (Not by the shader: a hosted match draws them with others, run mrg3.)
-  const uint64_t pixel_shader = shader.ucode_data_hash();
-  bool skin_shader = false;
-  // (In a hosted match their material is another: there it has four 512 x 512 DXT1 textures, its colour among them,
-  // where the weapon's has one: runs wlog3, slot1 to slot4 and bump2.)
-  uint32_t squares = 0;
-  for (const auto& b : shader.GetTextureBindingsAfterTranslation()) {
-    const auto f = regs.GetTextureFetch(b.fetch_constant);
-    if (f.size_2d.width + 1 == 512 && f.size_2d.height + 1 == 256) skin_shader = true;
-    if (f.format == xenos::TextureFormat::k_DXT1 && f.size_2d.width + 1 == 512 && f.size_2d.height + 1 == 512) ++squares;
-  }
-  if (squares >= 3) skin_shader = true;
-  {
-    static std::set<uint64_t> said_shaders;
-    if (said_shaders.size() < 16 && said_shaders.insert(pixel_shader ^ (uint64_t(fetch_constant) << 60)).second)
-      REXLOG_INFO("[native_x_renderer] wetness: the weapon's pixel shader {:016X} texture {} ({}x{}){}; its vertex "
-                  "shader takes {} constants", pixel_shader, fetch_constant, d.Width, d.Height, skin_shader ? ", skin" : "",
-                  weapon_constants_);
-  }
-  for (WetCopy& w : wet_copies_) {
-    if (w.original != original) continue;
-    w.used = device_->frames_presented();
-    if (skin_shader && !w.skin) w.skin = true, w.asked = true;  // a texture any skin shader draws with is skin's
-    if (!w.asked && (!w.copy || std::abs(w.count - wet_count_) > 0.02f || std::abs(w.show - wet_show_) > 0.03f ||
-                     std::abs(wet_seconds_ - w.seconds) > 0.066)) {
-      w.asked = true;
-    }
-    static int used = 0;
-    if (w.copy && used < 2) {
-      ++used;
-      REXLOG_INFO("[native_x_renderer] wetness: a wet copy drawn with (texture {})", fetch_constant);
-    }
-    return w.copy ? static_cast<IDeviceObject*>(w.copy.RawPtr()) : view;
-  }
-  // At the most 64 textures have a copy; one not drawn with for five seconds is let go (TakeWetRequests). (At first
-  // twelve, and when a thirteenth came all were dropped and made again: with a kit's several weapons that was every
-  // frame, and the graphics memory ran out: run covJ.)
-  if (wet_copies_.size() >= 64) return view;
-  WetCopy w;
-  w.original = original;
-  w.used = device_->frames_presented();
-  // The hands' skin shaders (Battlefield 1943: runs wet1 and wlog2), whose texture gets no drops.
-  w.skin = skin_shader;
-  w.asked = true;
-  wet_copies_.push_back(std::move(w));
-  return view;
-}
-bool DrawPath::TakeWetRequests(std::vector<WetRequest>& out) {
-  out.clear();
-  const uint64_t frame = device_->frames_presented();
-  std::erase_if(wet_copies_, [frame](const WetCopy& w) { return frame > w.used + 300; });
-  for (WetCopy& w : wet_copies_) {
-    if (!w.asked) continue;
-    w.asked = false;
-    out.push_back({w.original, w.copy, w.skin});
-  }
-  return !out.empty();
-}
-void DrawPath::SetWetCopy(ITextureView* original, ITextureView* copy) {
-  for (WetCopy& w : wet_copies_) {
-    if (w.original != original) continue;
-    w.copy = copy;
-    w.count = wet_count_, w.show = wet_show_, w.seconds = wet_seconds_;
-  }
-}
-
-bool DrawPath::DomeCamera(float m[4][4]) const {
-  if (dome_frame_ != device_->frames_presented()) return false;
-  std::memcpy(m, dome_m_, sizeof(dome_m_));
-  return true;
-}
-
-uint64_t DrawPath::PixelShaderHash(const StateTracker::Program& program) {
-  if (program.ucode.empty()) return 0;
-  bool new_failure = false;
-  rg::SpirvShader* shader = FindShader(xenos::ShaderType::kPixel, program, &new_failure);
-  return shader ? shader->ucode_data_hash() : 0;
-}
 
 bool DrawPath::TakeProjection(GtaoProjection& out, float& z_min, float& z_max) {
   static uint32_t calls = 0;

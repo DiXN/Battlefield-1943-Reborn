@@ -302,39 +302,25 @@ void ZoomBlur(uint8_t* base, uint32_t data, bool off) {
     if (filter == 0 || filter > 8) continue;  // none already, or not a filter
     g_blur_own.emplace(level + 0x30, filter);
     store(level + 0x30, 0);
-    REXLOG_INFO("BF depth of field: a weapon's zoom level {} loses the game's foreground blur (filter {})", i, filter);
+    REXLOG_INFO("BF SMG sights: zoom level {}'s foreground blur (filter {}) off while the sights are used", i, filter);
   }
 }
-// The weapon in the soldier's hands (its data, SoldierWeaponData) and how far its zoom is in, as the game has them
-// this frame. False without one.
-bool HeldWeapon(PPCContext& ctx, uint8_t* base, uint32_t soldier, uint32_t& data, double& blend) {
-  if (!soldier) return false;
+void SmgSights(PPCContext& ctx, uint8_t* base, uint32_t soldier, double fov_degrees) {
+  if (!REXCVAR_GET(bf_smg_sights)) {
+    if (!g_blur_own.empty()) ZoomBlur(base, 0, false);
+    return;
+  }
+  if (!soldier) return;
   PPCContext c = ctx;
   c.r3.u64 = soldier, c.r4.s64 = 0;
   sub_821EE7F0(c, base);
   const uint32_t weapon = c.r3.u32;
-  if (!weapon) return false;
-  data = uint32_t(base[weapon + 4]) << 24 | base[weapon + 5] << 16 | base[weapon + 6] << 8 | base[weapon + 7];
-  if (!data) return false;
+  if (!weapon) return;
+  const uint32_t data = uint32_t(base[weapon + 4]) << 24 | base[weapon + 5] << 16 | base[weapon + 6] << 8 | base[weapon + 7];
+  if (!data) return;
   sub_825835B0(c, base);
   sub_821F9318(c, base);
-  blend = std::clamp(c.f1.f64, 0.0, 1.0);
-  return true;
-}
-// "Let's remove all of the game's native depth of field, and make our own higher quality DoF with toggle-able ADS
-// Depth of Field": every weapon's zoom levels lose the game's foreground blur (ZoomBlur, once for each weapon's
-// data), and the renderer is told how far the aim is in for its own (NativeXRenderer dof.h).
-void AdsDepthOfField(uint8_t* base, uint32_t data, double blend) {
-  static std::mutex seen_mutex;
-  static std::set<uint32_t> seen;
-  {
-    std::lock_guard lock(seen_mutex);
-    if (seen.size() < 256 && seen.insert(data).second) ZoomBlur(base, data, true);
-  }
-  native_x_renderer::SetAdsBlend(float(blend));
-}
-void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
-  if (!REXCVAR_GET(bf_smg_sights)) return;
+  const double blend = std::clamp(c.f1.f64, 0.0, 1.0);
   static uint32_t last_data = 0;
   static bool smg = false;
   if (data != last_data) {
@@ -345,6 +331,7 @@ void SmgSights(uint8_t* base, uint32_t data, double blend, double fov_degrees) {
     smg = lower.find("thompson") != std::string::npos || lower.find("100") != std::string::npos;
     REXLOG_INFO("BF SMG sights: holding {} ({})", name.empty() ? "a weapon without a name" : name, smg ? "an SMG" : "not an SMG");
   }
+  if (smg && g_blur_own.empty()) ZoomBlur(base, data, true);
   {
     static double said = -1;
     if (std::abs(blend - said) > 0.4) {
@@ -507,12 +494,7 @@ REX_HOOK_RAW(sub_821FAAF0) {
   if (ctx.f1.f64 > 0.0 && ctx.f1.f64 < 180.0) ctx.f1.f64 = MappedDegrees(ctx.f1.f64, WeaponMapWeight());
   if (first_person_weapon) {  // with the field of view the weapon's view gets this frame
     const double answer = ctx.f1.f64;
-    uint32_t data = 0;
-    double blend = 0;
-    if (HeldWeapon(ctx, base, soldier, data, blend)) {
-      AdsDepthOfField(base, data, blend);
-      SmgSights(base, data, blend, answer);
-    }
+    SmgSights(ctx, base, soldier, answer);
     ctx.f1.f64 = answer;
   }
 }

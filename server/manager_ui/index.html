@@ -257,19 +257,6 @@
   <label class="check"><input type="checkbox" id="e-listed"><span>Listed in the server browser<br><small>Off: players join only with Direct connect, by the address you give them.</small></span></label>
   <label class="check" id="e-night-box"><input type="checkbox" id="e-night"><span>Night Ops: players see the maps at night</span></label>
   <label class="check"><input type="checkbox" id="e-balance"><span>Team balance<br><small>When one team has 2 or more players more for 20 seconds, a player who has died on it moves to the other team, with no points lost. A Change Team that would make the teams uneven is refused.</small></span></label>
-  <label class="check"><input type="checkbox" id="e-daynight"><span>Day and night: the light, the shadows and the sky follow the server's clock<br><small>Admins can change all of these while the server runs, with F9 in the game.</small></span></label>
-  <div class="grid2">
-    <label class="field"><span>Time of day at the start (0 to 24)</span><input type="number" id="e-time" min="0" max="23.75" step="0.25"></label>
-    <label class="field"><span>A day lasts, minutes (0: time stands still)</span><input type="number" id="e-dayminutes" min="0" max="1440" step="1"></label>
-    <label class="field"><span>Cloud cover, %</span><input type="number" id="e-cloud" min="0" max="100" step="1"></label>
-    <label class="field"><span>Cloud change rate, %</span><input type="number" id="e-cloudrate" min="0" max="100" step="1"></label>
-    <label class="field"><span>Weather, % (0 fair, 100 a storm: mist, far rain, lightning)</span><input type="number" id="e-weather" min="0" max="100" step="1"></label>
-    <label class="field"><span>Distance fog, %</span><input type="number" id="e-fog" min="0" max="100" step="1"></label>
-    <label class="field"><span>Ground fog, %</span><input type="number" id="e-groundfog" min="0" max="100" step="1"></label>
-    <label class="field"><span>Wind, % (how far the rain leans)</span><input type="number" id="e-wind" min="0" max="100" step="1"></label>
-    <label class="field"><span>Cloud height, m over the sea (low: planes fly through the clouds)</span><input type="number" id="e-cloudheight" min="200" max="1500" step="50"></label>
-    <label class="field"><span>Admin player IDs, separated by commas</span><input type="text" id="e-admins" maxlength="400" placeholder="A player sees their ID by pressing F9 in a match"></label>
-  </div>
   <label class="check"><input type="checkbox" id="e-autostart"><span>Start this server when the manager starts</span></label>
   <div class="row" style="margin-top:14px"><button class="btn go" id="e-save">Save</button><button class="btn" id="e-save-restart">Save and restart it</button><button class="btn" id="e-cancel">Cancel</button><span class="spacer"></span><button class="btn stop" id="e-remove">Remove server</button></div>
   <p class="hint" id="e-note" style="margin-bottom:0"></p>
@@ -545,11 +532,6 @@ function openEdit(n) {
     ...[[60, 'Recommended'], [30, 'Original'], [75, 'Experimental'], [100, 'Experimental']].map(([hz, word]) => h('option', { value: hz, text: hz + ' Hz - ' + word })));
   $('e-tick').value = String([30, 60, 75, 100].includes(sv.tick) ? sv.tick : 0);
   $('e-listed').checked = sv.listed; $('e-night').checked = sv.night; $('e-autostart').checked = sv.autostart; $('e-balance').checked = sv.team_balance !== false;
-  $('e-daynight').checked = sv.day_night === true; $('e-time').value = sv.time ?? 16; $('e-dayminutes').value = sv.day_minutes ?? 0;
-  $('e-cloud').value = sv.cloud_cover ?? 35; $('e-cloudrate').value = sv.cloud_rate ?? 33; $('e-weather').value = sv.weather ?? 0;
-  $('e-fog').value = sv.fog ?? 0; $('e-groundfog').value = sv.ground_fog ?? 0; $('e-wind').value = sv.wind ?? 30;
-  $('e-cloudheight').value = sv.cloud_height ?? 450;
-  $('e-admins').value = sv.admins ?? '';
   $('e-night-box').style.display = state.night_ops ? '' : 'none';
   $('e-remove').style.display = fresh || state.config.servers.length < 2 ? 'none' : '';
   $('e-save-restart').style.display = fresh ? 'none' : '';
@@ -582,12 +564,7 @@ async function saveEdit(restart) {
     if (servers[editing - 1] && servers[editing - 1][k] !== undefined) kept[k] = servers[editing - 1][k];
   servers[editing - 1] = { ...kept, team_balance: $('e-balance').checked, name: name, description: $('e-description').value.trim(), maps: maps, round_end_delay: Number($('e-delay').value), listed: $('e-listed').checked,
     night: $('e-night').checked, port: port, max_players: Number($('e-max').value), autostart: $('e-autostart').checked,
-    tick: Number($('e-tick').value) || 0,
-    day_night: $('e-daynight').checked, time: Number($('e-time').value) || 0, day_minutes: Number($('e-dayminutes').value) || 0,
-    cloud_cover: Number($('e-cloud').value) || 0, cloud_rate: Number($('e-cloudrate').value) || 0, weather: Number($('e-weather').value) || 0,
-    fog: Number($('e-fog').value) || 0, ground_fog: Number($('e-groundfog').value) || 0, wind: Number($('e-wind').value) || 0,
-    cloud_height: Number($('e-cloudheight').value) || 450,
-    admins: $('e-admins').value.trim() };
+    tick: Number($('e-tick').value) || 0 };
   const n = editing;
   if (!await saveConfig({ servers: servers }, 'Saved')) return;
   $('edit-modal').classList.remove('on');

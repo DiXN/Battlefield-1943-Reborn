@@ -149,8 +149,6 @@ bool TemporalSupport(bool* fsr4, bool* fsr3, bool* xess, bool* dlss) {
 
 // D163: kept whether the renderer runs yet or not (the level is read on a worker).
 void NightLamps(const NightLamp* lamps, uint32_t count) { renderer::NightLamps(lamps, count); }
-void SetWorldState(const WorldState& state) { renderer::SetWorldState(state); }
-WorldState CurrentWorldState() { return renderer::CurrentWorldState(); }
 void NightModels(const NightModelLamps* models, uint32_t count) { renderer::NightModels(models, count); }
 void NightSky(const NightSkyStyle& style) { renderer::NightSky(style); }
 
@@ -237,8 +235,6 @@ void EndViewGeometry() {
 }
 
 void RecordAttachedCameraMove(const float* position, const float* move, const float* placed);  // draw.cpp
-void RecordAdsBlend(float blend);  // dof.cpp
-void SetAdsBlend(float blend) { RecordAdsBlend(blend); }
 void RecordHideCrosshair();  // draw.cpp
 void HideCrosshair() { RecordHideCrosshair(); }
 void RecordWeaponLayerMove(const float* move, float fov_degrees);  // draw.cpp

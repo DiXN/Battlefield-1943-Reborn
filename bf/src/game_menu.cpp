@@ -58,7 +58,6 @@
 #include "projects_art.h"
 #include "steam_shortcut.h"
 #include "comms.h"
-#include "world_sync.h"
 #include "text_filter.h"
 #include "changelog.h"
 #include "update.h"
@@ -450,7 +449,6 @@ void PressStartForPlayer();  // auto_join.cpp
 void MarkExitChosen();
 void LeaveMatch();  // auto_join.cpp: Exit Game, the game's own command (doExitLevel)
 void SuicideNow();  // the game's own suicide command
-void ApplyLodDistance();  // frame_rate.cpp: the level of detail's distance written to the game's settings
 void GameCommand(const std::string& name, const std::string& args);  // auto_join.cpp: a command as the game's menu sends it
 std::map<std::string, std::pair<int, double>> TakeScoreEvents();  // auto_join.cpp: the HUD's score events
 bool LevelLoaded();
@@ -933,7 +931,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 #endif
     if (!open_) PauseTest();
     if (!open_) MenuSteps();  // tests: their bfb and bfa steps act while BF's own screen has the pad
-    ApplyLodDistance();
     if (!open_) ReopenPause();
     // A new match: BF's pause list starts on its first row again.
     if (const int stage = MenuDriverStage(); stage != last_stage_) {
@@ -2335,7 +2332,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     joining_map_ = sv.map;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
-    world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
     tutorial_ = false;
     NotePlayedLevel(sv.map.empty() ? "Wake Island" : sv.map);
@@ -3374,15 +3370,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "With Motion blur on: soldiers, vehicles and other moving things blur by their own "
                           "movement too, not only the camera's. Applies at once.",
                           "native_x_renderer_motion_blur_objects"));
-    // After 0.4.5: the renderer's own depth of field while aiming (NativeXRenderer dof.h); the game's zoom blur is gone.
-    rows.push_back(Toggle("Camera", "ADS depth of field",
-                          "While you aim down the sights, what is close to your eye (the gun) goes softly out of "
-                          "focus and what you aim at stays sharp. Off: everything stays sharp. Applies at once.",
-                          "native_x_renderer_ads_dof"));
-    rows.push_back(Choice("Camera", "Depth of field quality",
-                          "How smooth the out of focus blur is: higher takes more samples for each pixel and costs "
-                          "more. Applies at once.",
-                          "native_x_renderer_dof_quality", {{"Low", "low"}, {"Medium", "medium"}, {"High", "high"}}));
     rows.push_back(Toggle("Camera", "Hit and explosion blur",
                           "The game's screen blur from nearby explosions, bullets and low health. Applies at once.",
                           "bf_motion_blur"));
@@ -3462,42 +3449,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                            {"CMAA 2 Ultra", "cmaa_ultra"}});
     if (temporal) aa_row.disabled = true, aa_row.note = "The upscaler below antialiases the picture itself.";
     rows.push_back(aa_row);
-    // 13 Nov 2026, "Let's build MSAA 2x and 4x": the renderer's own multisampling of the game's view (NativeXRenderer
-    // targets.h), for what is thinner than a pixel at a distance (the radio mast, power lines), which the antialiasing
-    // above cannot put back. Works together with it.
-    // 14 Nov 2026, stage 1 of the day and night work (NativeXRenderer sky.h): a sky of the renderer's own.
-    rows.push_back(Toggle("Sky", "Day and night (experimental)",
-                          "The time of day changes the game's own light: warm and low at dusk, moonlit at night. The "
-                          "sun's direction and the shadows turn with it, and the sky follows, whichever sky is chosen "
-                          "below. In a match whose server keeps its world, the server decides this and sets the "
-                          "hour and the weather. Applies at once.",
-                          "native_x_renderer_day_night"));
-    rows.push_back(Choice("Sky", "Sky",
-                          "The game's original painted sky, or a sky drawn live with volumetric clouds that drift, a "
-                          "sun and a moon, and stars at night. Applies at once.",
-                          "native_x_renderer_sky", {{"Original", "false"}, {"Volumetric clouds", "true"}}));
-    // (The clock and the weather are not here: "take them out of the graphics settings. Players use what the server
-    // sets", 15 Nov 2026. A match's host sets them: Custom match's Weather and time, the admin's F9, a server's page.)
-    rows.push_back(Toggle("Sky", "Lightning",
-                          "A storm's lightning: flashes in the clouds, on the fog and on the ground. Off, the storm "
-                          "keeps its rain, mist and wind without them. Applies at once.",
-                          "native_x_renderer_lightning"));
-    rows.push_back(Toggle("Sky", "Rain on the lens",
-                          "While you stand in the rain, drops gather on the view and run down it; they dry off under "
-                          "cover. Off, the rain only falls in the world. Applies at once.",
-                          "native_x_renderer_rain_lens"));
-    rows.push_back(Toggle("Sky", "Wet weapon and hands",
-                          "What you hold gets wet in the rain, and at once if you go under the sea: darker, with beads "
-                          "of water that stay where they are on it. It dries in about half a minute under cover. "
-                          "Applies at once.",
-                          "native_x_renderer_wetness"));
-    rows.push_back(Choice("Image", "MSAA",
-                          "Draws the edges of everything in the world with 2 or 4 samples in each pixel, so thin "
-                          "distant things (masts, power lines, railings) stay whole instead of breaking into dots, "
-                          "and edges are smoother. Works together with Antialiasing above. Costs frame rate and "
-                          "video memory, 4x more than 2x; the first minutes after a change can stutter while the "
-                          "game's shaders are prepared again. Applies at once.",
-                          "native_x_renderer_msaa", {{"Off", "1"}, {"2x", "2"}, {"4x", "4"}}));
     // The Upscaling section (13 Nov 2026): the temporal upscalers, their mode and their own sharpness. They work on
     // the 3D view before the game's post-processing, with the picture's motion, so they also steady shimmer that the
     // antialiasing above cannot. Not offered since 0.4.4 (kTemporalUpscalers): FSR 1 and NIS below stay.
@@ -3618,14 +3569,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "Your own weapon and hands in first person are not smoothed yet and can still step. "
                           "Animated things are drawn one tick behind. Off is the game's own animation.",
                           "bf_smooth_bones"));
-    // The level of detail's distance (frame_rate.cpp: each model's own switch distances times this).
-    rows.push_back(Slider("Image", "Detail distance",
-                          "How far away objects, buildings, vehicles, trees, bushes and rocks keep their detailed "
-                          "shape before they switch to simpler ones, and how far they are drawn at all. 1.00x is the "
-                          "original game's. 2x carries soldiers, vehicles and ships across the whole map; 8x carries "
-                          "buildings and trees across it too, at a cost in frame rate. Applies within a second.",
-                          "bf_lod_distance", 1.0f, 8.0f, 1.0f,
-                          [](float v) { return fmt::format("{:.1f}\xC3\x97", v); }, 2.0f));
     rows.push_back(Choice("Image", "Texture filtering", "Keeps the ground and distant textures sharp at steep angles.",
                           "anisotropic_override",
                           {{"Game", "-1"}, {"Off", "0"}, {"2\xC3\x97", "2"}, {"4\xC3\x97", "3"}, {"8\xC3\x97", "4"},
@@ -4143,7 +4086,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     rows.push_back(Toggle("HUD", "SMG aiming",
                           "What aiming does with a submachine gun. Zoom In is the game's own: the gun is pulled in "
                           "and you aim with the crosshair. Iron Sight brings the gun's own sights to your eye, as "
-                          "the rifles and pistols do. Only your view changes: where the "
+                          "the rifles and pistols do, without the zoom's blur. Only your view changes: where the "
                           "shots go is the same. Applies at once.",
                           "bf_smg_sights", "Zoom In", "Iron Sight"));
     rows.push_back(Toggle("HUD", "Iron Sight crosshair",
@@ -4581,10 +4524,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (w == "bfleft") PressBf({0x0004}), Passing(0x0004);
       else if (w == "bfrb") PressBf({0x0200}), Passing(0x0200);
       else if (w == "bflb") PressBf({0x0100}), Passing(0x0100);
-      else if (w == "bfy") PressBf({0x8000}), Passing(0x8000);  // in play: the next weapon (the wetness's tests)
-#if defined(BF_DEV_TOOLS)
-      else if (w == "changeteam") ChangeTeamNow();  // the other team's hands and weapons (the wetness's tests)
-#endif
     }
   }
 
@@ -5899,8 +5838,8 @@ void FinishNameCheck() {
 
 bool GraphicsPanelOpen();               // f8_panel.cpp
 void GraphicsPanelPad(uint16_t buttons);  // f8_panel.cpp
-// Our menus, the graphics panel (F8) or the match admin's panel (F9) have the controller and the mouse.
-bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen() || world::AdminPanelOpen(); }
+// Our menus or the graphics panel (F8) have the controller and the mouse.
+bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen(); }
 bool LauncherShowing() { return g_menu && g_menu->ShowingLauncher(); }
 bool LauncherKeyboardLast() { return g_menu && g_menu->KeyboardLast(); }
 // look.cpp (the vehicle mouse's stick): the game's own Vertical look is Inverted (GstInput Scheme2FlipY).

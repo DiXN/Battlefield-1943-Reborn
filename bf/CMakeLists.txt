@@ -69,7 +69,6 @@ set(BF1943_SOURCES
     src/auto_join.cpp
     src/comms.cpp
     src/comms_ui.cpp
-    src/world_sync.cpp
     src/gpu_preference.cpp
     third_party/miniz/miniz.c
     src/server_mode.cpp

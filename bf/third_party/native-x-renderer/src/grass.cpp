@@ -1210,10 +1210,8 @@ bool Grass::Initialize(IRenderDevice* device) {
 }
 
 Grass::Pass* Grass::DrawPass(TEXTURE_FORMAT color, TEXTURE_FORMAT depth, uint8_t depth_func, bool depth_clip,
-                             bool depth_write, uint32_t samples) {
-  // samples: the targets' (host MSAA, targets.h: the tufts are drawn into the view's multisampled twins).
-  auto key = std::make_tuple(int(color), int(depth), int(depth_func),
-                             int(depth_clip) | (depth_write ? 2 : 0) | int(samples) << 8);
+                             bool depth_write) {
+  auto key = std::make_tuple(int(color), int(depth), int(depth_func), int(depth_clip) | (depth_write ? 2 : 0));
   auto it = draw_passes_.find(key);
   if (it != draw_passes_.end()) return it->second.srb ? &it->second : nullptr;
   Pass& pass = draw_passes_[key];
@@ -1223,7 +1221,6 @@ Grass::Pass* Grass::DrawPass(TEXTURE_FORMAT color, TEXTURE_FORMAT depth, uint8_t
   info.GraphicsPipeline.NumRenderTargets = 1;
   info.GraphicsPipeline.RTVFormats[0] = color;
   info.GraphicsPipeline.DSVFormat = depth;
-  info.GraphicsPipeline.SmplDesc.Count = Uint8(std::max(samples, 1u));
   info.GraphicsPipeline.PrimitiveTopology = PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   info.GraphicsPipeline.RasterizerDesc.CullMode = CULL_MODE_NONE;
   info.GraphicsPipeline.RasterizerDesc.ScissorEnable = True;
@@ -1475,10 +1472,8 @@ bool Grass::Apply(IDeviceContext* context, const TerrainFrame& t, ITexture* colo
   }
   const bool use_map = REXCVAR_GET(native_grass_map) && map_state_ != 0;
   // Clipped to each partition's depth range (the game's own draws clamp; the grass is drawn once per partition).
-  const uint32_t target_samples = color_rtv->GetTexture()->GetDesc().SampleCount;
-  Pass* draw = DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, true, target_samples);
-  Pass* draw_fading =
-      DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, false, target_samples);
+  Pass* draw = DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, true);
+  Pass* draw_fading = DrawPass(color_rtv->GetDesc().Format, depth_dsv->GetDesc().Format, t.depth_func, true, false);
   if (!draw || !draw_fading) return refuse("no draw pipeline");
 
   // The camera: the point the world-view-projection maps to clip x = y = w = 0 (solved with Cramer's rule on the

@@ -138,8 +138,6 @@ add_library(native_x_renderer STATIC
     src/framegen.cpp
     src/overlay_motion.cpp
     src/fsr.cpp
-    src/dof.cpp
-    src/sky.cpp
     src/motion_blur.cpp
     src/taa.cpp
     src/xess.cpp

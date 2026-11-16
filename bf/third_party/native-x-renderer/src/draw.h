@@ -137,72 +137,6 @@ class DrawPath {
   // the black pass of the scope's raise) is noticed, so the scope's pass runs right after it, before the HUD. log: each
   // draw after the composite logged (1 a frame without the scope, 2 one with it, 3 after the present: the research).
   void SetScopeFrame(bool watch, int log) { scope_watch_ = watch, scope_log_ = log, scope_logged_ = 0; }
-  // The game's own sky is not drawn (sky.h draws another): Battlefield 1943's sky dome and the haze laid over it.
-  void SetSkipGameSky(bool on) { skip_game_sky_ = on; }
-  // The game's shadow map as what receives shadows last got it (the world's draws, not the first person weapon's):
-  // its view (Battlefield 1943: three cascades, a layer each) and each cascade's transform from the world (three
-  // rows: x and y within -0.5 to 0.5 inside it, z the depth it is compared with; shadowed where z is the greater).
-  // What stands under something along the light: the rain's cover (sky.h). False before any this frame.
-  struct ShadowMap {
-    Diligent::RefCntAutoPtr<Diligent::ITextureView> view;
-    float cascades[3][3][4] = {};
-    uint64_t frame = ~uint64_t(0);
-  };
-  const ShadowMap& shadow_map() const { return shadow_map_; }
-  // The game's sky dome's matrix of this frame (its vertex shader's constants 0 to 3: the dome is set about the
-  // camera, so its linear part is the view's): for the renderer's own sky in a view that shows no terrain (the
-  // terrain's draws are where the sky's camera otherwise comes from). False if no dome was drawn this frame yet.
-  bool DomeCamera(float m[4][4]) const;
-  // Wetness on the first person weapon and hands ("weapons and objects drip and have a realistic wetness that dries
-  // when not directly in rain or water", tried there first; 14 Nov 2026). Their colour texture (Battlefield 1943: the
-  // pixel shader's texture 2, 1024 x 1024 DXT1) is drawn with a wet copy of itself in its place: darker, with beads
-  // of water that stay where they are on the model, since they are in its texture. The copies are made by the
-  // renderer (Sky::WetCopy) between draws: what is wanted is asked here, and given back with SetWetCopy.
-  struct WetRequest {
-    Diligent::RefCntAutoPtr<Diligent::ITextureView> original, copy;  // copy: the one to draw over, if there is one
-    bool skin = false;  // the hands': wet, without drops
-  };
-  // How many beads there are (0 to 1) and how strongly the wetness shows (0 to 1; drying fades it); tint_slot (a
-  // developer's check, -1: none): that texture of the weapon's pixel shaders is drawn red instead.
-  void SetWeaponWet(float count, float show, int tint_slot, double seconds) {
-    wet_count_ = count, wet_show_ = show, wet_tint_ = tint_slot, wet_seconds_ = seconds;
-  }
-  double wet_seconds() const { return wet_seconds_; }
-  bool TakeWetRequests(std::vector<WetRequest>& out);
-  void SetWetCopy(Diligent::ITextureView* original, Diligent::ITextureView* copy);
-  float wet_count() const { return wet_count_; }
-  float wet_show() const { return wet_show_; }
-  int wet_tint() const { return wet_tint_; }
-  // The hash of the pixel shader a draw with this program will use (0: none), before the draw is made.
-  uint64_t PixelShaderHash(const StateTracker::Program& program);
-  // Battlefield 1943's outdoor light, changed where its shaders get it (14 Nov 2026, "override the light values
-  // where the renderer hands them to the game's shaders"): the sun's colour and the sky's and the ground's light are
-  // float constants of 737 of its shaders (bf_lights.inc, from the shaders' own constant tables), and each is
-  // multiplied by these as the constants are uploaded for a draw. The sun's direction and the shadows stay the game's.
-  struct OutdoorLight {
-    bool on = false;
-    float key[3] = {1.0f, 1.0f, 1.0f};     // the sun's light (outdoorLightKeyColor and its specular colour)
-    float sky[3] = {1.0f, 1.0f, 1.0f};     // the sky's (outdoorLightTopColor)
-    float ground[3] = {1.0f, 1.0f, 1.0f};  // the ground's (outdoorLightBottomColor)
-    // The sun (or the moon) moved ("Yes, move the sun"): where the light comes from now, radians, the azimuth from
-    // the world's +z toward +x. The shading's direction is replaced, and the game's shadow pass is turned with it
-    // (draw.cpp, LatchShadowTurn).
-    bool turn = false;
-    float azimuth = 0.0f, elevation = 0.0f;
-    // The game's own painted sky is drawn (not sky.h's): its layers' colorScale is multiplied by the sky's light.
-    bool game_sky = false;
-    float painted[3] = {1.0f, 1.0f, 1.0f};
-    // 0 to 1: with the shadows turned, they fall from toward 80 degrees up: an overcast's, straight under things, and
-    // the rain's cover (sky.h) is then what is under something from nearly straight above.
-    float steep = 0.0f;
-  };
-  // Once a frame, before its draws.
-  void SetOutdoorLight(const OutdoorLight& light);
-  // The direction the game's shaders last got as the sun's (outdoorLightDir, the world's); false before any.
-  bool GameLightDir(float out[3]) const {
-    for (int i = 0; i < 3; ++i) out[i] = game_light_dir_[i];
-    return game_light_dir_valid_;
-  }
   // Whether the last draw was the game's scoped picture (asked once after each draw).
   bool TakeScopeMaskDrawn() {
     const bool drawn = scope_mask_drawn_;
@@ -357,7 +291,6 @@ class DrawPath {
   bool DrawInternal(const StateTracker::Program& vertex_program, const StateTracker::Program& pixel_program,
                     std::span<const Copy> copies, const std::array<HostTarget*, 5>& targets);
   // ShaderCache::Get and GetHostShader through the caches below (D81).
-  void NoteShadowMap(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view);
   rex::graphics::SpirvShader* FindShader(rex::graphics::xenos::ShaderType type, const StateTracker::Program& program,
                                          bool* new_failure);
   Diligent::IShader* FindHostShader(rex::graphics::SpirvShader& shader, uint64_t modification, bool& pending);
@@ -515,8 +448,6 @@ class DrawPath {
   // D154: a draw of a model placed from another camera moved onto the frame's (in the mapped constants).
   void MoveAttached(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped);
   void MoveWeaponLayer(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, uint8_t* mapped);
-  void ApplyOutdoorLight(uint64_t shader_hash, uint32_t stage, const uint32_t* regs, uint32_t first,
-                         const uint64_t* float_bitmap, uint8_t* mapped);
   uint64_t attached_moved_ = 0, attached_seen_ = 0;  // since the last log
   Blitter* blit_ = nullptr;  // D155
   double tick_why_[8] = {};
@@ -559,55 +490,6 @@ class DrawPath {
   struct {
     bool msaa = true, one = false;
   } alpha_to_coverage_blend_;
-  bool skip_game_sky_ = false;
-  OutdoorLight outdoor_light_;
-  float game_light_dir_[3] = {};
-  bool game_light_dir_valid_ = false;
-  // The shadows turned with the light. Learned from the last frame's draws: the three cascades' transforms as what
-  // receives shadows got them, and the camera's place. Latched once a frame (LatchShadowTurn): per cascade the
-  // matrix a caster's clip position is multiplied by, the same for a receiver's shadow coordinate, and the inverse
-  // of the cascade's linear part (which cascade a caster's matrix belongs to).
-  float draw_shadow_[3][3][4] = {};  // the draw's own, kept if its pixel shader tells the camera's place
-  bool draw_shadow_valid_ = false;
-  uint64_t shadow_turn_frame_ = 0;
-  bool shadow_turn_frame_valid_ = false;
-  float dome_m_[4][4] = {};
-  uint64_t dome_frame_ = ~uint64_t(0);
-  ShadowMap shadow_map_;
-  struct WetCopy {
-    Diligent::RefCntAutoPtr<Diligent::ITextureView> original, copy;
-    float count = -1.0f, show = -1.0f;  // what the copy was made with
-    bool skin = false;
-    uint64_t used = 0;                  // the frame it was last drawn with or asked for
-    double seconds = -1.0;              // and when: the water runs, so the copy is made anew some 15 times a second
-    bool asked = false;
-  };
-  std::vector<WetCopy> wet_copies_;
-  float wet_count_ = 0.0f, wet_show_ = 0.0f;
-  double wet_seconds_ = 0.0;
-  int wet_tint_ = -1;
-  Diligent::IDeviceObject* WetView(uint32_t stage, uint32_t fetch_constant, Diligent::IDeviceObject* view,
-                                   const rex::graphics::SpirvShader& pixel_shader, const rex::graphics::RegisterFile& regs);
-  // This draw is the first person weapon's or hands' (ClassifyWeapon): in the nearest depth range, with another
-  // field of view than the world's (the world's: the last seen in a draw of a farther range).
-  bool weapon_draw_ = false;
-  uint32_t weapon_constants_ = 0;  // how many float constants the weapon's draw's vertex shader takes (bones: many)
-  float world_py_ = 0.0f;
-  uint64_t world_py_frame_ = ~uint64_t(0);
-  void ClassifyWeapon(const uint32_t* regs, uint32_t first, const uint64_t* float_bitmap, float z_min, float z_max);
-  bool shadow_map_pending_ = false;  // this draw's pixel shader samples it with the world's transforms
-  float seen_shadow_[3][3][4] = {};
-  bool seen_shadow_valid_ = false;
-  float seen_camera_[3] = {};
-  bool seen_camera_valid_ = false;
-  struct ShadowTurn {
-    bool on = false;
-    float dir[4] = {};
-    float caster[3][3][4] = {};
-    float receiver[3][3][4] = {};
-    float inverse[3][3][3] = {};
-  } shadow_turn_;
-  void LatchShadowTurn();
   ObjectMotion object_motion_;
   Diligent::RefCntAutoPtr<Diligent::IShader> motion_pixel_shader_;  // created on first use
   bool EnsureMotionPixelShader();
