@@ -1260,6 +1260,94 @@
     }
   }
 #endif
+  // The on screen keys, QWERTY (TekRantGaming, 8 Nov): the numbers, three rows of letters with the underscore, then
+  // Capitals and Done. Ten columns; a key's span is in columns. One keyboard for every page that takes text from a
+  // controller: the soldier name, and the Custom Match page's server name and password (16 Nov 2026). `space`: the
+  // last row with a space bar between Capitals and Done (the match's name).
+  struct OnKey {
+    const char* label;
+    char ch;   // the character typed, or 0: a special key (kind)
+    int kind;  // 0 a character, 1 Delete, 2 Capitals, 3 Done
+    int row, col, span;
+  };
+  static const std::vector<OnKey>& OnKeys(bool space) {
+    static const auto make = [](bool with_space) {
+      std::vector<OnKey> v;
+      static const char* kRows[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL_", "ZXCVBNM"};
+      static char labels[40][2] = {};
+      int n = 0;
+      for (int r = 0; r < 4; ++r)
+        for (int c = 0; kRows[r][c]; ++c, ++n) {
+          labels[n][0] = kRows[r][c];
+          v.push_back({labels[n], kRows[r][c], 0, r, c, 1});
+        }
+      v.push_back({"DEL", 0, 1, 3, 7, 3});
+      if (with_space) {
+        v.push_back({"CAPS", 0, 2, 4, 0, 3});
+        v.push_back({"SPACE", ' ', 0, 4, 3, 4});
+        v.push_back({"DONE", 0, 3, 4, 7, 3});
+      } else {
+        v.push_back({"CAPS", 0, 2, 4, 0, 5});
+        v.push_back({"DONE", 0, 3, 4, 5, 5});
+      }
+      return v;
+    };
+    static const std::vector<OnKey> kPlain = make(false), kSpaced = make(true);
+    return space ? kSpaced : kPlain;
+  }
+  // The keys drawn with their title at `k0` and `hint` under them; while `open`, the pad moves `key` along the row,
+  // and up or down to the key nearest above or below. Returns the key clicked, or pressed with A while open, or -1.
+  int OnScreenKeys(ImDrawList* d, const Stage& st, ImVec2 k0, const Input& in, int& key, bool open, bool caps, bool space,
+                   const char* hint) {
+    const kit::Fonts& f = kit::GetFonts();
+    const std::vector<OnKey>& keys = OnKeys(space);
+    const int all = int(keys.size());
+    if (key < 0 || key >= all) key = 10;
+    kit::Spaced(d, f.typed, st(14), k0, kit::kKhakiText, "ON SCREEN KEYBOARD", st(2));
+    const float cell = st(36), gap = st(4.5f), kh = st(40);
+    int clicked = -1;
+    for (int k = 0; k < all; ++k) {
+      const OnKey& on = keys[size_t(k)];
+      const ImVec2 c0(k0.x + float(on.col) * (cell + gap), k0.y + st(26) + float(on.row) * (kh + gap));
+      const ImVec2 c1(c0.x + float(on.span) * cell + float(on.span - 1) * gap, c0.y + kh);
+      std::string label = on.label;
+      if (std::isalpha(static_cast<unsigned char>(on.ch)) && !caps)
+        label[0] = char(std::tolower(static_cast<unsigned char>(label[0])));
+      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+      const bool sel = open && k == key;
+      d->AddRectFilled(c0, c1, sel ? kit::kGreen : hover ? kit::kPaper : kit::kPaperCard);
+      if (on.kind == 2 && caps) d->AddRectFilled(ImVec2(c0.x, c1.y - st(3)), c1, sel ? kit::kCream : kit::kGreen);
+      const float size = on.kind == 0 && on.ch != ' ' ? st(18) : st(15);
+      d->AddText(f.ui, size, ImVec2((c0.x + c1.x - kit::TextWidth(f.ui, size, label)) * 0.5f, c0.y + (kh - size * 1.48f) * 0.5f),
+                 sel ? IM_COL32(255, 255, 255, 255) : kit::kInk, label.c_str());
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = k, key = k;
+    }
+    if (hint)
+      kit::Wrapped(d, f.typed, st(13), ImVec2(k0.x, k0.y + st(26) + 5 * (kh + gap) + st(6)), kit::kKhakiText, hint, st(400));
+    if (!open) return clicked;
+    const OnKey& now = keys[size_t(key)];
+    if (in.left || in.right) {
+      std::vector<int> row;
+      for (int k = 0; k < all; ++k)
+        if (keys[size_t(k)].row == now.row) row.push_back(k);
+      const int at = int(std::find(row.begin(), row.end(), key) - row.begin()), n = int(row.size());
+      key = row[size_t((at + (in.right ? 1 : n - 1)) % n)];
+    }
+    if (in.up || in.down) {
+      const int to = (now.row + (in.down ? 1 : 4)) % 5;
+      const float mid = float(now.col) + float(now.span) * 0.5f;
+      int best = key;
+      float best_d = 1e9f;
+      for (int k = 0; k < all; ++k) {
+        if (keys[size_t(k)].row != to) continue;
+        const float dist = std::fabs(float(keys[size_t(k)].col) + float(keys[size_t(k)].span) * 0.5f - mid);
+        if (dist < best_d) best_d = dist, best = k;
+      }
+      key = best;
+    }
+    if (in.accept) clicked = key;
+    return clicked;
+  }
   void AccountPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("account");
     const Stage st = StageOf(io);
@@ -1380,83 +1468,12 @@
       }
       AccountBox(d, st, ImVec2(x, y), w);
     }
-    // The on screen keys, QWERTY (TekRantGaming, 8 Nov): the numbers, three rows of letters with the underscore, then
-    // Capitals and Done. Ten columns; a key's span is in columns.
-    struct OnKey {
-      const char* label;
-      char ch;  // the character typed, or 0: a special key (kind)
-      int kind;  // 0 a character, 1 Delete, 2 Capitals, 3 Done
-      int row, col, span;
-    };
-    static const std::vector<OnKey> kOnKeys = [] {
-      std::vector<OnKey> v;
-      static const char* kRows[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL_", "ZXCVBNM"};
-      static char labels[40][2] = {};
-      int n = 0;
-      for (int r = 0; r < 4; ++r)
-        for (int c = 0; kRows[r][c]; ++c, ++n) {
-          labels[n][0] = kRows[r][c];
-          v.push_back({labels[n], kRows[r][c], 0, r, c, 1});
-        }
-      v.push_back({"DEL", 0, 1, 3, 7, 3});
-      v.push_back({"CAPS", 0, 2, 4, 0, 5});
-      v.push_back({"DONE", 0, 3, 4, 5, 5});
-      return v;
-    }();
-    const int kAll = int(kOnKeys.size());
-    if (name_key_ < 0 || name_key_ >= kAll) name_key_ = 10;
-    const ImVec2 k0 = st.P(846, 150);
-    kit::Spaced(d, f.typed, st(14), k0, kit::kKhakiText, "ON SCREEN KEYBOARD", st(2));
-    const float cell = st(36), gap = st(4.5f), kh = st(40);
-    auto key_rect = [&](int k, ImVec2& c0, ImVec2& c1) {
-      const OnKey& key = kOnKeys[k];
-      c0 = ImVec2(k0.x + float(key.col) * (cell + gap), k0.y + st(26) + float(key.row) * (kh + gap));
-      c1 = ImVec2(c0.x + float(key.span) * cell + float(key.span - 1) * gap, c0.y + kh);
-    };
-    int clicked = -1;
-    for (int k = 0; k < kAll; ++k) {
-      ImVec2 c0, c1;
-      key_rect(k, c0, c1);
-      const OnKey& key = kOnKeys[k];
-      std::string label = key.label;
-      if (std::isalpha(static_cast<unsigned char>(key.ch)) && !name_caps_)
-        label[0] = char(std::tolower(static_cast<unsigned char>(label[0])));
-      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
-      const bool sel = name_keys_ && k == name_key_;
-      d->AddRectFilled(c0, c1, sel ? kit::kGreen : hover ? kit::kPaper : kit::kPaperCard);
-      if (key.kind == 2 && name_caps_) d->AddRectFilled(ImVec2(c0.x, c1.y - st(3)), c1, sel ? kit::kCream : kit::kGreen);
-      const float size = key.kind == 0 ? st(18) : st(15);
-      d->AddText(f.ui, size, ImVec2((c0.x + c1.x - kit::TextWidth(f.ui, size, label)) * 0.5f, c0.y + (kh - size * 1.48f) * 0.5f),
-                 sel ? IM_COL32(255, 255, 255, 255) : kit::kInk, label.c_str());
-      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = k, name_key_ = k;
-    }
-    kit::Wrapped(d, f.typed, st(13), ImVec2(k0.x, k0.y + st(26) + 5 * (kh + gap) + st(6)), kit::kKhakiText,
-                 "With a keyboard, just type. With a controller, move onto these keys with the D-pad or A.", st(400));
+    const std::vector<OnKey>& kOnKeys = OnKeys(false);
+    int clicked = OnScreenKeys(d, st, st.P(846, 150), in, name_key_, name_keys_, name_caps_, false,
+                               "With a keyboard, just type. With a controller, move onto these keys with the D-pad or A.");
     StampCorner(d, st);
-    // The pad on the keys: along the row, and up or down to the key nearest above or below.
     const bool pad_accept = in.accept && !enter;
     if (name_keys_) {
-      const OnKey& now = kOnKeys[name_key_];
-      if (in.left || in.right) {
-        std::vector<int> row;
-        for (int k = 0; k < kAll; ++k)
-          if (kOnKeys[k].row == now.row) row.push_back(k);
-        const int at = int(std::find(row.begin(), row.end(), name_key_) - row.begin()), n = int(row.size());
-        name_key_ = row[(at + (in.right ? 1 : n - 1)) % n];
-      }
-      if (in.up || in.down) {
-        const int to = (now.row + (in.down ? 1 : 4)) % 5;
-        const float mid = float(now.col) + float(now.span) * 0.5f;
-        int best = name_key_;
-        float best_d = 1e9f;
-        for (int k = 0; k < kAll; ++k) {
-          if (kOnKeys[k].row != to) continue;
-          const float dist = std::fabs(float(kOnKeys[k].col) + float(kOnKeys[k].span) * 0.5f - mid);
-          if (dist < best_d) best_d = dist, best = k;
-        }
-        name_key_ = best;
-      }
-      if (in.accept) clicked = name_key_;
       if (in.x) NameDelete();
       if (in.back) name_keys_ = false, in.back = false;
     } else if (pad_accept || in.up || in.down || in.left || in.right) {
@@ -2573,7 +2590,39 @@
   // The row takes typing now: the name, or the port when it is the player's to choose.
   bool PmPortTyped() const { return pm_lan_ || !pm_upnp_; }
   bool PmTyping() const {
-    return !pm_hosting_ && (pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && PmPortTyped()));
+    return !pm_hosting_ && (pm_edit_ >= 0 || pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && PmPortTyped()));
+  }
+  // The server name and the password from a controller (TekRantGaming, 16 Nov 2026: "when controller A is pressed on
+  // server name bring up on screen keyboard to allow editing and same with password edit"): A on either row opens
+  // the on screen keys (OnScreenKeys, the soldier name's) over the map's picture with a copy of the text; DONE or
+  // Start writes it back, B leaves it as it was. The password shows as stars unless Y shows it.
+  int pm_edit_ = -1;  // the row the keys edit (kPmName or kPmPassText), or -1
+  std::string pm_edit_text_;
+  int pm_edit_key_ = 10;
+  bool pm_edit_caps_ = false, pm_pass_shown_ = false;
+  // The rows' limits, the same for the keyboard's typing and the on screen keys.
+  static size_t PmMost(int row) { return row == kPmName ? 32 : row == kPmPassText ? 24 : 5; }
+  static bool PmCharOk(int row, unsigned c) {
+    return row == kPmName       ? (c >= 32 && c < 127 && c != '"' && c != '\\')
+           : row == kPmPassText ? (c > 32 && c < 127 && c != '"' && c != '\\')
+                                : (c >= '0' && c <= '9');
+  }
+  std::string PmPassShown(const std::string& pass) const { return pm_pass_shown_ ? pass : std::string(pass.size(), '*'); }
+  void PmEditOpen(int row) {
+    pm_edit_ = row, pm_edit_key_ = 10;
+    pm_edit_text_ = row == kPmName ? pm_name_ : pm_pass_;
+    pm_edit_caps_ = row == kPmName && pm_edit_text_.empty();
+    REXLOG_INFO("BF private match: the on screen keys open on the {}", row == kPmName ? "server name" : "password");
+  }
+  void PmEditClose(bool save) {
+    if (pm_edit_ < 0) return;
+    if (save) {
+      (pm_edit_ == kPmName ? pm_name_ : pm_pass_) = pm_edit_text_;
+      SavePrivateMatchChoices();
+    }
+    REXLOG_INFO("BF private match: the on screen keys {} the {} ({} characters)", save ? "saved" : "cancelled",
+                pm_edit_ == kPmName ? "server name" : "password", (pm_edit_ == kPmName ? pm_name_ : pm_pass_).size());
+    pm_edit_ = -1;
   }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
@@ -2595,6 +2644,7 @@
     pm_pass_ = settings_.Get("private_match_password", "");
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
+    pm_edit_ = -1;  // the on screen keys never left open from an earlier visit
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2766,8 +2816,29 @@
       return;
     }
     // The prompts first: a click on one is that button's press for the rest of the frame.
-    std::vector<Cue> cues = {{kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"}, {kit::Button::kB, "BACK"}};
+    const bool editing = pm_edit_ >= 0;
+    const bool text_row = pm_row_ == kPmName || pm_row_ == kPmPassText;
+    std::vector<Cue> cues;
+    if (editing) {
+      cues = {{kit::Button::kA, "TYPE"}, {kit::Button::kX, "DELETE", "Backspace"}};
+      if (pm_edit_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
+      cues.push_back({kit::Button::kStart, "DONE", "", true});
+      cues.push_back({kit::Button::kB, "CANCEL"});
+    } else {
+      // On the name and the password, A opens the on screen keys; the keyboard types straight into them (no Edit, as
+      // the soldier name's page).
+      if (!text_row) cues.push_back({kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"});
+      else if (device_ != Device::kKeyboard) cues.push_back({kit::Button::kA, "EDIT"});
+      if (pm_row_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
+      cues.push_back({kit::Button::kB, "BACK"});
+    }
     Prompts(d, st, st.P(48, 662), cues, in, 15);
+    // F2 (the keyboard's Y here: R types a letter) shows or hides the password.
+    if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && (pm_row_ == kPmPassText || pm_edit_ == kPmPassText)) in.y = true;
+    // While the keys are open, the page's own rows take nothing: the keys get this frame's presses (ekeys, below).
+    Input ekeys;
+    if (editing) ekeys = in, in = {};
+    if (!editing && in.y && pm_row_ == kPmPassText) pm_pass_shown_ = !pm_pass_shown_;
     // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
     std::vector<int> order = {kPmName, kPmPass};
@@ -2789,16 +2860,17 @@
       ImGuiContext& g = *ImGui::GetCurrentContext();
       g.PlatformImeData.WantTextInput = true;
       g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
-      std::string& text = pm_row_ == kPmName ? pm_name_ : pm_row_ == kPmPassText ? pm_pass_ : pm_port_text_;
-      const size_t most = pm_row_ == kPmName ? 32 : pm_row_ == kPmPassText ? 24 : 5;
+      // With the on screen keys open: their copy (a real keyboard's typing then closes them with it kept, as on the
+      // soldier name's page, and goes on in the row).
+      const int row = editing ? pm_edit_ : pm_row_;
+      std::string& text = editing ? pm_edit_text_ : pm_row_ == kPmName ? pm_name_ : pm_row_ == kPmPassText ? pm_pass_ : pm_port_text_;
+      bool typed = false;
       for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
         const ImWchar c = io.InputQueueCharacters[i];
-        const bool ok = pm_row_ == kPmName       ? (c >= 32 && c < 127 && c != '"' && c != '\\')
-                        : pm_row_ == kPmPassText ? (c > 32 && c < 127 && c != '"' && c != '\\')
-                                                 : (c >= '0' && c <= '9');
-        if (ok && text.size() < most) text += char(c);
+        if (PmCharOk(row, unsigned(c)) && text.size() < PmMost(row)) text += char(c), typed = true;
       }
       if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) text.pop_back();
+      if (editing && typed) PmEditClose(true);
       in.left = in.right = false;
     }
     auto change = [&](int row, int step) {
@@ -2832,7 +2904,7 @@
       const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
       const float title_h = i == kPmName ? st(38) : h;
       const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
-      const bool hover = ImGui::IsMouseHoveringRect(r0, r1);
+      const bool hover = !editing && ImGui::IsMouseHoveringRect(r0, r1);
       if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       const bool sel = i == pm_row_;
@@ -2902,11 +2974,11 @@
       } else if (i == kPmPass) {
         draw_switch(pm_pass_on_);
       } else if (i == kPmPassText) {
-        // The password's field, the row's width from the tick mark: shown as typed (it is the host's own).
+        // The password's field, the row's width from the tick mark: stars, or as typed while Y (F2) shows it.
         const ImVec2 f0(r0.x + st(76), r0.y + st(4)), f1(right, r1.y - st(4));
         d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
         d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
-        const std::string shown = pm_pass_.empty() && !sel ? std::string("Type a password") : pm_pass_ + (sel ? caret : "");
+        const std::string shown = pm_pass_.empty() && !sel ? std::string("Type a password") : PmPassShown(pm_pass_) + (sel ? caret : "");
         d->PushClipRect(f0, f1, true);
         d->AddText(f.ui_bold, st(10.5f), ImVec2(f0.x + st(8), f0.y + (f1.y - f0.y - st(10.5f) * 1.45f) * 0.5f),
                    pm_pass_.empty() && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
@@ -2943,7 +3015,8 @@
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the Reborn servers.",
-          "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
+          "The match's name in the server browser. Type it with the keyboard, or A for the on screen keys; left empty "
+          "it is your name's match.",
           "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
           "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "
           "on their browser's LAN tab (or they type your PC's network address in Direct connect).",
@@ -2968,7 +3041,14 @@
       const bool error = !pm_error_.empty();
       kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
                    error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
-      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH")) clicked = kPmHost;
+      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH") && !editing) clicked = kPmHost;
+    }
+    if (pm_edit_ >= 0) PrivateMatchKeys(d, st, ImVec2(ha.x, ha.y), ImVec2(hb.x, band.y), ekeys);
+    // A (not the keyboard's Enter) on the name or the password opens the on screen keys; a click there selects the
+    // row for typing, as before.
+    if (in.accept && !accept_from_key_ && (pm_row_ == kPmName || pm_row_ == kPmPassText)) {
+      PmEditOpen(pm_row_);
+      in.accept = false;
     }
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {
@@ -2977,6 +3057,67 @@
       else change(clicked, 1);
     }
     if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+  }
+
+  // The on screen keys over the map's picture (a..b) while the server name or the password is edited: its field with
+  // the copy being typed (the password in stars unless shown), the keys under it. `k`: this frame's presses.
+  void PrivateMatchKeys(ImDrawList* d, const Stage& st, ImVec2 a, ImVec2 b, const Input& k) {
+    const kit::Fonts& f = kit::GetFonts();
+    const bool name = pm_edit_ == kPmName;
+    d->AddRectFilled(a, b, IM_COL32(13, 15, 11, 255));  // opaque: the picture's chip showed through the heading
+    d->AddRect(a, b, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
+    const float x = a.x + st(30), w = b.x - a.x - st(60);
+    kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(x, a.y + st(18)), kit::kCream,
+                  name ? "SERVER NAME" : "PASSWORD");
+    const ImVec2 n0(x, a.y + st(48)), n1(x + w, a.y + st(92));
+    d->AddRectFilled(n0, n1, kit::kPaperLight);
+    d->AddRect(n0, n1, kit::kGreen, 0, 0, st(3));
+    const std::string shown = name ? pm_edit_text_ : PmPassShown(pm_edit_text_);
+    const std::string count = std::to_string(pm_edit_text_.size()) + " / " + std::to_string(PmMost(pm_edit_));
+    const float count_w = kit::TextWidth(f.typed, st(12), count);
+    d->PushClipRect(n0, ImVec2(n1.x - count_w - st(24), n1.y), true);
+    d->AddText(f.typed, st(22), ImVec2(x + st(12), n0.y + st(9)), kit::kInk, shown.c_str());
+    if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
+      const float cx = x + st(14) + kit::TextWidth(f.typed, st(22), shown);
+      d->AddRectFilled(ImVec2(cx, n0.y + st(9)), ImVec2(cx + st(2.5f), n1.y - st(9)), kit::kInk);
+    }
+    d->PopClipRect();
+    d->AddText(f.typed, st(12), ImVec2(n1.x - st(12) - count_w, n0.y + st(15)), kit::kInkFaint, count.c_str());
+    kit::Spaced(d, f.typed, st(8), ImVec2(x, n1.y + st(9)), kit::kKhakiDim,
+                name ? "UP TO 32 LETTERS, DIGITS, SPACES OR SIGNS. LEFT EMPTY, IT IS YOUR NAME'S MATCH."
+                     : pm_pass_shown_ ? "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y HIDES IT."
+                                      : "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y SHOWS IT.",
+                st(1.5f));
+    // The keys, as the soldier name's: their width is ten keys (36 each, 4.5 apart).
+    const ImVec2 k0((a.x + b.x) * 0.5f - st(200), a.y + st(126));
+    Input keys = k;
+    if (k.start) keys.accept = false;  // Start is A too on this page: here it is Done only
+    const int clicked = OnScreenKeys(d, st, k0, keys, pm_edit_key_, true, pm_edit_caps_, name,
+                                     "With a keyboard, just type: the keys close and the row takes it.");
+    std::string& text = pm_edit_text_;
+    if (clicked >= 0) {
+      const OnKey& key = OnKeys(name)[size_t(clicked)];
+      if (key.kind != 0 || name) REXLOG_INFO("BF private match: on screen key {}", key.label);  // not the password's
+      if (key.kind == 0) {
+        char c = key.ch;
+        if (std::isalpha(static_cast<unsigned char>(c)))
+          c = pm_edit_caps_ ? char(std::toupper(static_cast<unsigned char>(c))) : char(std::tolower(static_cast<unsigned char>(c)));
+        if (PmCharOk(pm_edit_, static_cast<unsigned char>(c)) && text.size() < PmMost(pm_edit_)) text += c;
+        // The name's first letter a capital, then small ones (as the soldier name's keys).
+        if (name && std::isalpha(static_cast<unsigned char>(c)) && pm_edit_caps_ && text.size() == 1) pm_edit_caps_ = false;
+      } else if (key.kind == 1) {
+        if (!text.empty()) text.pop_back();
+      } else if (key.kind == 2) {
+        pm_edit_caps_ = !pm_edit_caps_;
+      } else {
+        PmEditClose(true);
+        return;
+      }
+    }
+    if (k.x && !text.empty()) text.pop_back();
+    if (k.y && !name) pm_pass_shown_ = !pm_pass_shown_;
+    if (k.start) PmEditClose(true);
+    else if (k.back) PmEditClose(false);
   }
 
   // While our server starts: its steps in the rail (ra..rb under the heading), the wait on the band (band..hb), then
