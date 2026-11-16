@@ -29,6 +29,10 @@ def main():
         # The Linux AppImage's icon: drawn from text by tools/linux/make_icon.py (no game art).
         elif lower == 'bf/data/linux/bf1943-reborn.png':
             pass
+        # Microsoft's WebView2 SDK for the news window's video (TekRantGaming, 16 Nov 2026: "Allow it in git"): its
+        # header (over 1 MB) and the loader DLL Microsoft signs, these two files only.
+        elif lower in ('bf/third_party/webview2/include/webview2.h', 'bf/third_party/webview2/x64/webview2loader.dll'):
+            continue
         elif lower.endswith(FORBIDDEN_EXT) or lower.startswith(tuple(d.lower() for d in FORBIDDEN_DIRS)):
             bad.append(name)
             continue

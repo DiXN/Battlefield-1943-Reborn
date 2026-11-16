@@ -61,6 +61,8 @@
 #include "discord_presence.h"
 #include "text_filter.h"
 #include "changelog.h"
+#include "news.h"
+#include "news_video.h"
 #include "update.h"
 
 #if defined(_WIN32)
@@ -993,7 +995,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool in_match = MenuDriverStage() == 5 && page_ != Page::kJoining;  // the joining page is ours to its end
       const bool our_menus = page_ != Page::kIntro && !in_match && (pre_game_ || open_);
       bf1943::SetGameAudioMuted(our_menus && !pre_game_);
-      const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music);
+      // (Quiet while the news' video plays with its sound, game_menu_news.inc.)
+      const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music) &&
+                        !(news_open_ && !news_muted_ && news::VideoShowing());
       PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
@@ -1169,7 +1173,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
     const bool over_popup =
         update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_ ||
-        notice_popup_;
+        notice_popup_ || news_open_;
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
@@ -1215,6 +1219,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (tick_popup_) TickPopup(d, io, popup_in);
       else if (pw_popup_) PasswordPopup(d, io, popup_in);
       else if (whats_new_open_) WhatsNewPopup(d, io, popup_in);
+      else if (news_open_) NewsPopup(d, io, popup_in);
+      // The news' video is a window of its own over ours: hidden while another pop-up is in front of the news.
+      if (news_open_ && (update_popup_ || notice_popup_ || new_version_popup_ || own_popup_ || exp_popup_ || tick_popup_ ||
+                         pw_popup_ || whats_new_open_))
+        news::VideoHide();
     }
     // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
     if (kit::WatermarkOn() && open_ &&
@@ -1279,6 +1288,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                IM_COL32(16, 18, 22, 60), IM_COL32(8, 10, 14, 0));
   }
   bool InMatch() const { return MenuDriverStage() == 5 && !(page_ == Page::kJoining); }
+
   // Discord Rich Presence (discord_presence.cpp): what the player is doing, from the menus' own state, a few times a
   // second (the presence thread sends only changes, spaced out). Never an address or another player's name.
   std::string presence_server_;    // the joined server's name as shown (Join; empty: an address in it)
@@ -5135,6 +5145,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
 
 #include "game_menu_launcher.inc"
 #include "game_menu_home.inc"
+#include "game_menu_news.inc"
 #include "game_menu_browser.inc"
 #include "game_menu_settings.inc"
 #include "game_menu_setup.inc"

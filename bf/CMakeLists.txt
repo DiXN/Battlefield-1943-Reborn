@@ -44,6 +44,8 @@ set(BF1943_SOURCES
     src/launcher_kit.cpp
     src/steam_shortcut.cpp
     src/projects_art.cpp
+    src/news.cpp
+    src/news_video.cpp
     src/picture_decode.cpp
     src/update.cpp
     src/update_files.cpp
@@ -207,6 +209,15 @@ set_source_files_properties(src/picture_decode.cpp PROPERTIES INCLUDE_DIRECTORIE
 set_source_files_properties(src/gpu_preference.cpp PROPERTIES INCLUDE_DIRECTORIES
     "${CMAKE_CURRENT_SOURCE_DIR}/../sdk/src-bf/thirdparty/renderdoc")
 native_x_renderer_copy_runtime(bf1943)
+# The news window's embedded YouTube player (src/news_video.cpp, docs/NEWS.md): the WebView2 SDK's header, and
+# Microsoft's signed loader beside the exe (loaded at run time; without it the news shows thumbnails). Windows only.
+if(WIN32)
+    set_source_files_properties(src/news_video.cpp PROPERTIES INCLUDE_DIRECTORIES
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2/include")
+    add_custom_command(TARGET bf1943 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webview2/x64/WebView2Loader.dll" $<TARGET_FILE_DIR:bf1943>)
+endif()
 
 # Our data next to the exe: data/shaders/bf1943-shaders.list and the pipeline descriptions (src/shader_prep.cpp),
 # our menus' font (Oswald, SIL Open Font License 1.1: fonts/OFL.txt), BF's menu lettering's look, and the launcher's
