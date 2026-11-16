@@ -40,12 +40,33 @@
   }
   // The tag in the box checked for the name about to be saved (false, with the error line saying why).
   bool TagCheck(const std::string& name) {
-    const text_filter::TagProblem p = text_filter::CheckTag(tag_text_, name);
+    text_filter::TagProblem p = text_filter::CheckTag(tag_text_, name);
+    // The developers' own tag, typed by the player whose protected name this is (its account on this PC): asked for
+    // as Dev, and the backend decides (it gives Dev to the team's names only and tells anyone else why; TekRantGaming,
+    // 16 Nov 2026: the page refused his own Dev). Lookalikes (D3V, Devs) stay refused here.
+    if (p == text_filter::TagProblem::kReserved && TagIsDevWord() && AccountHoldsName(name)) {
+      tag_text_ = "Dev";
+      p = text_filter::TagProblem::kNone;
+    }
     if (p == text_filter::TagProblem::kNone) return true;
     name_error_ = text_filter::TagProblemText(p);
     tag_mode_ = true;
     REXLOG_INFO("BF clan tag: \"{}\" refused on the name page ({})", tag_text_, text_filter::TagProblemCode(p));
     return false;
+  }
+  bool TagIsDevWord() const {
+    if (tag_text_.size() != 3) return false;
+    std::string lower;
+    for (char c : tag_text_) lower += char(std::tolower(static_cast<unsigned char>(c)));
+    return lower == "dev";
+  }
+  // Whether this PC's account (its recovery code) holds this name: the name protected or recovered here.
+  bool AccountHoldsName(const std::string& name) const {
+    const std::string acct = settings_.Get("account_name", "");
+    if (settings_.Get("account_code", "").empty() || acct.empty() || acct.size() != name.size()) return false;
+    for (size_t i = 0; i < acct.size(); ++i)
+      if (std::tolower(static_cast<unsigned char>(acct[i])) != std::tolower(static_cast<unsigned char>(name[i]))) return false;
+    return true;
   }
   // Saved with the name (after TagCheck): the backend is told at once when the game is signed in, else after the
   // start's name check.
@@ -58,7 +79,18 @@
     if (!changed) return;
     REXLOG_INFO("BF clan tag: the player chose \"{}\"", tag_text_);
     tag_refusal_.clear();
-    if (signed_in_once_) clan::SendOwnTag(PlayerName(), OnlinePlayerId());
+    if (!signed_in_once_) return;
+    // A new name is played from the next start: its tag goes with it then, not now under the name played this start
+    // (16 Nov 2026: a recovered developer's Dev went out under the old name and was refused as reserved).
+    const std::string saved = settings_.Get("player_name", ""), now = PlayerName();
+    bool same = saved.size() == now.size();
+    for (size_t i = 0; same && i < saved.size(); ++i)
+      same = std::tolower(static_cast<unsigned char>(saved[i])) == std::tolower(static_cast<unsigned char>(now[i]));
+    if (!same) {
+      REXLOG_INFO("BF clan tag: worn with the name {} from the next start", saved);
+      return;
+    }
+    clan::SendOwnTag(now, OnlinePlayerId());
   }
 
   // The boxes (or the recovery code's one box), at x, y over w; y moves past them.

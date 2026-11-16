@@ -4695,6 +4695,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         const std::string k = w.substr(w.find('/') + 1);
         // A single letter (the chat's T, Y, U and push to talk's B), enter, esc, tab, backspace: the chat box tests.
         const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6 : k == "f12" ? ImGuiKey_F12
+                             : k == "f2" ? ImGuiKey_F2 : k == "f3" ? ImGuiKey_F3 : k == "f4" ? ImGuiKey_F4
                              : k == "right" ? ImGuiKey_RightArrow : k == "left" ? ImGuiKey_LeftArrow
                              : k == "down" ? ImGuiKey_DownArrow : k == "up" ? ImGuiKey_UpArrow
                              : k == "enter" ? ImGuiKey_Enter : k == "esc" ? ImGuiKey_Escape : k == "tab" ? ImGuiKey_Tab
@@ -4707,6 +4708,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         }
       } else if (w.rfind("type/", 0) == 0) {
         ImGui::GetIO().AddInputCharactersUTF8(w.substr(5).c_str());
+      } else if (w.rfind("paste/", 0) == 0) {  // paste/<text>: the text on the clipboard, then Ctrl+V (the name page)
+        ImGui::SetClipboardText(w.substr(6).c_str());
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddKeyEvent(ImGuiMod_Ctrl, true), io.AddKeyEvent(ImGuiKey_LeftCtrl, true);
+        io.AddKeyEvent(ImGuiKey_V, true), io.AddKeyEvent(ImGuiKey_V, false);
+        io.AddKeyEvent(ImGuiKey_LeftCtrl, false), io.AddKeyEvent(ImGuiMod_Ctrl, false);
       } else if (w.rfind("move/", 0) == 0 || w.rfind("click/", 0) == 0 || w.rfind("mdown/", 0) == 0 || w.rfind("mup/", 0) == 0) {
         const bool click = w[0] == 'c', down = w.rfind("mdown/", 0) == 0, up = w.rfind("mup/", 0) == 0;
         const size_t a = w.find('/'), b = w.find('/', a + 1);
