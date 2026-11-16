@@ -129,36 +129,66 @@
         "The picture's quality. A preset sets every row at once: move over them with left and right, and A uses the "
         "one you are on. Medium suits a GTX 1060 or an RX 580 at 1080p, High an RTX 2060 and up. Auto detect chooses "
         "one for your graphics card.",
-        "The mouse, the keyboard and the controller. Keyboard and mouse play works beside a controller; the keys are "
-        "under Keyboard bindings."};
+        "Pick what you play with: keyboard and mouse, or a controller. Each opens its own page with only its settings "
+        "and bindings, as in Settings, Controls. Both work at once in the game."};
     NotePage(setup_tab_ == 0 ? "setup display" : setup_tab_ == 1 ? "setup graphics" : "setup controls");
     const Stage st = StageOf(io);
     tab_ = setup_tab_ == 0 ? kTabDisplay : setup_tab_ == 1 ? kTabGraphics : kTabControls;
     CaptureKeyInto(in);
+    // Controls as Settings has it since 16 Nov 2026 (TekRantGaming: "our controls page is not the same as our new
+    // controls page in the settings, can we make them look the same"): the choice of two cards, then one device's
+    // page with the device drawn on the help card (game_menu_controls.inc). B on a device's page goes to the choice.
+    const bool controls = tab_ == kTabControls && sub_ == kSubNone;
+    if (!controls) ctl_device_ = -1, ctl_fresh_ = true;
+    const bool choice = controls && ctl_device_ < 0;
+    const int device_page = controls ? ctl_device_ : -1;
+    struct ButtonsFlag {
+      bool& flag;
+      ~ButtonsFlag() { flag = false; }
+    } buttons_flag{controls_buttons_};
+    controls_buttons_ = controls;
     const int step = 3 + setup_tab_;
     const SetupPanel p = SetupFrame(d, io, st, step);
     const bool custom = tab_ == kTabGraphics && sub_ == kSubNone && CurrentGraphicsPreset() < 0 &&
                         !settings_.Get("graphics_preset", "").empty();
-    std::vector<Cue> cues = {{kit::Button::kA, tab_ == kTabGraphics && on_preset_strip_ ? "USE THIS PRESET" : "CHANGE"},
+    std::vector<Cue> cues = {{kit::Button::kA, choice                                    ? "OPEN"
+                                               : device_page >= 0 && ctl_bind_row_         ? "BIND"
+                                               : tab_ == kTabGraphics && on_preset_strip_ ? "USE THIS PRESET"
+                                                                                          : "CHANGE"},
                              {kit::Button::kRB, "NEXT PAGE"},
                              {kit::Button::kStart, "AUTO DETECT", "P"}};
     if (custom) cues.push_back({kit::Button::kX, "BACK TO " + Upper(settings_.Get("graphics_preset", ""))});
     cues.push_back({kit::Button::kY, "SKIP THE SETTINGS"});
-    cues.push_back({kit::Button::kB, "BACK"});
+    cues.push_back({kit::Button::kB, device_page >= 0 ? "BACK TO THE CHOICE" : "BACK"});
     Prompts(d, st, st.P(48, 662), cues, in, 15);
-    const float y = SetupTitle(d, st, p, step, kNames[setup_tab_], kAbout[setup_tab_]);
-    const ImVec2 pa(p.a.x + st(16), y), pb(p.b.x - st(16) - st(226), p.b.y - st(16));
+    static const char* kDevice[2] = {"KEYBOARD & MOUSE", "CONTROLLER"};  // as Settings titles them (no dot: the
+                                                                          // headline font has none)
+    const float y = SetupTitle(d, st, p, step, device_page >= 0 ? kDevice[device_page] : kNames[setup_tab_],
+                               kAbout[setup_tab_]);
+    // A device's page has the wider help card Settings has, for the device's picture.
+    const float help_w = controls ? st(304) : st(226);
+    const ImVec2 pa(p.a.x + st(16), y), pb(p.b.x - st(16) - help_w, p.b.y - st(16));
     const ImVec2 ha(pb.x + st(12), y), hb(p.b.x - st(16), p.b.y - st(16));
+    auto body = [&](Input body_in) {
+      if (choice) ControlsChoice(d, io, st, body_in, pa, hb);
+      else if (device_page >= 0) ControlsDevicePage(d, io, st, body_in, pa, pb, ha, hb, device_page);
+      else SettingsBody(d, io, st, body_in, pa, pb, ha, hb);
+    };
     if (skip_popup_) {
       Input none;
-      SettingsBody(d, io, st, none, pa, pb, ha, hb);
+      body(none);
       SkipQuestion(d, io, st, in);
       return;
     }
     Input list_in = in;
     list_in.back = list_in.next_tab = list_in.prev_tab = list_in.start = list_in.y = list_in.x = false;
-    SettingsBody(d, io, st, list_in, pa, pb, ha, hb);
+    body(list_in);
     if (in.x) PresetBack();
+    if (in.back && device_page >= 0 && capture_.empty()) {  // a device's page: back to the choice, its card chosen
+      REXLOG_INFO("BF launcher: setup controls / back to the choice");
+      row_ = device_page, ctl_device_ = -1, scroll_ = 0;
+      return;
+    }
     if (in.back && SubPageBack()) return;
     SetupKeys(in);
   }

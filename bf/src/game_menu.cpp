@@ -3390,8 +3390,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       case kTabGraphics: return GraphicsRows();
       case kTabAudio: return AudioRows();
       case kTabControls:
-        // Settings > Controls: one device's page (game_menu_controls.inc); the first start's step keeps them all.
-        if (sub_ == kSubNone && page_ == Page::kSettings && ctl_device_ >= 0) return DeviceControlsRows(ctl_device_);
+        // Settings > Controls and the first start's Controls step: one device's page (game_menu_controls.inc).
+        if (sub_ == kSubNone && (page_ == Page::kSettings || page_ == Page::kSetupSettings) && ctl_device_ >= 0)
+          return DeviceControlsRows(ctl_device_);
         return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
       case kTabEnhancements: return EnhancementsRows();
       default: return GameplayRows();

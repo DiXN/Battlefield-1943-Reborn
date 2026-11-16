@@ -544,6 +544,33 @@
     return lit;
   }
 
+  // ---- a device's page: its rows (pa..pb), and on the help card (ha..hb) the device drawn under the chosen row's
+  // name, its keys or buttons lit (the help's words under the picture). Settings > Controls and the first start's
+  // Controls step both draw it (TekRantGaming, 16 Nov 2026: the setup's Controls page should look as Settings').
+  void ControlsDevicePage(ImDrawList* d, ImGuiIO& io, const Stage& st, Input in, ImVec2 pa, ImVec2 pb, ImVec2 ha,
+                          ImVec2 hb, int device_page) {
+    const float art_w = hb.x - ha.x - st(36);
+    const float pad_s = art_w / 600.0f * 0.95f;
+    // the controller's picture (PadPicture), or its line drawing when the file is missing
+    const float pad_h = PadPicture(d, ha, art_w, st(220), DeviceLit{}, false);
+    const float art_h = device_page == 0 ? KeyboardMouseArt(d, ha, art_w, DeviceLit{}, false)
+                        : pad_h > 0     ? pad_h
+                                        : 410.0f * pad_s;
+    help_top_ = art_h + st(16);
+    SettingsBody(d, io, st, in, pa, pb, ha, hb);
+    help_top_ = 0;
+    const std::vector<SettingRow> rows = RowsOf(tab_);
+    if (!rows.empty()) {
+      const SettingRow& r = rows[size_t(std::clamp(row_, 0, int(rows.size()) - 1))];
+      ctl_bind_row_ = !r.slots.empty();
+      const DeviceLit lit = LitOf(device_page, r);
+      const ImVec2 at(ha.x + st(18), ha.y + st(40));
+      if (device_page == 0) KeyboardMouseArt(d, at, art_w, lit);
+      else if (pad_h <= 0 || PadPicture(d, at, art_w, st(220), lit) <= 0)
+        PadArt(d, ImVec2(at.x + (art_w - 600 * pad_s) * 0.5f, at.y - 30 * pad_s), pad_s, lit);
+    }
+  }
+
   // ---- the choice: two cards over the rows' and the help card's place (a..b)
   void ControlsChoice(ImDrawList* d, ImGuiIO& io, const Stage& st, const Input& in, ImVec2 a, ImVec2 b) {
     const kit::Fonts& f = kit::GetFonts();
