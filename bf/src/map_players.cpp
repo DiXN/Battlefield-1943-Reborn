@@ -65,6 +65,7 @@ std::mutex g_mutex;
 std::vector<MapPlayer> g_players;          // as last read (a few times a second)
 std::map<uint32_t, Clock::time_point> g_sighted;  // an enemy (his player object): when the minimap last showed him
 Clock::time_point g_read{};
+int g_count = 0;  // every player of the match on a team, the local one too (Discord's player count)
 
 // The minimap's player arrows of the last third of a second (the team mates' and a seen enemy's; not the player's own).
 std::vector<MapIcon> MinimapArrows(const std::vector<MapIcon>& icons) {
@@ -76,6 +77,12 @@ std::vector<MapIcon> MinimapArrows(const std::vector<MapIcon>& icons) {
 
 }  // namespace
 
+int MatchPlayerCount() {
+  std::lock_guard lock(g_mutex);
+  if (Clock::now() - g_read > std::chrono::seconds(2)) return 0;
+  return g_count;
+}
+
 std::vector<MapPlayer> MapPlayers() {
   std::lock_guard lock(g_mutex);
   if (Clock::now() - g_read > std::chrono::seconds(1)) return {};  // none read lately: no match, or a menu
@@ -86,7 +93,7 @@ void MapPlayersTick(const uint8_t* base, bool level_loaded) {
   const auto now = Clock::now();
   if (!level_loaded) {
     std::lock_guard lock(g_mutex);
-    g_players.clear(), g_sighted.clear();
+    g_players.clear(), g_sighted.clear(), g_count = 0;
     return;
   }
   {
@@ -108,12 +115,15 @@ void MapPlayersTick(const uint8_t* base, bool level_loaded) {
   std::vector<MapPlayer> players, everyone;
   [[maybe_unused]] std::string skipped;  // the dev log's: the players not on the map, and why
   std::lock_guard lock(g_mutex);
+  int count = 0;
   // First every player and where he is; then who each minimap arrow is (below).
   for (uint32_t e = begin; e < end; e += 4) {
     const uint32_t p = Load32(base, e);
-    if (p == local || !IsPlayer(base, p)) continue;
+    if (!IsPlayer(base, p)) continue;
     const uint32_t team = Load32(base, p + 0x30), squad = Load32(base, p + 0x34);
     if (team < 1 || team > 2) continue;  // a spectator, or a player still joining
+    ++count;
+    if (p == local) continue;
     const uint32_t soldier = Load32(base, p + 0x138);
     if (!Plausible(soldier) || Load32(base, soldier) != kSoldierVtable) {  // dead, or not spawned
 #if defined(BF_DEV_TOOLS)
@@ -153,6 +163,7 @@ void MapPlayersTick(const uint8_t* base, bool level_loaded) {
   for (auto it = g_sighted.begin(); it != g_sighted.end();)
     it = now - it->second > std::chrono::seconds(30) ? g_sighted.erase(it) : std::next(it);
   g_players = std::move(players);
+  g_count = count;
   g_read = now;
 #if defined(BF_DEV_TOOLS)
   // BF_DEV_PAUSEMAP=1: every player the map was given, every 3 s.

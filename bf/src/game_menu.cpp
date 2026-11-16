@@ -58,6 +58,7 @@
 #include "projects_art.h"
 #include "steam_shortcut.h"
 #include "comms.h"
+#include "discord_presence.h"
 #include "text_filter.h"
 #include "changelog.h"
 #include "update.h"
@@ -995,6 +996,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music);
       PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
     }
+    NotePresence();  // Discord Rich Presence, the menu open or not
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
     if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
@@ -1277,6 +1279,46 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                IM_COL32(16, 18, 22, 60), IM_COL32(8, 10, 14, 0));
   }
   bool InMatch() const { return MenuDriverStage() == 5 && !(page_ == Page::kJoining); }
+  // Discord Rich Presence (discord_presence.cpp): what the player is doing, from the menus' own state, a few times a
+  // second (the presence thread sends only changes, spaced out). Never an address or another player's name.
+  std::string presence_server_;    // the joined server's name as shown (Join; empty: an address in it)
+  bool presence_private_ = false;  // a player hosted match: "Private match"
+  int presence_max_ = 0;           // the joined server's player limit
+  double presence_at_ = -1;
+  // The level's map from its capture points (CQ_MP_BASE_WAKE_AIRFIELD), so a server's map rotation shows too.
+  static std::string MapOfLevel() {
+    for (const CapturePoint& c : CapturePoints()) {
+      if (c.name.find("WAKE") != std::string::npos) return "Wake Island";
+      if (c.name.find("CANAL") != std::string::npos) return "Guadalcanal";
+      if (c.name.find("IWO") != std::string::npos) return "Iwo Jima";
+      if (c.name.find("CORAL") != std::string::npos || c.name.find("AIRSUPERIORITY") != std::string::npos) return "Coral Sea";
+    }
+    return "";
+  }
+  void NotePresence() {
+    if (REXCVAR_GET(server) || ImGui::GetTime() - presence_at_ < 0.25) return;
+    presence_at_ = ImGui::GetTime();
+    using W = discord::Presence::Where;
+    discord::Presence p;
+    const int stage = MenuDriverStage();
+    const bool loading = page_ == Page::kJoining || (stage == 5 && !LevelLoaded());
+    if (pre_game_ && page_ != Page::kJoining) {
+      p.where = page_ == Page::kServers ? W::kBrowser : W::kLauncher;
+    } else if (stage == 5 || page_ == Page::kJoining) {
+      p.where = tutorial_ ? W::kTutorial : loading ? W::kJoining : W::kMatch;
+      if (!tutorial_) {
+        const std::string level = loading ? std::string() : MapOfLevel();
+        p.map = !level.empty() ? level : joining_map_;
+        p.server = presence_server_, p.private_match = presence_private_;
+        if (p.where == W::kMatch) p.team = comms::Team(), p.players = MatchPlayerCount(), p.max_players = presence_max_;
+      }
+    } else if (page_ == Page::kIntro || stage < 2) {
+      p.where = W::kStarting;
+    } else {
+      p.where = open_ && page_ == Page::kServers ? W::kBrowser : W::kMenu;
+    }
+    discord::Note(p);
+  }
   void Background(ImDrawList* d, ImGuiIO& io, float left, float right) {
     if (InMatch()) Shade(d, io, left, right);
     else Backdrop(d, io);
@@ -2330,6 +2372,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     SetJoinedServerNight(sv.night);
     joining_ = sv.name;
     joining_map_ = sv.map;
+    presence_server_ = discord::ShownServerName(sv.name);  // Discord Rich Presence (NotePresence)
+    presence_private_ = sv.player_hosted || pm_hosting_, presence_max_ = sv.max_players;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     joined_from_start_ = MenuDriverStage() < 2;  // its joining page shows the game's start first
@@ -4076,6 +4120,12 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "user_language",
                           {{"English", "1"}, {"French", "4"}, {"German", "3"}, {"Italian", "6"}, {"Spanish", "5"},
                            {"Japanese", "2"}}));
+    // Discord Rich Presence (discord_presence.cpp; TekRantGaming, 15 Nov 2026), on by default.
+    rows.push_back(Toggle("Player", "Discord status",
+                          "Your Discord profile shows what you are doing: the menus, or the map, your team, the "
+                          "server's name and how many play, with the time in the match. Never an address or another "
+                          "player's name. Needs the Discord app running on this PC. Applies at once.",
+                          "bf_discord_status"));
     rows.push_back(Toggle("Player", "Text chat",
                           "Messages top left in a match: T to everyone, Y to your team, U to your squad (Keyboard "
                           "bindings). Off hides them and the chat box.",
