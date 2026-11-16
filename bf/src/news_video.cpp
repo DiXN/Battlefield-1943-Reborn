@@ -181,6 +181,7 @@ struct State {
   RECT rect{}, shown_rect{};
   bool muted = false, shown_muted = false;
   bool visible = false;
+  bool ended = false;          // the player said it ended, paused or failed (the menu music may play again)
   bool escape = false, refocus = false;
   std::filesystem::path page_dir;
   std::filesystem::path data_dir;
@@ -212,7 +213,7 @@ void Navigate() {
   if (!g.view) return;
   const std::wstring url = std::wstring(kPageBase) + L"player.html?v=" + Wide(g.id) + L"&mute=" + (g.muted ? L"1" : L"0");
   const HRESULT hr = g.view->Navigate(url.c_str());
-  g.shown_id = g.id, g.shown_muted = g.muted;
+  g.shown_id = g.id, g.shown_muted = g.muted, g.ended = false;
   REXLOG_INFO("BF news video: playing {} ({}{})", g.id, g.muted ? "muted" : "with sound", SUCCEEDED(hr) ? "" : ", the navigation failed");
 }
 
@@ -290,8 +291,12 @@ void SetupView() {
       [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
         LPWSTR text = nullptr;
         if (SUCCEEDED(args->TryGetWebMessageAsString(&text)) && text) {
-          REXLOG_INFO("BF news video: the player says: {}", Narrow(text));
+          const std::string said = Narrow(text);
+          REXLOG_INFO("BF news video: the player says: {}", said);
           CoTaskMemFree(text);
+          // 0 ended, 2 paused, an error: no longer playing; 1 playing, 3 buffering: playing again.
+          if (said.rfind("state 0", 0) == 0 || said.rfind("state 2", 0) == 0 || said.rfind("error", 0) == 0) g.ended = true;
+          else if (said.rfind("state 1", 0) == 0 || said.rfind("state 3", 0) == 0) g.ended = false;
         }
         return S_OK;
       });
@@ -450,6 +455,8 @@ void VideoSetMuted(bool muted) {
 
 bool VideoShowing() { return g.ctl && g.visible; }
 
+bool VideoPlaying() { return VideoShowing() && !g.ended; }
+
 bool VideoTakeEscape() {
   const bool e = g.escape;
   g.escape = false;
@@ -463,6 +470,7 @@ void VideoShow(void*, const std::filesystem::path&, const std::string&, float, f
 void VideoHide() {}
 void VideoSetMuted(bool) {}
 bool VideoShowing() { return false; }
+bool VideoPlaying() { return false; }
 bool VideoTakeEscape() { return false; }
 
 #endif

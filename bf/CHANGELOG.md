@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.4.7 (16 November 2026): the biggest Reborn update yet
+
+Stats, leaderboards and achievements, clan tags, protected names, fairer teams, a news window and a lot of performance
+work.
+
+**Your progress**
+- **Stats & Awards.** Your kills, flags, headshots, time in each vehicle and more, counted on Reborn servers.
+- **Leaderboards are back.** See how you rank for all time, this month and this week.
+- **Achievements.** All 12 from the original game, plus 3 new Reborn ones, with a popup and sound when you unlock one.
+
+**Your name**
+- **Clan tags.** Show your clan before your name, like [TAG]YourName. Set it on your name page (RB or F4).
+- **Protect your name.** Keep your name, rank and stats with a recovery code. No email or password needed. On a new PC,
+  paste your recovery code with Ctrl+V or a right click.
+
+**Better matches**
+- **Fairer teams.** Uneven teams get balanced automatically, and you never lose points when moved.
+- **Clear messages.** Full servers and maintenance now tell you what's going on.
+- **Fewer server crashes.**
+
+**New in the menus**
+- **News window.** Reborn news, server status and videos when you start the game.
+- **Report an issue.** Send us bug reports right from the main menu, no GitHub account needed.
+- **Easier controls setup.** Pick keyboard and mouse or controller, and see only what you need.
+- **New button prompts** for every controller, plus the original game's menu sounds.
+- **Discord status.** Your friends see which map and server you're playing on.
+
+**Smoother and lighter**
+- Uses much less memory.
+- Better frame rates, especially on older PCs.
+- Faster startup and a smaller download.
+- Audio crackling fixed.
+- Shaders are prepared once, right after setup, so fewer stutters in game.
+
+**Linux and Steam Deck**
+- Works on more Linux versions, including Ubuntu 22.04 and Linux Mint 21.
+
+**Also**
+- Spawn point clicks on the deploy map now land where you click. By Erubadhron ([pull request 31](../../pull/31)).
+- General bug fixes.
+
+Thanks to everyone who played the playtest, uploaded shaders and reported bugs, and to DiXN, Erubadhron, ThatZaliaSGuy
+and Kenney for their work in this update.
+
 ## 0.4.6.4 (15 November 2026): no more closing at the shaders page
 
 **Fixed**

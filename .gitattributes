@@ -1,3 +1,10 @@
 # Third party code kept in the tree: left out of GitHub's language statistics.
 sdk/** linguist-vendored
 bf/third_party/miniz/** linguist-vendored
+
+# Linux scripts and the Linux server's files keep Unix line ends in every checkout, whatever core.autocrlf says on the
+# PC that checks them out (a Windows checkout built in WSL as BUILDING.md says: with Windows line ends bash cannot run
+# them; 16 Nov 2026).
+*.sh text eol=lf
+tools/linux/server/* text eol=lf
+tools/linux/ally/* text eol=lf

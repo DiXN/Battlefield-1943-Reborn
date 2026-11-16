@@ -455,7 +455,10 @@
                       sel || sixty ? kit::kCream : kit::kInkSection, hz, st(1));
           iw += hw + st(8);
         }
-        const float nw = iw + kit::GameText(d, kit::GameFont::kText, cap, ImVec2(ta.x + colx[0] + iw, y + (rh - cap) * 0.5f), ink, sv.name);
+        float nw = iw + kit::GameText(d, kit::GameFont::kText, cap, ImVec2(ta.x + colx[0] + iw, y + (rh - cap) * 0.5f), ink, sv.name);
+        if (sv.promoted)  // a community server shown with ours (Promoted, plasma.py): marked in the row too
+          nw += st(12) + Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "PROMOTED", kit::kGold,
+                              kit::kInk, false);
         if (sv.night && kNightOps)
           Chip(d, st, ImVec2(ta.x + colx[0] + nw + st(12), y + (rh - st(16)) * 0.5f), st(16), "NIGHT", IM_COL32(40, 46, 88, 255),
                kit::kStripText, false);
@@ -557,7 +560,10 @@
       const ImVec2 j0(pa.x + st(18), pb.y - st(18) - st(40)), j1(pb.x - st(18) - st(40) - st(8), pb.y - st(18));
       d->PushClipRect(pa, ImVec2(pb.x, j0.y - st(10)), true);
       float x = pa.x + st(18), y = p1.y + st(16);
-      x += Chip(d, st, ImVec2(x, y), st(18), sv->official ? "REBORN" : "COMMUNITY", kit::kStrip, kit::kStripText, false) + st(6);
+      if (sv->promoted)  // a community server shown with ours (Promoted, plasma.py): its own mark, gold
+        x += Chip(d, st, ImVec2(x, y), st(18), "PROMOTED", kit::kGold, kit::kInk, false) + st(6);
+      else
+        x += Chip(d, st, ImVec2(x, y), st(18), sv->official ? "REBORN" : "COMMUNITY", kit::kStrip, kit::kStripText, false) + st(6);
       if (sv->night && kNightOps)
         x += Chip(d, st, ImVec2(x, y), st(18), "NIGHT OPS", IM_COL32(40, 46, 88, 255), kit::kStripText, false) + st(6);
       if (fav) Chip(d, st, ImVec2(x, y), st(18), "FAVOURITE", kit::kGold, kit::kInk, false);
@@ -570,6 +576,7 @@
       kit::Spaced(d, f.typed, st(9.5f), ImVec2(pa.x + st(18), y), full ? kit::kStamp : kit::kInkSection, line, st(1.5f));
       y += st(20);
       const std::string desc = !sv->description.empty() ? sv->description
+                               : sv->promoted              ? "A community server, promoted by TRG Studios."
                                : sv->official              ? "A Reborn server, run by TRG Studios."
                                                            : "A community server.";
       y += kit::Wrapped(d, f.ui, st(12), ImVec2(pa.x + st(18), y), kit::kInk, desc, pb.x - pa.x - st(36)) + st(12);
@@ -593,7 +600,7 @@
       }
       row("Tick rate", sv->tick_hz > 0 ? fmt::format("{} Hz", sv->tick_hz) : std::string("Not said"));
       row("Next map", sv->next_map.empty() ? "Not announced" : sv->next_map);
-      row("Run by", sv->official ? "TRG Studios" : "A player");
+      row("Run by", sv->promoted ? "A player \xC2\xB7 promoted by TRG Studios" : sv->official ? "TRG Studios" : "A player");
       d->PopClipRect();
       if (full) {
         d->AddRectFilled(j0, j1, kit::kPaperDim);

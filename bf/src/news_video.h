@@ -30,6 +30,8 @@ void VideoHide();
 void VideoSetMuted(bool muted);
 // True while the player is showing (created and visible).
 bool VideoShowing();
+// True while the player shows and its video has not ended, paused or failed (the menu music waits meanwhile).
+bool VideoPlaying();
 // Esc pressed while the player had the keyboard (the view takes it on a click): the window's Close. Taken once.
 bool VideoTakeEscape();
 

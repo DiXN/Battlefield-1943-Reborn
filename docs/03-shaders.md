@@ -51,18 +51,39 @@ TekRantGaming: shaders compile when the game files are first given, then never a
 they are all compiled again; then "Copy Kong exactly". King Kong's own rule (its kk/src/shader_prepared.h, owner 18
 Oct 2026; the King Kong Linux lead's notes, side-session note kk-shaders-for-bf1943.md): one preparation per version,
 at the first setup or after an update; a version already prepared is never checked or rebuilt at a start; and on an
-update nothing is deleted: everything is made again over the old files.
+update nothing is deleted: everything is made again over the old files. Since v0.4.7 (16 Nov 2026) the last part is
+TekRantGaming's own: "if the game is updated it removes it shader chashe and builds a fresh batch of shaders with the
+same screen then you get dropped back into our main menu" (below).
+
+## The shader screen's place (16 Nov 2026, v0.4.7)
+TekRantGaming: "the initial setup screen when you give the game files right after it you should be in the full screen
+shader comp screen ... the actual onboaring section when you go through settings should no longer include the shader
+part ... make sure nothing overlays over the shaders it should be the only screen visable until its finished".
+- First start: the game files (setup step 1), then at once the full screen shader page (no startup cards on that
+  run), then the onboarding from the soldier name. The onboarding has eight steps; the shader step 8 of v0.4.1 to
+  v0.4.6 is gone. The game starts behind the shader page, so the onboarding's pages run with it started (settings
+  the game takes only at the start make Ready's button FINISH AND RESTART).
+- After an update: the startup cards (none when the updater started the game again), the shader page over a fresh
+  cache ("UPDATED TO VERSION"), then the main menu. A start whose shader page never finished shows it again first,
+  before the onboarding or the main menu (`game_menu.cpp` AfterIntro).
+- Nothing is drawn over the page: our pop-ups (new version, maintenance and refusal notices, What's new, the news
+  window and its video, the version gate, a join's questions) wait for the page after it (`game_menu.cpp` OnDraw),
+  the F12 report screenshot and its note are off, our menu sounds are silent, and the performance metrics, F8 panel,
+  chat and spawn pointer were already kept off the launcher's pages.
 - The marker is `shaders_prepared_for` in `user/bf1943-settings.txt`: the version whose shader page compiled every
   stored pipeline. It is written only when the page reaches its end (a page left half way is not a preparation).
 - At each start, before the shaders are prepared and before the renderer opens its storage
   (`bf1943_app.h` OnPostLoadXexImage, `game_menu.cpp` CheckShadersAfterUpdate):
-  - marker of another version: an update (`update.cpp` PrepareShadersAfterUpdate). Nothing is deleted: the
-    preparation adds this version's list to the renderer's storage from the player's game files, the pipelines
-    this PC learned in play stay, the driver's pipeline cache stays (Vulkan ignores one from another driver or
-    device), and the shader page ("UPDATED TO VERSION") makes every stored pipeline again. Until it has finished,
-    each start counts as updated and the page finishes the job.
-  - (11 Nov, first try, replaced the same day at "Copy Kong exactly": the whole cache was deleted on an update,
-    which also lost the pipelines learned in play.)
+  - marker of another version: an update (`update.cpp` PrepareShadersAfterUpdate). Since v0.4.7 the old cache is
+    deleted first: `cache/native_x_renderer` (the renderer's storage, `5841097E.pipelines`, with the pipelines this
+    PC learned in play, and DiligentCore's pipeline cache `5841097E.vkcache`) and `cache/shaders` (the prepared
+    shaders and their marker). The preparation then writes this version's list from the player's game files and the
+    shader page ("UPDATED TO VERSION") compiles every pipeline from nothing. Until the page has finished, each start
+    counts as updated; the cache is deleted only once a version (`cache/native_x_renderer/cleared-for.txt`), so a
+    later start goes on over what was made. The pipelines learned in play are lost at each update; the players'
+    uploads (below) bring them into the next version's shipped list.
+  - (11 Nov, first try, replaced the same day at "Copy Kong exactly": the whole cache was deleted on an update.
+    From v0.4.1 to v0.4.6 nothing was deleted: the page made every stored pipeline again over the old cache.)
   - marker of this version and the renderer's storage still there: no shader page. The renderer makes its stored
     pipelines behind the menus from the driver's cache (the log says when they are done); pipelines first met in
     play are kept in the storage and made the same way at the next start.

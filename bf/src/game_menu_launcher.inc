@@ -118,12 +118,10 @@
 
   // After the shaders: the setup from its account page (until it was finished once), else Home. A setup closed half
   // way counts as done at the next start once a name was chosen (TekRantGaming's rule for King Kong, 26 Oct 2026).
+  // The first start's shaders come right after the game files, before the onboarding, and an update's before the main
+  // menu (AfterIntro; TekRantGaming, 16 Nov 2026).
   void AfterShaders() {
-    if (setup_shader_step_) {  // the first start's step 8 is done: Ready
-      setup_shader_step_ = false;
-      page_ = Page::kAllSet, allset_row_ = 0, row_ = 0, scroll_ = 0;
-      return;
-    }
+    just_installed_ = false;
     // Play started the game from the launcher: our Getting ready page stays while the game boots and signs in behind
     // it (its films, title and menus never show, TekRantGaming's 10 Nov brief); then our main menu (StartingPage).
     if (played_) {
@@ -168,10 +166,9 @@
         break;
       case Page::kPrompts: page_ = Page::kVoice; break;
       case Page::kVoice:
-        // Step 8, the shaders: prepared now, with the settings the pages before chose (PrepareShadersAtStart), then
-        // Ready. Already prepared (the setup run again over an install that has them): straight to Ready.
-        if (PrepareShadersAtStart("the first start's step 8")) setup_shader_step_ = true;
-        else page_ = Page::kAllSet, allset_row_ = 0;
+        // Ready. The shaders were prepared before the onboarding, right after the game files (AfterIntro): no shader
+        // step here since v0.4.7.
+        page_ = Page::kAllSet, allset_row_ = 0;
         break;
       case Page::kAllSet:
         settings_.values["launcher_setup"] = "done";
@@ -210,8 +207,7 @@
       case Page::kSetupSettings: return 3 + setup_tab_;
       case Page::kPrompts: return 6;
       case Page::kVoice: return 7;
-      case Page::kShaders: return 8;
-      case Page::kAllSet: return 9;
+      case Page::kAllSet: return 8;
       default: return 0;
     }
   }
@@ -649,7 +645,7 @@
       kit::Paper(d, a, b, st.u);
       const float x = a.x + st(44), w = st(892);
       float y = a.y + st(34);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 1 OF 9", st(2));
+      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 1 OF 8", st(2));
       y += st(24);
       kit::Heading(d, st(58), ImVec2(x, y), kit::kInk, "BRING YOUR OWN COPY", st(2), w);
       y += st(68);
@@ -815,23 +811,21 @@
     }
     if (ImGui::GetTime() < 0.6) return;  // nothing to show yet (a quick start draws no screen)
     NotePage("shaders");
+    if (!shaders_shown_)
+      REXLOG_INFO("BF shader screen: shown ({}); nothing else is drawn over it until it is done",
+                  shaders_update_ || ShadersAfterUpdate() ? "after an update, over a fresh cache"
+                                                          : "the first start, right after the game files");
     shaders_shown_ = true;
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    // The first start's step 8 is drawn in the setup's frame (game_menu_setup.inc: the steps' rail, the page on
-    // paper); after an update the page stands alone, as before.
-    const bool setup = setup_shader_step_;
+    // The full screen page on its own, on the first start (right after the game files, before the onboarding) and
+    // after an update (TekRantGaming, 16 Nov 2026: the setup's frame and its step 8 are gone). OnDraw draws no pop-up,
+    // toast or video over it.
     static const char* const kAbout = "Your graphics card is building every shader the game uses, once, so nothing stutters or pops "
                                       "in while you play. This happens after you install and after each update.";
     const bool full = std::atoi(Cvar("native_x_renderer_compile_threads").c_str()) > 0;
-    SetupPanel panel{};
-    if (setup) {
-      panel = SetupFrame(d, io, st, 8);
-      Prompts(d, st, st.P(48, 662), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 15);
-    } else {
-      Chrome(d, io, st, 0);
-      Prompts(d, st, st.P(40, 720 - 26 - 40), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 16);
-    }
+    Chrome(d, io, st, 0);
+    Prompts(d, st, st.P(40, 720 - 26 - 40), {{kit::Button::kA, full ? "FULL CPU: ON" : "FULL CPU: OFF"}}, in, 16);
     const float fraction = p.loading && p.queued ? std::clamp(float(p.done) / float(p.queued), 0.0f, 1.0f) : -1.0f;
     shader_bar_ = fraction < 0 ? 0 : std::max(shader_bar_, shader_bar_ + (fraction - shader_bar_) * 0.15f);
     if (fraction >= 0 && shader_started_ < 0) shader_started_ = ImGui::GetTime(), shader_started_done_ = p.done;
@@ -839,20 +833,18 @@
     int clicked = -1;
     {
       std::optional<kit::Turn> turn;
-      float x = a.x + st(44), w = st(712), y = a.y + st(34);
-      if (setup) {
-        x = panel.a.x + st(24), w = panel.b.x - panel.a.x - st(48);
-        y = SetupTitle(d, st, panel, 8, "PREPARING THE SHADERS", kAbout) + st(8);
-      } else {
-        turn.emplace(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), 0.4f);
-        kit::Paper(d, a, b, st.u, false);
-        kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                    ShadersAfterUpdate() ? "UPDATED TO VERSION " + std::string(BfVersion()) : "BEFORE YOU PLAY", st(2));
-        y += st(24);
-        kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "PREPARING THE SHADERS", st(2), w);
-        y += st(68);
-        y += kit::Wrapped(d, f.ui, st(19), ImVec2(x, y), kit::kInkSoft, kAbout, w) + st(20);
-      }
+      const float x = a.x + st(44), w = st(712);
+      float y = a.y + st(34);
+      turn.emplace(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), 0.4f);
+      kit::Paper(d, a, b, st.u, false);
+      // An update known from the menu's marker (PrepareShadersAtStart) before the game's own check has run.
+      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
+                  shaders_update_ || ShadersAfterUpdate() ? "UPDATED TO VERSION " + std::string(BfVersion()) : "BEFORE YOU PLAY",
+                  st(2));
+      y += st(24);
+      kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "PREPARING THE SHADERS", st(2), w);
+      y += st(68);
+      y += kit::Wrapped(d, f.ui, st(19), ImVec2(x, y), kit::kInkSoft, kAbout, w) + st(20);
       std::string count = "Checking", left;
       if (fraction >= 0) {
         count = std::to_string(p.done) + " of " + std::to_string(p.queued) + " pipelines";
@@ -902,7 +894,7 @@
                  "Uses every CPU core. Faster, but some PCs crash. From the next start.");
       if (ImGui::IsMouseHoveringRect(c0, c1) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = 0;
     }
-    if (!setup) StampCorner(d, st);  // the setup's frame has its own
+    StampCorner(d, st);
     if (in.accept) clicked = 0;
     if (clicked == 0) {
       const unsigned all = std::max(4u, std::thread::hardware_concurrency());
@@ -923,6 +915,7 @@
     // With a controller in hand the keys start open (TekRantGaming, 9 Nov: the controller could not reach them).
     name_key_ = 10, name_keys_ = device_ == Device::kPad, name_caps_ = name_text_.empty();  // on Q
     name_error_.clear();
+    TagBegin();  // the clan tag box (game_menu_clan.inc)
     code_mode_ = false, acct_show_code_ = false;
     if (!acct_busy_.load()) acct_message_.clear();
     if (settings_.Get("player_name_refused", "") == "1") name_error_ = "Your soldier name is not allowed. Choose a new one.";
@@ -943,6 +936,7 @@
   static bool NameChar(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; }
   void NameType(char c) {
     if (code_mode_) return CodeType(c);
+    if (tag_mode_) return TagType(c);
     if (int(name_text_.size()) >= kNameMax || !NameChar(c)) return;
     if (std::isalpha(static_cast<unsigned char>(c)))
       c = name_caps_ ? char(std::toupper(static_cast<unsigned char>(c))) : char(std::tolower(static_cast<unsigned char>(c)));
@@ -950,7 +944,39 @@
     name_error_.clear();
     if (std::isalpha(static_cast<unsigned char>(c)) && name_caps_ && name_text_.size() == 1) name_caps_ = false;
   }
+  // The clipboard's text into the box with the typing, as the keyboard types (TekRantGaming, 16 Nov 2026: a recovery
+  // code could only be typed letter by letter). A recovery code replaces its box, spaces and dashes left out; from a
+  // copied "Recovery code: ..." line (or the whole key file) only the code.
+  void NamePaste(std::string text, const char* how) {
+    if (code_mode_) {
+      std::string lower;
+      for (char ch : text) lower += char(std::tolower(static_cast<unsigned char>(ch)));
+      if (const size_t at = lower.find("code:"); at != std::string::npos) {
+        text = text.substr(at + 5);
+        if (const size_t eol = text.find_first_of("\r\n"); eol != std::string::npos) text.resize(eol);
+      }
+      name_text_.clear();
+    }
+    int n = 0;
+    for (char ch : text) {
+      if (static_cast<unsigned char>(ch) >= 128 || ch == '\r' || ch == '\n') continue;
+      if (code_mode_) CodeType(ch);
+      else if (tag_mode_) TagType(ch, true);
+      else if (NameChar(ch) && int(name_text_.size()) < kNameMax) name_text_ += ch, name_error_.clear(), name_caps_ = false;
+      ++n;
+    }
+    name_keys_ = false;
+    REXLOG_INFO("BF launcher: {} characters pasted into the {} ({})", n,
+                code_mode_ ? "recovery code" : tag_mode_ ? "clan tag" : "soldier name", how);
+  }
+  // The box with the typing emptied (the right click menu's CLEAR).
+  void NameClear() {
+    if (tag_mode_ && !code_mode_) tag_text_.clear();
+    else name_text_.clear(), name_caps_ = true;
+    name_error_.clear(), tag_refusal_.clear();
+  }
   void NameDelete() {
+    if (tag_mode_ && !code_mode_) return TagDelete();
     if (!name_text_.empty()) name_text_.pop_back();
     if (name_text_.empty()) name_caps_ = true;
   }
@@ -976,12 +1002,14 @@
       REXLOG_INFO("BF name: a name with profanity was refused on the name page");
       return false;
     }
+    if (!TagCheck(name)) return false;  // the clan tag with it (game_menu_clan.inc)
     const bool changed = name != settings_.Get("player_name", "") || settings_.Get("player_name_chosen", "") != "1";
     settings_.values["player_name"] = name;
     settings_.values["player_name_chosen"] = "1";
     settings_.values.erase("player_name_refused");
     name_required_ = false;
     settings_.Save();
+    TagSave();
     if (changed) REXLOG_INFO("BF name: the player chose {}", name);
     // Before BF signs in (the setup on a first start) the name is used at once; after, from the next start.
     if (!signed_in_once_) {
@@ -1097,7 +1125,9 @@
       if (!r.ok) {
         REXLOG_INFO("BF account: protecting {} refused: {}", r.name, r.why);
         return AccountMessage(r.why == "taken"    ? "That name is protected by another player. Choose another one."
-                              : r.why == "in_use" ? "Another player is using that name online right now. Choose another "
+                              : r.why == "team_name" ? "That name is kept for the Battlefield 1943 Reborn team. Choose "
+                                                       "another one."
+                              : r.why == "in_use" ?"Another player is using that name online right now. Choose another "
                                                     "one, or try again later."
                               : r.why == "too_many" ? "Too many names were protected from your connection this hour. "
                                                       "Try again later."
@@ -1138,7 +1168,13 @@
     }
     name_text_ = r.name;
     SetAccount(r.code, r.name);
-    NameCommit();
+    // A clan tag the page refuses never stops a recovery (16 Nov 2026: "dev" in the box left the recovered name and
+    // the account unsaved after "Welcome back"): the name is saved without it.
+    if (!NameCommit()) {
+      REXLOG_INFO("BF account: the clan tag \"{}\" left out so the recovered name is saved", tag_text_);
+      tag_text_.clear(), name_error_.clear();
+      NameCommit();
+    }
     acct_online_ = 1;
     SaveRecoveryFile(r.name, r.code);
     REXLOG_INFO("BF account: recovered {} with its progress", r.name);
@@ -1174,6 +1210,7 @@
       if (n > on || pts > opts) settings_.values[key] = fmt::format("{},{}", std::max(n, on), std::max(pts, opts)), ++raised;
     }
     if (auto* k = REX_KERNEL_STATE()) {
+      reborn_achievements::Ensure();  // Reborn's own among the account's awards too
       for (size_t i = 0; i < parts[4].size();) {
         size_t end = parts[4].find(',', i);
         if (end == std::string::npos) end = parts[4].size();
@@ -1209,12 +1246,13 @@
     const bool same = name_text_ == settings_.Get("player_name", "");
     const char* chip = code_mode_ ? "RECOVERY"
                        : prot     ? "PROTECTED"
+                       : acct_online_ == 3 && same ? "TEAM NAME"
                        : acct_online_ == 2 && same ? "ANOTHER PLAYER'S"
                                                    : "NOT PROTECTED";
     kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, "NAME PROTECTION", st(2));
     const float cw = kit::TextWidth(f.typed, st(13), chip) + st(16);
     d->AddRectFilled(ImVec2(x + w - cw, y - st(3)), ImVec2(x + w, y + st(17)),
-                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' ? kit::kRed : kit::kInkFaint);
+                     prot && !code_mode_ ? kit::kGreen : chip[0] == 'A' || chip[0] == 'T' ? kit::kRed : kit::kInkFaint);
     d->AddText(f.typed, st(13), ImVec2(x + w - cw + st(8), y), IM_COL32(255, 255, 255, 255), chip);
     y += st(26);
     std::string body;
@@ -1228,6 +1266,9 @@
              " online, and your rank and stats are kept on our server. Your recovery code brings them to another PC.";
     else if (!settings_.Get("account_code", "").empty() && !settings_.Get("account_name", "").empty())
       body = "Your protected name is " + settings_.Get("account_name", "") + ". Protect this name instead to move it here.";
+    else if (acct_online_ == 3 && same)
+      body = "This name is kept for the Battlefield 1943 Reborn team: nobody else can play under it or a name like it. "
+             "Online you play as Soldier for now. Choose a name of your own.";
     else if (acct_online_ == 2 && same)
       body = "Another player protected this name: online you play as it with a number. Choose another name.";
     else
@@ -1260,6 +1301,94 @@
     }
   }
 #endif
+  // The on screen keys, QWERTY (TekRantGaming, 8 Nov): the numbers, three rows of letters with the underscore, then
+  // Capitals and Done. Ten columns; a key's span is in columns. One keyboard for every page that takes text from a
+  // controller: the soldier name, and the Custom Match page's server name and password (16 Nov 2026). `space`: the
+  // last row with a space bar between Capitals and Done (the match's name).
+  struct OnKey {
+    const char* label;
+    char ch;   // the character typed, or 0: a special key (kind)
+    int kind;  // 0 a character, 1 Delete, 2 Capitals, 3 Done
+    int row, col, span;
+  };
+  static const std::vector<OnKey>& OnKeys(bool space) {
+    static const auto make = [](bool with_space) {
+      std::vector<OnKey> v;
+      static const char* kRows[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL_", "ZXCVBNM"};
+      static char labels[40][2] = {};
+      int n = 0;
+      for (int r = 0; r < 4; ++r)
+        for (int c = 0; kRows[r][c]; ++c, ++n) {
+          labels[n][0] = kRows[r][c];
+          v.push_back({labels[n], kRows[r][c], 0, r, c, 1});
+        }
+      v.push_back({"DEL", 0, 1, 3, 7, 3});
+      if (with_space) {
+        v.push_back({"CAPS", 0, 2, 4, 0, 3});
+        v.push_back({"SPACE", ' ', 0, 4, 3, 4});
+        v.push_back({"DONE", 0, 3, 4, 7, 3});
+      } else {
+        v.push_back({"CAPS", 0, 2, 4, 0, 5});
+        v.push_back({"DONE", 0, 3, 4, 5, 5});
+      }
+      return v;
+    };
+    static const std::vector<OnKey> kPlain = make(false), kSpaced = make(true);
+    return space ? kSpaced : kPlain;
+  }
+  // The keys drawn with their title at `k0` and `hint` under them; while `open`, the pad moves `key` along the row,
+  // and up or down to the key nearest above or below. Returns the key clicked, or pressed with A while open, or -1.
+  int OnScreenKeys(ImDrawList* d, const Stage& st, ImVec2 k0, const Input& in, int& key, bool open, bool caps, bool space,
+                   const char* hint) {
+    const kit::Fonts& f = kit::GetFonts();
+    const std::vector<OnKey>& keys = OnKeys(space);
+    const int all = int(keys.size());
+    if (key < 0 || key >= all) key = 10;
+    kit::Spaced(d, f.typed, st(14), k0, kit::kKhakiText, "ON SCREEN KEYBOARD", st(2));
+    const float cell = st(36), gap = st(4.5f), kh = st(40);
+    int clicked = -1;
+    for (int k = 0; k < all; ++k) {
+      const OnKey& on = keys[size_t(k)];
+      const ImVec2 c0(k0.x + float(on.col) * (cell + gap), k0.y + st(26) + float(on.row) * (kh + gap));
+      const ImVec2 c1(c0.x + float(on.span) * cell + float(on.span - 1) * gap, c0.y + kh);
+      std::string label = on.label;
+      if (std::isalpha(static_cast<unsigned char>(on.ch)) && !caps)
+        label[0] = char(std::tolower(static_cast<unsigned char>(label[0])));
+      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
+      const bool sel = open && k == key;
+      d->AddRectFilled(c0, c1, sel ? kit::kGreen : hover ? kit::kPaper : kit::kPaperCard);
+      if (on.kind == 2 && caps) d->AddRectFilled(ImVec2(c0.x, c1.y - st(3)), c1, sel ? kit::kCream : kit::kGreen);
+      const float size = on.kind == 0 && on.ch != ' ' ? st(18) : st(15);
+      d->AddText(f.ui, size, ImVec2((c0.x + c1.x - kit::TextWidth(f.ui, size, label)) * 0.5f, c0.y + (kh - size * 1.48f) * 0.5f),
+                 sel ? IM_COL32(255, 255, 255, 255) : kit::kInk, label.c_str());
+      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = k, key = k;
+    }
+    if (hint)
+      kit::Wrapped(d, f.typed, st(13), ImVec2(k0.x, k0.y + st(26) + 5 * (kh + gap) + st(6)), kit::kKhakiText, hint, st(400));
+    if (!open) return clicked;
+    const OnKey& now = keys[size_t(key)];
+    if (in.left || in.right) {
+      std::vector<int> row;
+      for (int k = 0; k < all; ++k)
+        if (keys[size_t(k)].row == now.row) row.push_back(k);
+      const int at = int(std::find(row.begin(), row.end(), key) - row.begin()), n = int(row.size());
+      key = row[size_t((at + (in.right ? 1 : n - 1)) % n)];
+    }
+    if (in.up || in.down) {
+      const int to = (now.row + (in.down ? 1 : 4)) % 5;
+      const float mid = float(now.col) + float(now.span) * 0.5f;
+      int best = key;
+      float best_d = 1e9f;
+      for (int k = 0; k < all; ++k) {
+        if (keys[size_t(k)].row != to) continue;
+        const float dist = std::fabs(float(keys[size_t(k)].col) + float(keys[size_t(k)].span) * 0.5f - mid);
+        if (dist < best_d) best_d = dist, best = k;
+      }
+      key = best;
+    }
+    if (in.accept) clicked = key;
+    return clicked;
+  }
   void AccountPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("account");
     const Stage st = StageOf(io);
@@ -1283,12 +1412,19 @@
         if (ch < 128) CodeType(char(ch)), name_keys_ = false;
         continue;
       }
+      if (tag_mode_) {  // the clan tag box has the typing (game_menu_clan.inc)
+        if (ch < 128) TagType(char(ch), true), name_keys_ = false;
+        continue;
+      }
       if (ch < 128 && NameChar(char(ch)) && int(name_text_.size()) < kNameMax) {
         name_text_ += char(ch);
         name_error_.clear(), name_caps_ = false;
         name_keys_ = false;  // a real keyboard types: the on screen keys close, so its Enter saves
       }
     }
+    // Ctrl+V or Shift+Insert (paste_keys.h): the clipboard into the box with the typing; a right click on a box offers
+    // PASTE and CLEAR (game_menu_clan.inc BoxMenu).
+    if (paste::Pressed()) NamePaste(paste::Text(), "keys");
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) NameDelete();
     if (ImGui::IsKeyPressed(ImGuiKey_Tab) && !code_mode_) NameRandom();
     // Protect your name: X (F2) protects the saved name or shows its recovery code; LB (F3) types a recovery code.
@@ -1322,6 +1458,7 @@
       prompts.push_back({kit::Button::kX, x_label, "F2"});
       if (!NameProtected()) prompts.push_back({kit::Button::kLB, "Recovery code", "F3"});
     }
+    if (!code_mode_) prompts.push_back({kit::Button::kRB, tag_mode_ ? "Soldier name" : "Clan tag", "F4"});
     Prompts(d, st, st.P(120, 720 - 30 - 42), prompts, in);
     // Enter here is the keyboard's after the merge with the controller (MergeInput), not the raw key: Steam's desktop
     // layout gives a controller's A as Enter too, which saved an empty name instead of opening the keys. With the on
@@ -1339,7 +1476,7 @@
       const float x = a.x + st(40), w = st(620);
       float y = a.y + st(32);
       kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint,
-                  name_setup_ ? "STEP 2 OF 9 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
+                  name_setup_ ? "STEP 2 OF 8 \xC2\xB7 ACCOUNT" : "ACCOUNT", st(2));
       y += st(24);
       kit::Heading(d, st(52), ImVec2(x, y), kit::kInk, code_mode_ ? "USE A RECOVERY CODE" : "CHOOSE YOUR SOLDIER NAME", st(2), w);
       y += st(64);
@@ -1353,24 +1490,12 @@
                               "on a server already uses it, a number is added for that server.",
                         w) +
            st(20);
-      kit::Spaced(d, f.typed, st(14), ImVec2(x, y), kit::kInkFaint, code_mode_ ? "RECOVERY CODE" : "SOLDIER NAME", st(2));
-      y += st(22);
-      const ImVec2 n0(x, y), n1(x + w, y + st(58));
-      d->AddRectFilled(n0, n1, kit::kPaperLight);
-      d->AddRect(n0, n1, kit::kGreen, 0, 0, st(3));
-      d->AddText(f.typed, st(30), ImVec2(x + st(14), y + st(11)), kit::kInk, name_text_.c_str());
-      if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
-        const float cx = x + st(16) + kit::TextWidth(f.typed, st(30), name_text_);
-        d->AddRectFilled(ImVec2(cx, y + st(12)), ImVec2(cx + st(3), y + st(46)), kit::kInk);
+      NameFields(d, st, x, y, w);  // the clan tag and soldier name boxes, or the recovery code's (game_menu_clan.inc)
+      {
+        const std::string& error = !name_error_.empty() ? name_error_ : code_mode_ ? name_error_ : tag_refusal_;
+        d->AddText(f.typed, st(14), ImVec2(x, y), error.empty() ? kit::kInkFaint : kit::kRed,
+                   error.empty() ? NameFieldHint() : error.c_str());
       }
-      const std::string count = std::to_string(name_text_.size()) + " / " +
-                                std::to_string(code_mode_ ? account::kCodeLength : kNameMax);
-      d->AddText(f.typed, st(14), ImVec2(x + w - st(14) - kit::TextWidth(f.typed, st(14), count), y + st(22)),
-                 kit::kInkFaint, count.c_str());
-      y += st(66);
-      d->AddText(f.typed, st(14), ImVec2(x, y), name_error_.empty() ? kit::kInkFaint : kit::kRed,
-                 name_error_.empty() ? (code_mode_ ? "20 letters and numbers" : "3 to 15 letters, numbers or underscores")
-                                     : name_error_.c_str());
       y += st(30);
       if (!code_mode_) {
         d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
@@ -1380,83 +1505,12 @@
       }
       AccountBox(d, st, ImVec2(x, y), w);
     }
-    // The on screen keys, QWERTY (TekRantGaming, 8 Nov): the numbers, three rows of letters with the underscore, then
-    // Capitals and Done. Ten columns; a key's span is in columns.
-    struct OnKey {
-      const char* label;
-      char ch;  // the character typed, or 0: a special key (kind)
-      int kind;  // 0 a character, 1 Delete, 2 Capitals, 3 Done
-      int row, col, span;
-    };
-    static const std::vector<OnKey> kOnKeys = [] {
-      std::vector<OnKey> v;
-      static const char* kRows[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL_", "ZXCVBNM"};
-      static char labels[40][2] = {};
-      int n = 0;
-      for (int r = 0; r < 4; ++r)
-        for (int c = 0; kRows[r][c]; ++c, ++n) {
-          labels[n][0] = kRows[r][c];
-          v.push_back({labels[n], kRows[r][c], 0, r, c, 1});
-        }
-      v.push_back({"DEL", 0, 1, 3, 7, 3});
-      v.push_back({"CAPS", 0, 2, 4, 0, 5});
-      v.push_back({"DONE", 0, 3, 4, 5, 5});
-      return v;
-    }();
-    const int kAll = int(kOnKeys.size());
-    if (name_key_ < 0 || name_key_ >= kAll) name_key_ = 10;
-    const ImVec2 k0 = st.P(846, 150);
-    kit::Spaced(d, f.typed, st(14), k0, kit::kKhakiText, "ON SCREEN KEYBOARD", st(2));
-    const float cell = st(36), gap = st(4.5f), kh = st(40);
-    auto key_rect = [&](int k, ImVec2& c0, ImVec2& c1) {
-      const OnKey& key = kOnKeys[k];
-      c0 = ImVec2(k0.x + float(key.col) * (cell + gap), k0.y + st(26) + float(key.row) * (kh + gap));
-      c1 = ImVec2(c0.x + float(key.span) * cell + float(key.span - 1) * gap, c0.y + kh);
-    };
-    int clicked = -1;
-    for (int k = 0; k < kAll; ++k) {
-      ImVec2 c0, c1;
-      key_rect(k, c0, c1);
-      const OnKey& key = kOnKeys[k];
-      std::string label = key.label;
-      if (std::isalpha(static_cast<unsigned char>(key.ch)) && !name_caps_)
-        label[0] = char(std::tolower(static_cast<unsigned char>(label[0])));
-      const bool hover = ImGui::IsMouseHoveringRect(c0, c1);
-      const bool sel = name_keys_ && k == name_key_;
-      d->AddRectFilled(c0, c1, sel ? kit::kGreen : hover ? kit::kPaper : kit::kPaperCard);
-      if (key.kind == 2 && name_caps_) d->AddRectFilled(ImVec2(c0.x, c1.y - st(3)), c1, sel ? kit::kCream : kit::kGreen);
-      const float size = key.kind == 0 ? st(18) : st(15);
-      d->AddText(f.ui, size, ImVec2((c0.x + c1.x - kit::TextWidth(f.ui, size, label)) * 0.5f, c0.y + (kh - size * 1.48f) * 0.5f),
-                 sel ? IM_COL32(255, 255, 255, 255) : kit::kInk, label.c_str());
-      if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = k, name_key_ = k;
-    }
-    kit::Wrapped(d, f.typed, st(13), ImVec2(k0.x, k0.y + st(26) + 5 * (kh + gap) + st(6)), kit::kKhakiText,
-                 "With a keyboard, just type. With a controller, move onto these keys with the D-pad or A.", st(400));
+    const std::vector<OnKey>& kOnKeys = OnKeys(false);
+    int clicked = OnScreenKeys(d, st, st.P(846, 150), in, name_key_, name_keys_, name_caps_, false,
+                               "With a keyboard, just type. With a controller, move onto these keys with the D-pad or A.");
     StampCorner(d, st);
-    // The pad on the keys: along the row, and up or down to the key nearest above or below.
     const bool pad_accept = in.accept && !enter;
     if (name_keys_) {
-      const OnKey& now = kOnKeys[name_key_];
-      if (in.left || in.right) {
-        std::vector<int> row;
-        for (int k = 0; k < kAll; ++k)
-          if (kOnKeys[k].row == now.row) row.push_back(k);
-        const int at = int(std::find(row.begin(), row.end(), name_key_) - row.begin()), n = int(row.size());
-        name_key_ = row[(at + (in.right ? 1 : n - 1)) % n];
-      }
-      if (in.up || in.down) {
-        const int to = (now.row + (in.down ? 1 : 4)) % 5;
-        const float mid = float(now.col) + float(now.span) * 0.5f;
-        int best = name_key_;
-        float best_d = 1e9f;
-        for (int k = 0; k < kAll; ++k) {
-          if (kOnKeys[k].row != to) continue;
-          const float dist = std::fabs(float(kOnKeys[k].col) + float(kOnKeys[k].span) * 0.5f - mid);
-          if (dist < best_d) best_d = dist, best = k;
-        }
-        name_key_ = best;
-      }
-      if (in.accept) clicked = name_key_;
       if (in.x) NameDelete();
       if (in.back) name_keys_ = false, in.back = false;
     } else if (pad_accept || in.up || in.down || in.left || in.right) {
@@ -1478,6 +1532,7 @@
       }
     }
     if (!name_keys_ && in.y && !code_mode_) NameRandom();
+    if (!code_mode_ && (in.next_tab || ImGui::IsKeyPressed(ImGuiKey_F4, false))) TagSwitch(!tag_mode_);  // clan tag box
     if ((!name_keys_ && in.x) || protect_key) {
       if (code_mode_) {
       } else if (NameProtected() && name_text_ == settings_.Get("player_name", "")) {
@@ -1509,6 +1564,10 @@
       name_text_.clear();
       for (const char* c = v; *c; ++c)
         if (NameChar(*c)) name_text_ += *c;
+      if (const char* t = std::getenv("BF_DEV_TAG")) {  // BF_DEV_TAG=<tag>: the clan tag box too ("-": emptied)
+        tag_text_.clear();
+        for (const char* c = t; *c && *c != '-'; ++c) tag_text_ += *c;
+      }
       NameSave();
     }
 #endif
@@ -1828,7 +1887,7 @@
       kit::Tape(d, ImVec2(b.x - st(110), a.y + st(4)), st(110), st(26), 3);
       const float x = a.x + st(44), w = st(892);
       float y = a.y + st(40);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 9 OF 9", st(2));
+      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "FIRST TIME SETUP \xC2\xB7 STEP 8 OF 8", st(2));
       y += st(24);
       kit::Heading(d, st(62), ImVec2(x, y), kit::kInk, "YOU'RE ALL SET, " + Upper(settings_.Get("player_name", "SOLDIER")),
                    st(2), w);
@@ -1923,7 +1982,8 @@
     {
       const std::string name = settings_.Get("player_name", "Soldier");
       const std::string rank = "RANK " + std::to_string(Rank()) + " \xC2\xB7 " + Upper(kRanks[Rank() - 1]);
-      const float nw = std::max(kit::TextWidth(f.ui_bold, st(22), name), kit::SpacedWidth(f.typed, st(13), rank, 0));
+      const std::string tag = clan::OwnTag();  // [TAG]Name (clan_tags.h)
+      const float nw = std::max(clan::TaggedWidth(f.ui_bold, st(22), name, tag), kit::SpacedWidth(f.typed, st(13), rank, 0));
       const std::vector<Cue> e = {{kit::Button::kBack, "Edit"}};
       const float ew = PromptsWidth(st, e, 14);
       const float w = st(12) + st(44) + st(14) + nw + st(18) + ew + st(10);
@@ -1931,7 +1991,7 @@
       d->AddRectFilled(a, b, IM_COL32(15, 17, 13, 214));
       d->AddRectFilled(a, ImVec2(a.x + st(4), b.y), kit::kStamp);
       RankBadge(d, st, ImVec2(a.x + st(14) + st(22), a.y + st(30)), Rank());
-      d->AddText(f.ui_bold, st(22), ImVec2(a.x + st(72), a.y + st(7)), kit::kCream, name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(22), ImVec2(a.x + st(72), a.y + st(7)), kit::kCream, name, tag, kit::kGold);
       d->AddText(f.typed, st(13), ImVec2(a.x + st(72), a.y + st(38)), kit::kKhakiText, rank.c_str());
       Input edit_in;
       Prompts(d, st, ImVec2(b.x - ew - st(8), a.y + st(18)), e, edit_in, 14);
@@ -2049,180 +2109,18 @@
 #endif
   }
 
-  void StatsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
-    const ImVec2 sz = io.DisplaySize;
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
-    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 170));
-    const float cx0 = st.P(40, 0).x, cx1 = cx0 + st(400);
-    d->AddRectFilled(ImVec2(0, 0), ImVec2(cx1, sz.y), IM_COL32(15, 17, 13, 226));
-    d->AddRectFilled(ImVec2(cx1, 0), ImVec2(cx1 + st(1.4f), sz.y), IM_COL32(201, 183, 122, 110));
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim,
-                test_profile_active_ ? "STATS & AWARDS / TEST PROFILE" : "STATS & AWARDS", st(3));
-    Text(d, f.stencil, st(40), ImVec2(cx0 - st(2), st.P(0, 66).y), kit::kCream, "SERVICE RECORD");
-    d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
-    // The soldier.
-    const std::string name = settings_.Get("player_name", "Soldier");
-    const Settings& record = test_profile_active_ ? test_profile_ : settings_;
-    const double raw_seconds = std::atof(record.Get("match_seconds", "0").c_str());
-    const double seconds = std::isfinite(raw_seconds) ? std::clamp(raw_seconds, 0.0, 2147483647.0) : 0.0;
-    const int rank_number = Rank(record, seconds);
-    RankBadge(d, st, st.P(62, 172), rank_number);
-    d->AddText(f.ui_bold, st(26), st.P(96, 150), kit::kCream, name.c_str());
-    const std::string rank = "RANK " + std::to_string(rank_number) + " \xC2\xB7 " + Upper(kRanks[rank_number - 1]);
-    d->AddText(f.typed, st(14), st.P(96, 184), kit::kKhakiText, rank.c_str());
-    // The totals, from the stat.<label> lines.
-    struct Line {
-      std::string label;
-      int events;
-      double points;
-    };
-    std::vector<Line> lines;
-    double total = 0;
-    for (const auto& [key, value] : record.values) {
-      if (key.rfind("stat.", 0) != 0) continue;
-      const size_t comma = value.find(',');
-      const char* count_end = value.data() + std::min(comma, value.size());
-      int events = 0;
-      const auto count = std::from_chars(value.data(), count_end, events);
-      if (count.ec != std::errc{} || count.ptr != count_end || events < 0) continue;
-      const double points = comma == std::string::npos ? 0 : std::atof(value.c_str() + comma + 1);
-      if (!std::isfinite(points)) continue;
-      const Line l{key.substr(5), events, points};
-      total += l.points;
-      lines.push_back(l);
-    }
-    std::sort(lines.begin(), lines.end(), [](const Line& a, const Line& b) { return a.points > b.points; });
-    auto pretty = [](std::string s) {  // CQ_StringForFlagCapture -> FLAG CAPTURE
-      for (const char* p : {"CQ_StringFor", "StringFor", "CQ_"})
-        if (s.rfind(p, 0) == 0) s = s.substr(std::strlen(p));
-      std::string out;
-      for (size_t i = 0; i < s.size(); ++i) {
-        if (i && std::isupper(static_cast<unsigned char>(s[i])) && std::islower(static_cast<unsigned char>(s[i - 1])))
-          out += ' ';
-        out += char(std::toupper(static_cast<unsigned char>(s[i] == '_' ? ' ' : s[i])));
-      }
-      return out;
-    };
-    float y = st.P(0, 232).y;
-    auto row = [&](const std::string& k, const std::string& v) {
-      kit::Spaced(d, f.typed, st(13), ImVec2(cx0, y), kit::kKhakiDim, k, st(2));
-      d->AddText(f.ui_bold, st(24), ImVec2(cx0, y + st(18)), kit::kCream, v.c_str());
-      y += st(62);
-    };
-    row("TIME IN MATCHES", fmt::format("{} H {:02d} MIN", int(seconds / 3600), int(seconds / 60) % 60));
-    row("SCORE", fmt::format("{:.0f}", total));
-    // Every kind of event, at the right.
-    const ImVec2 pa(st.P(470, 140)), pb(st.P(1240, 640));
-    d->AddRectFilled(pa, pb, IM_COL32(15, 17, 13, 214));
-    d->AddRectFilled(pa, ImVec2(pa.x + st(4), pb.y), kit::kStamp);
-    kit::Spaced(d, f.typed, st(13), ImVec2(pa.x + st(28), pa.y + st(22)), kit::kKhakiDim, "IN THE FIELD", st(3));
-    float ly = pa.y + st(56);
-    if (lines.empty())
-      kit::Wrapped(d, f.typed, st(15), ImVec2(pa.x + st(28), ly), kit::kKhakiText,
-                   "Nothing yet. Captures, kills and the rest of your score show here after your first match.",
-                   pb.x - pa.x - st(56));
-    for (const Line& l : lines) {
-      if (ly > pb.y - st(40)) break;
-      d->AddText(f.ui_bold, st(20), ImVec2(pa.x + st(28), ly), kit::kCream, pretty(l.label).c_str());
-      const std::string v = fmt::format("{} x   {:+.0f}", l.events, l.points);
-      d->AddText(f.typed, st(16), ImVec2(pb.x - st(28) - kit::TextWidth(f.typed, st(16), v), ly + st(3)), kit::kKhakiText,
-                 v.c_str());
-      d->AddRectFilled(ImVec2(pa.x + st(28), ly + st(34)), ImVec2(pb.x - st(28), ly + st(35)), IM_COL32(201, 183, 122, 30));
-      ly += st(44);
-    }
-    // The BACK strip's click goes into the copy (GitHub issue 19, 14 Nov 2026: it was never read, so only Esc and B
-    // went back from Stats & Awards, Achievements and Leaderboards).
-    Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, in_copy_ = in, 15);
-    if (in.back || in_copy_.back) BackToMenu(kRowStats, 4);  // back on the menu's Stats & Awards row
-  }
+  // Stats & Awards, Leaderboards and Achievements: game_menu_progress.inc (his picks S1, L1, M1 of 16 Nov 2026).
   Input in_copy_;
-  // Achievements, ours (in place of the Xbox screen the game opened): the game's own list from its title data, with
-  // what this player unlocked (the runtime's achievement manager keeps the game's own unlocks), scrolled with the pad.
   int ach_scroll_ = 0;
-  void AchievementsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
-    const ImVec2 sz = io.DisplaySize;
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
-    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
-    std::vector<rex::system::AchievementInfo> list;
-    int unlocked = 0, score = 0, total = 0;
-    auto* k = REX_KERNEL_STATE();
-    const std::string default_state = test_profile_.Get("achievements", "actual");
-    auto is_unlocked = [&](uint32_t id) {
-      if (test_profile_active_) {
-        const std::string state = test_profile_.Get("achievement." + std::to_string(id), default_state);
-        if (state == "unlocked") return true;
-        if (state == "locked") return false;
-      }
-      return k && k->achievements().IsUnlocked(id);
-    };
-    if (k) {
-      list = k->achievements().ListAchievements();
-      for (const auto& a : list) {
-        total += int(a.gamerscore);
-        if (is_unlocked(a.id)) ++unlocked, score += int(a.gamerscore);
-      }
-    }
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim,
-                test_profile_active_ ? "BATTLEFIELD 1943 / TEST PROFILE" : "BATTLEFIELD 1943", st(3));
-    Text(d, f.stencil, st(40), ImVec2(st.P(40, 0).x - st(2), st.P(0, 66).y), kit::kCream, "ACHIEVEMENTS");
-    d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
-    const std::string head = fmt::format("{} OF {} UNLOCKED  /  {} OF {} POINTS", unlocked, list.size(), score, total);
-    kit::Spaced(d, f.typed, st(14), st.P(40, 140), kit::kKhakiText, head, st(2));
-    const int per = 7;
-    const int pages = std::max(1, int(list.size() + per - 1) / per);
-    if (in.down || in.next_tab) ach_scroll_ = std::min(ach_scroll_ + 1, pages - 1);
-    if (in.up || in.prev_tab) ach_scroll_ = std::max(ach_scroll_ - 1, 0);
-    if (io.MouseWheel < 0) ach_scroll_ = std::min(ach_scroll_ + 1, pages - 1);
-    if (io.MouseWheel > 0) ach_scroll_ = std::max(ach_scroll_ - 1, 0);
-    float y = st.P(0, 176).y;
-    const float x0 = st.P(40, 0).x, x1 = st.P(1240, 0).x;
-    if (list.empty())
-      kit::Wrapped(d, f.typed, st(15), ImVec2(x0, y), kit::kKhakiText,
-                   "The game's achievements are not loaded in this session.", x1 - x0);
-    for (int i = ach_scroll_ * per; i < int(list.size()) && i < (ach_scroll_ + 1) * per; ++i) {
-      const auto& a = list[size_t(i)];
-      const bool got = is_unlocked(a.id);
-      const ImVec2 ra(x0, y), rb(x1, y + st(62));
-      d->AddRectFilled(ra, rb, IM_COL32(15, 17, 13, got ? 226 : 180));
-      d->AddRectFilled(ra, ImVec2(ra.x + st(4), rb.y), got ? kit::kStamp : IM_COL32(201, 183, 122, 60));
-      d->AddText(f.ui_bold, st(20), ImVec2(ra.x + st(24), ra.y + st(8)), got ? kit::kCream : kit::kKhakiDim,
-                 a.label.c_str());
-      const std::string& desc = got || a.unachieved_description.empty() ? a.description : a.unachieved_description;
-      d->AddText(f.typed, st(13), ImVec2(ra.x + st(24), ra.y + st(36)), got ? kit::kKhakiText : kit::kKhakiDim, desc.c_str());
-      const std::string pts = test_profile_active_
-          ? fmt::format("ID {}  /  {}{}", a.id, a.gamerscore, got ? "  UNLOCKED" : "")
-          : fmt::format("{}{}", a.gamerscore, got ? "  UNLOCKED" : "");
-      d->AddText(f.typed, st(14), ImVec2(rb.x - st(24) - kit::TextWidth(f.typed, st(14), pts), ra.y + st(22)),
-                 got ? kit::kGreenBright : kit::kKhakiDim, pts.c_str());
-      y += st(68);
-    }
-    if (pages > 1)
-      kit::Spaced(d, f.typed, st(12), ImVec2(x1 - st(120), st.P(0, 140).y), kit::kKhakiDim,
-                  fmt::format("PAGE {} OF {}", ach_scroll_ + 1, pages), st(2));
-    Input cue = in;
-    Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
-    if (in.back || cue.back) {  // back where it was opened: the pause, or the main menu's Achievements row (issue 19)
-      if (ach_from_pause_) page_ = Page::kPause, pause_row_ = kPauseAchievements, ach_from_pause_ = false;
-      else BackToMenu(kRowAchievements, 6);
-    }
-  }
   // Leaderboards, ours (in place of the game's EA screen, docs/MENUS-PLAN.md): every player's own totals as their
   // games send them to our backend (stats_put after each save of Stats & Awards), ranked by score; asked every 15 s
   // on a worker while the page is open.
   struct LbRow {
     std::string name;
+    std::string tag;  // the clan tag the backend says (clan_tags.h)
     int score = 0, seconds = 0, captures = 0;
   };
-  std::mutex lb_mutex_;
-  std::vector<LbRow> lb_rows_;
-  int lb_total_ = 0;
-  bool lb_ok_ = false, lb_answered_ = false;
-  double lb_asked_at_ = -100;
-  std::atomic<bool> lb_busy_{false};
+  double lb_asked_at_ = -100;  // below 0: the board asked again at once (game_menu_progress.inc)
   bool lb_from_pause_ = false;  // opened from the pause: B goes back there
 
   // Posted at the start (the totals saved in the profile, which before went out only with the next score event in a
@@ -2243,6 +2141,7 @@
       if (std::isalnum(static_cast<unsigned char>(c)) || c == ' ' || c == '_') name += c;
     if (name.empty()) return;
     const bool test = settings_.Get("test_progression", "") == "1";
+    reborn_achievements::Ensure();  // the awards below with Reborn's own
     std::string req = fmt::format(
         "{{\"op\": \"stats_put\", \"name\": \"{}\", \"score\": {:.0f}, \"seconds\": {:.0f}, \"captures\": {}", name,
         total, std::atof(settings_.Get("match_seconds", "0").c_str()), captures);
@@ -2310,82 +2209,6 @@
     }).detach();
   }
 
-  void LeaderboardsPage(ImDrawList* d, ImGuiIO& io, const Input& in) {
-    const ImVec2 sz = io.DisplaySize;
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    if (ImGui::GetTime() - lb_asked_at_ > 15 && !lb_busy_.load()) {
-      lb_asked_at_ = ImGui::GetTime();
-      lb_busy_ = true;
-      std::thread([this] {
-        std::string reply;
-        const bool ok = RegistryRequest("{\"op\": \"leaderboard\"}", reply);
-        std::vector<LbRow> rows;
-        if (ok) {
-          size_t at = reply.find("\"rows\"");
-          while (at != std::string::npos && rows.size() < 50) {
-            const size_t a = reply.find('{', at), b = a == std::string::npos ? a : reply.find('}', a);
-            if (a == std::string::npos || b == std::string::npos) break;
-            const std::string obj = reply.substr(a, b - a + 1);
-            LbRow r;
-            r.name = JsonField(obj, "name");
-            r.score = std::atoi(JsonField(obj, "score").c_str());
-            r.seconds = std::atoi(JsonField(obj, "seconds").c_str());
-            r.captures = std::atoi(JsonField(obj, "captures").c_str());
-            if (!r.name.empty()) rows.push_back(r);
-            at = b + 1;
-          }
-        }
-        std::lock_guard lock(lb_mutex_);
-        lb_rows_ = std::move(rows);
-        lb_total_ = ok ? std::atoi(JsonField(reply, "total").c_str()) : 0;
-        lb_ok_ = ok, lb_answered_ = true;
-        lb_busy_ = false;
-      }).detach();
-    }
-    MenuBackdrop(d, sz, StageOf(io));  // the new look's backdrop
-    d->AddRectFilled(ImVec2(0, 0), sz, IM_COL32(12, 14, 11, 186));
-    kit::Spaced(d, f.typed, st(12), st.P(40, 46), kit::kKhakiDim, "EVERY PLAYER, BY SCORE", st(3));
-    Text(d, f.stencil, st(40), ImVec2(st.P(40, 0).x - st(2), st.P(0, 66).y), kit::kCream, "LEADERBOARDS");
-    d->AddRectFilled(st.P(40, 120), st.P(80, 124), kit::kStamp);
-    std::vector<LbRow> rows;
-    int total = 0;
-    bool ok = false, answered = false;
-    {
-      std::lock_guard lock(lb_mutex_);
-      rows = lb_rows_, total = lb_total_, ok = lb_ok_, answered = lb_answered_;
-    }
-    const float x0 = st.P(40, 0).x, x1 = st.P(1240, 0).x;
-    const std::string mine = settings_.Get("player_name", "");
-    kit::Spaced(d, f.typed, st(14), st.P(40, 140), kit::kKhakiText,
-                !answered ? "ASKING THE SERVERS..." : !ok ? "THE SERVERS ARE NOT REACHABLE" : fmt::format("{} {}", total, total == 1 ? "PLAYER" : "PLAYERS"),
-                st(2));
-    float y = st.P(0, 176).y;
-    const float cols[] = {x0 + st(24), x0 + st(90), x1 - st(420), x1 - st(260), x1 - st(110)};
-    const char* heads[] = {"#", "SOLDIER", "SCORE", "TIME", "FLAGS"};
-    for (int c = 0; c < 5; ++c) kit::Spaced(d, f.typed, st(11), ImVec2(cols[c], y), kit::kKhakiDim, heads[c], st(2));
-    y += st(24);
-    for (size_t i = 0; i < rows.size() && y < st.P(0, 640).y; ++i) {
-      const LbRow& r = rows[i];
-      const bool me = !mine.empty() && r.name == mine;
-      d->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + st(40)), IM_COL32(15, 17, 13, me ? 236 : 200));
-      if (me) d->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + st(4), y + st(40)), kit::kStamp);
-      const ImU32 ink = me ? kit::kCream : kit::kKhakiText;
-      d->AddText(f.typed, st(15), ImVec2(cols[0], y + st(11)), ink, std::to_string(i + 1).c_str());
-      d->AddText(f.ui_bold, st(19), ImVec2(cols[1], y + st(8)), ink, r.name.c_str());
-      d->AddText(f.typed, st(15), ImVec2(cols[2], y + st(11)), ink, std::to_string(r.score).c_str());
-      d->AddText(f.typed, st(15), ImVec2(cols[3], y + st(11)), ink,
-                 fmt::format("{}H {:02d}M", r.seconds / 3600, (r.seconds / 60) % 60).c_str());
-      d->AddText(f.typed, st(15), ImVec2(cols[4], y + st(11)), ink, std::to_string(r.captures).c_str());
-      y += st(44);
-    }
-    Input cue = in;
-    Prompts(d, st, st.P(40, 720 - 24 - 34), {{kit::Button::kB, "BACK"}}, cue, 15);
-    if (in.back || cue.back) {  // the BACK strip's click too (issue 19)
-      if (lb_from_pause_) page_ = Page::kPause, pause_row_ = kPauseLeaderboards, lb_from_pause_ = false;
-      else BackToMenu(kRowLeaderboards, 7);  // back on the menu's Leaderboards row
-    }
-  }
   // Join Match With Friends, ours (in place of the game's Xbox friends screen, docs/MENUS-PLAN.md): the players signed
   // in now, from our backend, with the server each plays on (its GameManager host reports who joined); A joins that
   // server as the browser does. Asked every 5 s on a worker while the page is open.
@@ -2415,7 +2238,7 @@
           if (a == std::string::npos || b == std::string::npos) break;
           const std::string obj = reply.substr(a, b - a + 1);
           FriendRow r{JsonField(obj, "name"), JsonField(obj, "gid"), JsonField(obj, "server"), JsonField(obj, "map")};
-          if (!r.name.empty()) rows.push_back(r);
+          if (!r.name.empty()) clan::Note(r.name, JsonField(obj, "tag")), rows.push_back(r);
           at = b + 1;
         }
         std::lock_guard lock(fr_mutex_);
@@ -2458,7 +2281,8 @@
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       d->AddRectFilled(a, b, IM_COL32(15, 17, 13, sel ? 236 : 200));
       if (sel) d->AddRectFilled(a, ImVec2(a.x + st(4), b.y), kit::kStamp);
-      d->AddText(f.ui_bold, st(21), ImVec2(a.x + st(24), a.y + st(10)), sel ? kit::kCream : kit::kKhakiText, r.name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(21), ImVec2(a.x + st(24), a.y + st(10)), sel ? kit::kCream : kit::kKhakiText, r.name,
+                       clan::TagOf(r.name), kit::kGold);
       const std::string where = r.gid.empty() ? (r.server.empty() ? "IN THE MENUS" : Upper(r.server))  // a private match
                                               : Upper(r.server) + (r.map.empty() ? "" : "  /  " + Upper(r.map));
       d->AddText(f.typed, st(15), ImVec2(b.x - st(24) - kit::TextWidth(f.typed, st(15), where), a.y + st(15)),
@@ -2505,7 +2329,8 @@
           LbRow r;
           r.name = JsonField(obj, "name");
           r.score = std::atoi(JsonField(obj, "score").c_str());
-          if (!r.name.empty()) rows.push_back(r);
+          r.tag = JsonField(obj, "tag");
+          if (!r.name.empty()) clan::Note(r.name, r.tag), r.tag = clan::TagOf(r.name), rows.push_back(r);
           at = b + 1;
         }
         std::lock_guard lock(sb_mutex_);
@@ -2536,7 +2361,7 @@
       if (me) d->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + st(4), y + st(40)), kit::kStamp);
       const ImU32 ink = me ? kit::kCream : kit::kKhakiText;
       d->AddText(f.typed, st(15), ImVec2(x0 + st(24), y + st(11)), ink, std::to_string(i + 1).c_str());
-      d->AddText(f.ui_bold, st(19), ImVec2(x0 + st(90), y + st(8)), ink, rows[i].name.c_str());
+      clan::DrawTagged(d, f.ui_bold, st(19), ImVec2(x0 + st(90), y + st(8)), ink, rows[i].name, rows[i].tag, kit::kGold);
       const std::string sc = std::to_string(rows[i].score);
       d->AddText(f.typed, st(16), ImVec2(x1 - st(24) - kit::TextWidth(f.typed, st(16), sc), y + st(10)), ink, sc.c_str());
       y += st(44);
@@ -2585,7 +2410,39 @@
   // The row takes typing now: the name, or the port when it is the player's to choose.
   bool PmPortTyped() const { return pm_lan_ || !pm_upnp_; }
   bool PmTyping() const {
-    return !pm_hosting_ && (pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && PmPortTyped()));
+    return !pm_hosting_ && (pm_edit_ >= 0 || pm_row_ == kPmName || pm_row_ == kPmPassText || (pm_row_ == kPmPort && PmPortTyped()));
+  }
+  // The server name and the password from a controller (TekRantGaming, 16 Nov 2026: "when controller A is pressed on
+  // server name bring up on screen keyboard to allow editing and same with password edit"): A on either row opens
+  // the on screen keys (OnScreenKeys, the soldier name's) over the map's picture with a copy of the text; DONE or
+  // Start writes it back, B leaves it as it was. The password shows as stars unless Y shows it.
+  int pm_edit_ = -1;  // the row the keys edit (kPmName or kPmPassText), or -1
+  std::string pm_edit_text_;
+  int pm_edit_key_ = 10;
+  bool pm_edit_caps_ = false, pm_pass_shown_ = false;
+  // The rows' limits, the same for the keyboard's typing and the on screen keys.
+  static size_t PmMost(int row) { return row == kPmName ? 32 : row == kPmPassText ? 24 : 5; }
+  static bool PmCharOk(int row, unsigned c) {
+    return row == kPmName       ? (c >= 32 && c < 127 && c != '"' && c != '\\')
+           : row == kPmPassText ? (c > 32 && c < 127 && c != '"' && c != '\\')
+                                : (c >= '0' && c <= '9');
+  }
+  std::string PmPassShown(const std::string& pass) const { return pm_pass_shown_ ? pass : std::string(pass.size(), '*'); }
+  void PmEditOpen(int row) {
+    pm_edit_ = row, pm_edit_key_ = 10;
+    pm_edit_text_ = row == kPmName ? pm_name_ : pm_pass_;
+    pm_edit_caps_ = row == kPmName && pm_edit_text_.empty();
+    REXLOG_INFO("BF private match: the on screen keys open on the {}", row == kPmName ? "server name" : "password");
+  }
+  void PmEditClose(bool save) {
+    if (pm_edit_ < 0) return;
+    if (save) {
+      (pm_edit_ == kPmName ? pm_name_ : pm_pass_) = pm_edit_text_;
+      SavePrivateMatchChoices();
+    }
+    REXLOG_INFO("BF private match: the on screen keys {} the {} ({} characters)", save ? "saved" : "cancelled",
+                pm_edit_ == kPmName ? "server name" : "password", (pm_edit_ == kPmName ? pm_name_ : pm_pass_).size());
+    pm_edit_ = -1;
   }
   int pm_row_ = 0, pm_map_ = 0;
   bool pm_upnp_ = true;
@@ -2607,6 +2464,7 @@
     pm_pass_ = settings_.Get("private_match_password", "");
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
+    pm_edit_ = -1;  // the on screen keys never left open from an earlier visit
     pm_dn_ = settings_.Get("private_match_day_night", "0") == "1";
     pm_time_ = std::clamp(float(std::atof(settings_.Get("private_match_time", "16").c_str())), 0.0f, 23.5f);
     pm_daylen_ = std::atoi(settings_.Get("private_match_day_minutes", "0").c_str());
@@ -2803,8 +2661,29 @@
       return;
     }
     // The prompts first: a click on one is that button's press for the rest of the frame.
-    std::vector<Cue> cues = {{kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"}, {kit::Button::kB, "BACK"}};
+    const bool editing = pm_edit_ >= 0;
+    const bool text_row = pm_row_ == kPmName || pm_row_ == kPmPassText;
+    std::vector<Cue> cues;
+    if (editing) {
+      cues = {{kit::Button::kA, "TYPE"}, {kit::Button::kX, "DELETE", "Backspace"}};
+      if (pm_edit_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
+      cues.push_back({kit::Button::kStart, "DONE", "", true});
+      cues.push_back({kit::Button::kB, "CANCEL"});
+    } else {
+      // On the name and the password, A opens the on screen keys; the keyboard types straight into them (no Edit, as
+      // the soldier name's page).
+      if (!text_row) cues.push_back({kit::Button::kA, pm_row_ == kPmHost ? "HOST" : "CHANGE"});
+      else if (device_ != Device::kKeyboard) cues.push_back({kit::Button::kA, "EDIT"});
+      if (pm_row_ == kPmPassText) cues.push_back({kit::Button::kY, pm_pass_shown_ ? "HIDE" : "SHOW", "F2"});
+      cues.push_back({kit::Button::kB, "BACK"});
+    }
     Prompts(d, st, st.P(48, 662), cues, in, 15);
+    // F2 (the keyboard's Y here: R types a letter) shows or hides the password.
+    if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && (pm_row_ == kPmPassText || pm_edit_ == kPmPassText)) in.y = true;
+    // While the keys are open, the page's own rows take nothing: the keys get this frame's presses (ekeys, below).
+    Input ekeys;
+    if (editing) ekeys = in, in = {};
+    if (!editing && in.y && pm_row_ == kPmPassText) pm_pass_shown_ = !pm_pass_shown_;
     // The rows in the panel's order (13 Nov 2026, after the first look at it: the name first with its field under it,
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
     std::vector<int> order = {kPmName, kPmPass};
@@ -2830,16 +2709,17 @@
       ImGuiContext& g = *ImGui::GetCurrentContext();
       g.PlatformImeData.WantTextInput = true;
       g.PlatformImeData.ViewportId = ImGui::GetMainViewport()->ID;
-      std::string& text = pm_row_ == kPmName ? pm_name_ : pm_row_ == kPmPassText ? pm_pass_ : pm_port_text_;
-      const size_t most = pm_row_ == kPmName ? 32 : pm_row_ == kPmPassText ? 24 : 5;
+      // With the on screen keys open: their copy (a real keyboard's typing then closes them with it kept, as on the
+      // soldier name's page, and goes on in the row).
+      const int row = editing ? pm_edit_ : pm_row_;
+      std::string& text = editing ? pm_edit_text_ : pm_row_ == kPmName ? pm_name_ : pm_row_ == kPmPassText ? pm_pass_ : pm_port_text_;
+      bool typed = false;
       for (int i = 0; i < io.InputQueueCharacters.Size; ++i) {
         const ImWchar c = io.InputQueueCharacters[i];
-        const bool ok = pm_row_ == kPmName       ? (c >= 32 && c < 127 && c != '"' && c != '\\')
-                        : pm_row_ == kPmPassText ? (c > 32 && c < 127 && c != '"' && c != '\\')
-                                                 : (c >= '0' && c <= '9');
-        if (ok && text.size() < most) text += char(c);
+        if (PmCharOk(row, unsigned(c)) && text.size() < PmMost(row)) text += char(c), typed = true;
       }
       if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) text.pop_back();
+      if (editing && typed) PmEditClose(true);
       in.left = in.right = false;
     }
     auto change = [&](int row, int step) {
@@ -2894,7 +2774,7 @@
       const float h = i == kPmName ? st(74) : sub ? st(29) : st(41);
       const float title_h = i == kPmName ? st(38) : h;
       const ImVec2 r0(ra.x, y), r1(rb.x, y + h);
-      const bool hover = ImGui::IsMouseHoveringRect(r0, r1);
+      const bool hover = !editing && ImGui::IsMouseHoveringRect(r0, r1);
       if (hover && io.MouseDelta.x + io.MouseDelta.y != 0) pm_row_ = i;
       if (hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) clicked = i;
       const bool sel = i == pm_row_;
@@ -2994,11 +2874,11 @@
       } else if (i == kPmPass) {
         draw_switch(pm_pass_on_);
       } else if (i == kPmPassText) {
-        // The password's field, the row's width from the tick mark: shown as typed (it is the host's own).
+        // The password's field, the row's width from the tick mark: stars, or as typed while Y (F2) shows it.
         const ImVec2 f0(r0.x + st(76), r0.y + st(4)), f1(right, r1.y - st(4));
         d->AddRectFilled(f0, f1, sel ? IM_COL32(34, 36, 27, 22) : IM_COL32(0, 0, 0, 70));
         d->AddRect(f0, f1, sel ? kit::kInk : IM_COL32(241, 234, 211, 70), 0, 0, 1.0f);
-        const std::string shown = pm_pass_.empty() && !sel ? std::string("Type a password") : pm_pass_ + (sel ? caret : "");
+        const std::string shown = pm_pass_.empty() && !sel ? std::string("Type a password") : PmPassShown(pm_pass_) + (sel ? caret : "");
         d->PushClipRect(f0, f1, true);
         d->AddText(f.ui_bold, st(10.5f), ImVec2(f0.x + st(8), f0.y + (f1.y - f0.y - st(10.5f) * 1.45f) * 0.5f),
                    pm_pass_.empty() && !sel ? IM_COL32(241, 234, 211, 110) : sel ? kit::kInk : kit::kKhaki, shown.c_str());
@@ -3035,7 +2915,8 @@
     {
       static constexpr const char* kAbout[] = {
           "The map your match plays. All four in turn: the next map after each round, as on the Reborn servers.",
-          "The match's name in the server browser. Type it with the keyboard; left empty it is your name's match.",
+          "The match's name in the server browser. Type it with the keyboard, or A for the on screen keys; left empty "
+          "it is your name's match.",
           "Online: your match is on everybody's server browser, on the Community tab. LAN: for the PCs of your own "
           "network, with no internet needed; your PC answers the sign-in and the match list itself, and the match is "
           "on their browser's LAN tab (or they type your PC's network address in Direct connect).",
@@ -3077,7 +2958,14 @@
       const bool error = !pm_error_.empty();
       kit::Wrapped(d, f.ui, st(11), ImVec2(band.x + st(20), band.y + st(64)), error ? kit::kRed : kit::kInkFaint,
                    error ? pm_error_ : std::string(kAbout[pm_row_]), q0.x - band.x - st(40));
-      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH")) clicked = kPmHost;
+      if (GreenButton(d, st, q0, q1, kit::Button::kA, "HOST THE MATCH") && !editing) clicked = kPmHost;
+    }
+    if (pm_edit_ >= 0) PrivateMatchKeys(d, st, ImVec2(ha.x, ha.y), ImVec2(hb.x, band.y), ekeys);
+    // A (not the keyboard's Enter) on the name or the password opens the on screen keys; a click there selects the
+    // row for typing, as before.
+    if (in.accept && !accept_from_key_ && (pm_row_ == kPmName || pm_row_ == kPmPassText)) {
+      PmEditOpen(pm_row_);
+      in.accept = false;
     }
     if (in.accept) clicked = pm_row_;
     if (clicked >= 0) {
@@ -3089,6 +2977,67 @@
       if (pm_world_view_) pm_world_view_ = false, pm_row_ = kPmWorld;  // the world's rows: back to the match's
       else BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
     }
+  }
+
+  // The on screen keys over the map's picture (a..b) while the server name or the password is edited: its field with
+  // the copy being typed (the password in stars unless shown), the keys under it. `k`: this frame's presses.
+  void PrivateMatchKeys(ImDrawList* d, const Stage& st, ImVec2 a, ImVec2 b, const Input& k) {
+    const kit::Fonts& f = kit::GetFonts();
+    const bool name = pm_edit_ == kPmName;
+    d->AddRectFilled(a, b, IM_COL32(13, 15, 11, 255));  // opaque: the picture's chip showed through the heading
+    d->AddRect(a, b, IM_COL32(241, 234, 211, 30), 0, 0, 1.0f);
+    const float x = a.x + st(30), w = b.x - a.x - st(60);
+    kit::GameText(d, kit::GameFont::kHeadlineMedium, st(19), ImVec2(x, a.y + st(18)), kit::kCream,
+                  name ? "SERVER NAME" : "PASSWORD");
+    const ImVec2 n0(x, a.y + st(48)), n1(x + w, a.y + st(92));
+    d->AddRectFilled(n0, n1, kit::kPaperLight);
+    d->AddRect(n0, n1, kit::kGreen, 0, 0, st(3));
+    const std::string shown = name ? pm_edit_text_ : PmPassShown(pm_edit_text_);
+    const std::string count = std::to_string(pm_edit_text_.size()) + " / " + std::to_string(PmMost(pm_edit_));
+    const float count_w = kit::TextWidth(f.typed, st(12), count);
+    d->PushClipRect(n0, ImVec2(n1.x - count_w - st(24), n1.y), true);
+    d->AddText(f.typed, st(22), ImVec2(x + st(12), n0.y + st(9)), kit::kInk, shown.c_str());
+    if (std::fmod(ImGui::GetTime(), 1.0) < 0.6) {
+      const float cx = x + st(14) + kit::TextWidth(f.typed, st(22), shown);
+      d->AddRectFilled(ImVec2(cx, n0.y + st(9)), ImVec2(cx + st(2.5f), n1.y - st(9)), kit::kInk);
+    }
+    d->PopClipRect();
+    d->AddText(f.typed, st(12), ImVec2(n1.x - st(12) - count_w, n0.y + st(15)), kit::kInkFaint, count.c_str());
+    kit::Spaced(d, f.typed, st(8), ImVec2(x, n1.y + st(9)), kit::kKhakiDim,
+                name ? "UP TO 32 LETTERS, DIGITS, SPACES OR SIGNS. LEFT EMPTY, IT IS YOUR NAME'S MATCH."
+                     : pm_pass_shown_ ? "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y HIDES IT."
+                                      : "UP TO 24 LETTERS, DIGITS OR SIGNS, NO SPACES. Y SHOWS IT.",
+                st(1.5f));
+    // The keys, as the soldier name's: their width is ten keys (36 each, 4.5 apart).
+    const ImVec2 k0((a.x + b.x) * 0.5f - st(200), a.y + st(126));
+    Input keys = k;
+    if (k.start) keys.accept = false;  // Start is A too on this page: here it is Done only
+    const int clicked = OnScreenKeys(d, st, k0, keys, pm_edit_key_, true, pm_edit_caps_, name,
+                                     "With a keyboard, just type: the keys close and the row takes it.");
+    std::string& text = pm_edit_text_;
+    if (clicked >= 0) {
+      const OnKey& key = OnKeys(name)[size_t(clicked)];
+      if (key.kind != 0 || name) REXLOG_INFO("BF private match: on screen key {}", key.label);  // not the password's
+      if (key.kind == 0) {
+        char c = key.ch;
+        if (std::isalpha(static_cast<unsigned char>(c)))
+          c = pm_edit_caps_ ? char(std::toupper(static_cast<unsigned char>(c))) : char(std::tolower(static_cast<unsigned char>(c)));
+        if (PmCharOk(pm_edit_, static_cast<unsigned char>(c)) && text.size() < PmMost(pm_edit_)) text += c;
+        // The name's first letter a capital, then small ones (as the soldier name's keys).
+        if (name && std::isalpha(static_cast<unsigned char>(c)) && pm_edit_caps_ && text.size() == 1) pm_edit_caps_ = false;
+      } else if (key.kind == 1) {
+        if (!text.empty()) text.pop_back();
+      } else if (key.kind == 2) {
+        pm_edit_caps_ = !pm_edit_caps_;
+      } else {
+        PmEditClose(true);
+        return;
+      }
+    }
+    if (k.x && !text.empty()) text.pop_back();
+    if (k.y && !name) pm_pass_shown_ = !pm_pass_shown_;
+    if (k.start) PmEditClose(true);
+    else if (k.back) PmEditClose(false);
   }
 
   // While our server starts: its steps in the rail (ra..rb under the heading), the wait on the band (band..hb), then
@@ -3678,91 +3627,7 @@
     if (in.back) page_ = Page::kHome;
   }
 
-  // ---- Report an issue: for now where to report (Discord); later the GitHub issues page.
-
-  void ReportPage(ImDrawList* d, ImGuiIO& io, Input in) {
-    NotePage("report");
-    const Stage st = StageOf(io);
-    const kit::Fonts& f = kit::GetFonts();
-    Chrome(d, io, st, 0, SceneBehind() ? 0.82f : 0);
-    Prompts(d, st, st.P(240, 720 - 30 - 42),
-            {{kit::Button::kA, "Open our Discord"}, {kit::Button::kX, "Show my log file"}, {kit::Button::kB, "Back"}}, in);
-    const ImVec2 a = st.P(240, 110), b = st.P(1040, 570);
-    {
-      kit::Turn turn(d, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), -0.4f);
-      kit::Paper(d, a, b, st.u);
-      kit::Tape(d, ImVec2((a.x + b.x) * 0.5f, a.y + st(4)), st(110), st(26), 2);
-      const float x = a.x + st(44), w = st(712);
-      float y = a.y + st(40);
-      kit::Spaced(d, f.typed, st(15), ImVec2(x, y), kit::kInkFaint, "EARLY PLAYTEST \xC2\xB7 FEEDBACK", st(2));
-      y += st(24);
-      kit::Heading(d, st(56), ImVec2(x, y), kit::kInk, "REPORT AN ISSUE", st(2), w);
-      y += st(70);
-      y += kit::Wrapped(d, f.ui, st(20), ImVec2(x, y), kit::kInkSoft,
-                        "Found a bug, a crash or something that feels wrong? Tell us in the playtest's bug reports "
-                        "channel on our Discord. Say what you did, what you saw and what you expected.",
-                        w) +
-           st(18);
-      y += kit::Wrapped(d, f.ui, st(20), ImVec2(x, y), kit::kInkSoft,
-                        "Your log helps us most: attach the file bf1943.log from your user folder (Show my log file "
-                        "opens it). Crash reports are in the crashes folder beside it.",
-                        w) +
-           st(22);
-#if defined(_WIN32)
-      // An overlay hooked into the game, and what to do if the game crashes at its first frame: a player's v0.3.0 did,
-      // 8 starts of 8, inside RivaTuner Statistics Server's hook, and nothing said so (12 Nov 2026). The table and the
-      // check are crash_report.cpp's (overlay_hooks.inc, included here so this page's edit stays within it; the log
-      // has the same names). Looked up once a second: a hook can come after the start.
-      {
-#include "overlay_hooks.inc"
-        static double checked = -1;
-        static std::string notice;
-        if (const double now = ImGui::GetTime(); checked < 0 || now - checked > 1) {
-          checked = now;
-          std::vector<std::string> names;
-          bool rtss = false;
-          for (const HookedOverlay& h : HookedOverlays()) {
-            // Only the two seen in a crash's stack: Steam's overlay hooks into every game Steam starts (ours too,
-            // Add to Steam), and a notice about it would alarm most players for nothing.
-            if (h.product != "RivaTuner Statistics Server" && h.product != "OBS Studio") continue;
-            names.push_back(h.product);
-            rtss = rtss || h.product == "RivaTuner Statistics Server";
-          }
-          std::string who;
-          for (size_t i = 0; i < names.size(); ++i)
-            who += (i == 0 ? "" : i + 1 == names.size() ? " and " : ", ") + names[i];
-          const bool one = names.size() == 1;
-          notice.clear();
-          if (!names.empty()) {
-            notice = who + (one ? " is" : " are") +
-                     " hooked into the game. If the game crashes at its first frame, close " + (one ? "it" : "them");
-            if (rtss)
-              notice += std::string(" (and MSI Afterburner) or exclude bf1943.exe in ") + (one ? "its" : "their") +
-                        " profiles.";
-            else
-              notice += std::string(" or turn ") + (one ? "its overlay" : "their overlays") + " off for bf1943.exe.";
-          }
-        }
-        if (!notice.empty()) y += kit::Wrapped(d, f.ui, st(20), ImVec2(x, y), kit::kInkSoft, notice, w) + st(22);
-      }
-#endif
-      d->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + st(56)), kit::kPaperDim);
-      kit::Wrapped(d, f.typed, st(15), ImVec2(x + st(16), y + st(10)), kit::kInkFaint,
-                   "Soon this button opens the issue page on GitHub instead.", w - st(32));
-    }
-    StampCorner(d, st);
-    if (in.accept) OpenUrl(kDiscordUrl);
-    if (in.x) {
-      const fs::path log = settings_.path.parent_path() / "bf1943.log";
-      REXLOG_INFO("BF launcher: showing {}", log.string());
-#if defined(_WIN32)
-      if (const char* v = std::getenv("BF_DEV_NO_OPEN"); !(v && *v == '1'))
-        ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + log.wstring() + L"\"").c_str(), nullptr,
-                      SW_SHOWNORMAL);
-#endif
-    }
-    if (in.back) page_ = Page::kHome;
-  }
+  // ---- Report an issue: the form that files on GitHub is game_menu_report.inc (ReportPage).
 
   // ---- Settings from Home: the five tabs in the launcher's look
 

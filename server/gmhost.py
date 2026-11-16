@@ -192,6 +192,177 @@ def read_key(path):
     return key
 
 
+# ---- Network broadcasts (TekRantGaming, 16 Nov 2026: "send the broadcast messages that are sent to the official servers
+# to all community servers ... More than likely, it will only be sending messages through the official servers, but
+# there can be times where I might need to broadcast to the whole player base"). The official manager signs a message
+# with a key made from official.key (broadcast_seed); the main backend checks it and passes it to every server
+# registered with it, official ones only (the default) or everyone, over each server's registry connection; each host
+# checks it again before its players see it. A host that cannot check it (no key known, a wrong signature, too old,
+# seen before, too many) drops it. Hosts from before network broadcasts ignore the message (an op they do not know).
+#
+#   signed: "bf1943-broadcast|1|<id>|<issued>|<expires>|<scope>|<kind>|<seconds>|<text>"   (Ed25519, hex "sig")
+#   scope "official" (official servers only) or "everyone"; kind as BROADCAST_KINDS; seconds on screen 3 to 30;
+#   issued and expires in UTC seconds, expires at most 5 minutes after issued; the id 16 hex digits, used once.
+#
+# The public key community hosts check against: printed by "manager.py broadcast-key" on the official machine (it
+# reads official.key there). Until it is written here, community servers show no network broadcast at all; official
+# servers make it themselves from their own official.key. Tests only: BF_DEV_BROADCAST_KEY=<public key hex>.
+OFFICIAL_BROADCAST_KEYS = ('6884b20490087ce70141d7c944d7ded67ef10718bd5aaff3ad96b8bbf0811822',)
+NETWORK_SCOPES = ('official', 'everyone')
+NETWORK_TEXT_MAX = 200        # characters, as every broadcast
+NETWORK_LIFE = 60             # seconds a signed message is good for after it is made (the manager's)
+NETWORK_LIFE_MAX = 300        # the longest a host takes
+NETWORK_CLOCK_SLACK = 60      # seconds a host's clock may differ from the official machine's
+NETWORK_PER_MINUTE = 6        # at most this many in any minute (the backend and each host)
+
+
+def broadcast_seed(official_key):
+    """The network broadcast signing key (an Ed25519 seed), made from official.key: only the official machine has it."""
+    import hashlib
+    import hmac
+    return hmac.new(official_key, b'bf1943 network broadcast signing key 1', hashlib.sha256).digest()
+
+
+def _ed25519():
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:  # python -I leaves the script's own folder out
+        sys.path.insert(0, here)
+    import ed25519
+    return ed25519
+
+
+def broadcast_public(official_key):
+    return _ed25519().public_key(broadcast_seed(official_key)).hex()
+
+
+def clean_broadcast_text(value):
+    """A broadcast's text as every host sends it: printable, single spaces, at most NETWORK_TEXT_MAX characters."""
+    return ' '.join(''.join(c if c.isprintable() else ' ' for c in str(value)).split())[:NETWORK_TEXT_MAX]
+
+
+def sign_network(official_key, scope, kind, text_, seconds=10, now=None, life=NETWORK_LIFE, op='network_broadcast'):
+    """The signed network broadcast the official manager hands to the main backend."""
+    now = int(time.time() if now is None else now)
+    signed = 'bf1943-broadcast|1|%s|%d|%d|%s|%s|%d|%s' % (os.urandom(8).hex(), now, now + int(life), scope, kind,
+                                                         int(seconds), clean_broadcast_text(text_))
+    return {'op': op, 'signed': signed, 'sig': _ed25519().sign(broadcast_seed(official_key), signed.encode('utf-8')).hex()}
+
+
+def sign_admin(official_key, what, now=None):
+    """A question only the official manager may ask the main backend (the community servers' host keys)."""
+    now = int(time.time() if now is None else now)
+    signed = 'bf1943-admin|1|%s|%d|%s' % (os.urandom(8).hex(), now, what)
+    return {'op': 'admin', 'signed': signed, 'sig': _ed25519().sign(broadcast_seed(official_key), signed.encode('utf-8')).hex()}
+
+
+def trusted_broadcast_keys(official_key=None):
+    """The public keys a network broadcast may be signed with, on this host."""
+    keys = [k.lower() for k in OFFICIAL_BROADCAST_KEYS]
+    keys += [k.strip().lower() for k in os.environ.get('BF_DEV_BROADCAST_KEY', '').split(',') if k.strip()]
+    if official_key:
+        keys.append(broadcast_public(official_key))
+    return [k for k in keys if len(k) == 64]
+
+
+class NetworkCheck:
+    """Checks signed network broadcasts and admin questions: the signature against the trusted keys, the time, an id
+    used once, and how many came in the last minute."""
+
+    def __init__(self, keys, per_minute=NETWORK_PER_MINUTE):
+        self.keys = []
+        for k in keys:
+            try:
+                self.keys.append(bytes.fromhex(k))
+            except ValueError:
+                pass
+        self.per_minute = per_minute
+        self.seen = {}     # id -> time it can be forgotten
+        self.times = []    # when the last ones were taken
+
+    def _signature(self, m, prefix):
+        signed, sig = m.get('signed'), m.get('sig')
+        if not isinstance(signed, str) or not isinstance(sig, str) or len(signed) > 1024 or not signed.startswith(prefix):
+            return 'not a signed message'
+        if not self.keys:
+            return 'no official broadcast key is known to this host'
+        try:
+            raw = bytes.fromhex(sig)
+        except ValueError:
+            return 'a signature that is not hex'
+        ed = _ed25519()
+        if len(raw) != 64 or not any(ed.verify(k, signed.encode('utf-8'), raw) for k in self.keys):
+            return 'the signature does not check (not from the official machine)'
+        return ''
+
+    def _fresh(self, ident, issued, expires, now):
+        if len(ident) != 16 or any(c not in '0123456789abcdef' for c in ident):
+            return 'a bad id'
+        if expires < issued or expires - issued > NETWORK_LIFE_MAX:
+            return 'a bad lifetime'
+        if now < issued - NETWORK_CLOCK_SLACK:
+            return 'made %d s in the future (is this machine\'s clock right?)' % (issued - now)
+        if now > expires + NETWORK_CLOCK_SLACK:
+            return 'too old (made %d s ago; a replay, or this machine\'s clock is wrong)' % (now - issued)
+        self.seen = {k: t for k, t in self.seen.items() if t > now}
+        if ident in self.seen:
+            return 'seen before (a replay)'
+        self.times = [t for t in self.times if now - t < 60]
+        if len(self.times) >= self.per_minute:
+            return 'too many in a minute (at most %d)' % self.per_minute
+        return ''
+
+    def _take(self, ident, expires, now):
+        self.seen[ident] = max(expires, now) + NETWORK_CLOCK_SLACK + NETWORK_LIFE_MAX
+        self.times.append(now)
+
+    def broadcast(self, m, now=None):
+        """(why it is refused, or ''; the fields {"id", "scope", "kind", "seconds", "text"})."""
+        now = time.time() if now is None else now
+        why = self._signature(m, 'bf1943-broadcast|1|')
+        if why:
+            return why, None
+        parts = m['signed'].split('|', 8)
+        if len(parts) != 9:
+            return 'a message with missing parts', None
+        _, _, ident, issued, expires, scope, kind, seconds, text_ = parts
+        try:
+            issued, expires, seconds = int(issued), int(expires), int(seconds)
+        except ValueError:
+            return 'a bad number', None
+        if scope not in NETWORK_SCOPES:
+            return 'an unknown scope', None
+        if kind not in BROADCAST_KINDS:
+            return 'an unknown kind', None
+        if not text_ or len(text_) > NETWORK_TEXT_MAX or text_ != clean_broadcast_text(text_):
+            return 'a text that is empty, too long or not plain', None
+        if not 3 <= seconds <= 30:
+            return 'a bad time on screen', None
+        why = self._fresh(ident, issued, expires, now)
+        if why:
+            return why, None
+        self._take(ident, expires, now)
+        return '', {'id': ident, 'scope': scope, 'kind': kind, 'seconds': seconds, 'text': text_}
+
+    def admin(self, m, now=None):
+        """(why it is refused, or ''; what is asked)."""
+        now = time.time() if now is None else now
+        why = self._signature(m, 'bf1943-admin|1|')
+        if why:
+            return why, None
+        parts = m['signed'].split('|', 4)
+        if len(parts) != 5:
+            return 'a message with missing parts', None
+        try:
+            issued = int(parts[3])
+        except ValueError:
+            return 'a bad number', None
+        why = self._fresh(parts[2], issued, issued + NETWORK_LIFE, now)
+        if why:
+            return why, None
+        self._take(parts[2], issued + NETWORK_LIFE, now)
+        return '', parts[4]
+
+
 def i8(v):
     return bytes([(v + 0x80) & 0xFF])
 
@@ -243,9 +414,10 @@ C_HELLO, C_WELCOME, C_STATE, C_CHAT_RELAY, C_CHAT, C_ROSTER, C_VOICE, C_VOICE_RE
 # A server broadcast (TekRantGaming, 13 Nov 2026: "any server broadcast should be shown in a box at the top center of
 # the screen ... remain on screen for 10s and play a sound ... to announce things like game updates and server restarts
 # also the server admins will have an option to send custom text messages"): the host to every player on the server,
-# id (2 bytes), kind (BROADCAST_KINDS), seconds on screen, the text. A game older than v0.4.0 ignores the kind.
+# id (2 bytes), kind (BROADCAST_KINDS), seconds on screen, the text. A game older than v0.4.0 ignores the kind; one
+# older than v0.4.7 shows maintenance (3) as a message.
 C_BROADCAST = 11
-BROADCAST_KINDS = {'custom': 0, 'update': 1, 'restart': 2}
+BROADCAST_KINDS = {'custom': 0, 'update': 1, 'restart': 2, 'maintenance': 3}
 COMMS_PROTOCOL = 1
 CHAT_ALL, CHAT_TEAM, CHAT_SQUAD = 0, 1, 2
 # metres: a listener further from the speaker gets nothing (the client fades out sooner). BF_DEV_VOICE_RANGE (tests
@@ -1032,6 +1204,8 @@ async def serve(args):
     except OSError as e:
         build = None
         print('%s build check: the package could not be read (%s)' % (time.strftime('%H:%M:%S'), e), flush=True)
+    official_key = read_key(args.official_key_file) if args.official_key_file else None
+    network = None  # NetworkCheck, made at the first registration
     host_seed = None
     if args.host_key_file:
         try:
@@ -1081,6 +1255,10 @@ async def serve(args):
         host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
                            public, sock)
         host.comms.broadcast_file = args.broadcast_file
+        if network is None:  # once: the ids it has seen stay through a new registration
+            network = NetworkCheck(trusted_broadcast_keys(official_key))
+            if not network.keys:
+                host.note('network broadcasts: no official broadcast key known, none will be shown')
         host.comms.balance_file = args.balance_file
         host.world.configure(args)
         host.note('registered with the backend as game %s%s%s' % (
@@ -1102,6 +1280,42 @@ async def serve(args):
             except Exception as e:  # a dead heartbeat left the list's players and map stale
                 host.note('heartbeat failed: %r' % e)
 
+        stats_at = [None]  # how far into --stats-file has been sent (None: not looked yet)
+
+        def stats_lines():
+            """Each player's stats from the game (server_stats.cpp, --bf_stats_file): the lines written since the last
+            look, each a "player_stats" message for the backend. What is there as the host starts is from an earlier
+            run; a file that shrank started again."""
+            if not args.stats_file:
+                return []
+            try:
+                size = os.path.getsize(args.stats_file)
+            except OSError:
+                if stats_at[0] is None:
+                    stats_at[0] = 0
+                return []
+            if stats_at[0] is None:
+                stats_at[0] = size
+                return []
+            if size < stats_at[0]:
+                stats_at[0] = 0
+            if size == stats_at[0]:
+                return []
+            with open(args.stats_file, 'rb') as f:
+                f.seek(stats_at[0])
+                data = f.read(min(size - stats_at[0], 1 << 20))
+            end = data.rfind(b'\n') + 1
+            stats_at[0] += end
+            out = []
+            for line in data[:end].splitlines():
+                try:
+                    m = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(m, dict) and m.get('op') == 'player_stats' and isinstance(m.get('rows'), list):
+                    out.append({'op': 'player_stats', 'rows': m['rows'][:64]})
+            return out
+
         async def beat_loop():
             while True:
                 # The map now running: the server's rotation writes it (server_rotation.cpp), else --map.
@@ -1121,6 +1335,8 @@ async def serve(args):
                       'names': host.player_names()})
                 write_status(args, dict(state, players=host.player_count(), map=current, next_map=upcoming,
                                         names=host.player_names()))
+                for m in stats_lines():  # each player's stats since the last beat (player_stats.py)
+                    send(m)
                 await writer.drain()
                 await asyncio.sleep(5)
 
@@ -1145,6 +1361,17 @@ async def serve(args):
                 elif m.get('op') == 'join':
                     host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'])
                     host.note('backend: %s joins (PID %s)' % (m['name'], m['pid']))
+                elif m.get('op') == 'network_broadcast':
+                    # A broadcast from the official machine, through the main backend (sign_network): checked here
+                    # again, whoever passed it on.
+                    why, b = network.broadcast(m)
+                    if not why and b['scope'] == 'official' and not state['official']:
+                        why = 'meant for the official servers only'
+                    if why:
+                        host.note('network broadcast refused: %s' % why)
+                    else:
+                        host.note('network broadcast %s (to %s)' % (b['id'], b['scope']))
+                        host.comms.broadcast(b['text'], b['kind'], b['seconds'])
         except (ConnectionError, ValueError) as e:
             host.note('backend link lost (%s)' % type(e).__name__)
         beat.cancel()
@@ -1196,6 +1423,8 @@ def main():
     ap.add_argument('--broadcast-file', default='',
                     help='a JSON file the server manager writes to send a message to every player on the server: '
                          '{"seq": a new number each time, "kind": "custom", "update" or "restart", "text", "seconds"}')
+    ap.add_argument('--stats-file', default='',
+                    help="each player's stats from the game (its --bf_stats_file): every new line goes to the backend")
     ap.add_argument('--balance-file', default='',
                     help="the dedicated server's team balance events (its --bf_balance_events): players are told of "
                          'moves and refused team changes')

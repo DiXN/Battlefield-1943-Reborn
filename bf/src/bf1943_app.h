@@ -1,4 +1,4 @@
-﻿// bf1943 - ReXGlue Recompiled Project
+// bf1943 - ReXGlue Recompiled Project
 //
 // Customize your app by overriding virtual hooks from rex::ReXApp.
 
@@ -21,6 +21,8 @@
 #include "gpu_preference.h"
 #include "game_install.h"
 #include "private_match.h"
+#include "report.h"
+#include "achievement_toast.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -238,6 +240,13 @@ class Bf1943App : public rex::ReXApp {
         rex::cvar::SetFlagByName("native_x_renderer_hitch_ms", "100");
     }
 #endif
+    // The last run's log kept as bf1943.previous.log before this one opens over it: a crash's report sends the log of
+    // the run that crashed (report.cpp, Report an issue).
+    if (!REXCVAR_GET(server)) {
+      std::filesystem::path log = rex::cvar::GetFlagByName("log_file");
+      if (log.empty() && !paths.user_data_root.empty()) log = paths.user_data_root / "bf1943.log";
+      bf1943::report::KeepPreviousLog(log);
+    }
     paths_ = paths;
   }
 
@@ -329,6 +338,12 @@ class Bf1943App : public rex::ReXApp {
 
   // Our main menu inside the game (game_menu.cpp), drawn over BF's own menu scene.
   void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {
+    // The achievement popup made now, not at the game's launch (ReXApp::LaunchModule asks for it only then): the
+    // Achievements page's Test the popup works on Home before the game runs. Handed to the SDK when it asks.
+    if (!REXCVAR_GET(server) && drawer) {
+      bf1943::SetAchievementUserDir(paths_.user_data_root);
+      early_toast_ = std::make_unique<bf1943::AchievementToast>(drawer);
+    }
     bf1943::CreateGameMenu(
         drawer, paths_.user_data_root,
         [this](bool on) {
@@ -390,13 +405,21 @@ class Bf1943App : public rex::ReXApp {
   // Shaders from the player's game files into the runtime's storage, before the runtime opens it.
   void OnPostLoadXexImage() override {
     const auto cache = paths_.cache_root.empty() ? paths_.user_data_root / "cache" : paths_.cache_root;
-    // First, as King Kong does (shader_prepared.h), from the marker and the storage as they were: after an update the
-    // shader page makes every pipeline again (nothing deleted); a version already prepared shows no shader page
-    // (game_menu.cpp, update.cpp).
+    // First, from the marker and the storage as they were: after an update the old shader cache is deleted and the
+    // shader page builds a fresh set; a version already prepared shows no shader page (game_menu.cpp, update.cpp).
     if (!REXCVAR_GET(server)) bf1943::CheckShadersAfterUpdate(paths_.user_data_root, cache);
     bf1943::PrepareShaders(bf1943::ExecutableDir() / "data" / "shaders", paths_.game_data_root, cache);
     // The pipelines this game builds, for the next update's shader list (Settings > Gameplay > Share graphics data).
     bf1943::StartPipelineUploads(paths_.user_data_root, cache);
+  }
+
+  // The achievement popup and its chime (achievement_toast.h, his pick M1 of 16 Nov 2026), in place of the SDK's toast.
+  // None on a dedicated server (no window).
+  std::unique_ptr<rex::ui::AchievementNotificationDialog> CreateAchievementNotificationDialog() override {
+    if (REXCVAR_GET(server) || !imgui_drawer()) return nullptr;
+    if (early_toast_) return std::move(early_toast_);  // made with the menus (OnCreateDialogs)
+    bf1943::SetAchievementUserDir(paths_.user_data_root);
+    return std::make_unique<bf1943::AchievementToast>(imgui_drawer());
   }
 
   // Override virtual hooks for customization:
@@ -409,5 +432,6 @@ class Bf1943App : public rex::ReXApp {
 
  private:
   rex::PathConfig paths_;
+  std::unique_ptr<bf1943::AchievementToast> early_toast_;  // the popup until the SDK takes it (at the game's launch)
   std::chrono::steady_clock::time_point launched_at_{};  // OnPostLaunchModule; zero while the game was never launched
 };

@@ -77,7 +77,12 @@ struct ServerInfo {
   bool retired_mode = false;
   int players = 0, max_players = 0;
   std::string description, next_map;
+  // Listed with the Reborn servers: "official" from the backend. A promoted community server (TekRantGaming, 16 Nov
+  // 2026: someone else's machine he shows with ours, and can send back to the Community tab) says "promoted" too: it
+  // is on the Reborn tab, marked PROMOTED, and never said to be run by TRG Studios. Reborn(): one of ours.
   bool official = false;
+  bool promoted = false;
+  bool Reborn() const { return official && !promoted; }
   bool night = false;  // a Night Ops server: its maps drawn at night (NativeXRenderer D162) while playing there
   std::string region;  // where it is, a region code (regions.h); empty: not said (an older server)
   int tick_hz = 0;     // its tick rate; 0: not said
@@ -453,6 +458,7 @@ class ServerList {
     TakeDescriptionTags(s);
     s.next_map = JsonField(obj, "next_map");
     s.official = JsonField(obj, "official") == "true";
+    s.promoted = s.official && JsonField(obj, "promoted") == "true";
     s.night = kNightOps && JsonField(obj, "night") == "true";  // night_ops.h: none without Night Ops
     s.region = JsonField(obj, "region");
     s.tick_hz = std::atoi(JsonField(obj, "tick").c_str());

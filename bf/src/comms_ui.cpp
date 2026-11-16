@@ -18,7 +18,9 @@
 #include <rex/cvar.h>
 #include <rex/ui/imgui_dialog.h>
 
+#include "clan_tags.h"
 #include "comms.h"
+#include "paste_keys.h"
 
 REXCVAR_DEFINE_STRING(keybind_chat_all, "T", "Input/Keybinds/Chat", "Text chat to everyone on the server");
 REXCVAR_DEFINE_STRING(keybind_chat_team, "Y", "Input/Keybinds/Chat", "Text chat to your team");
@@ -173,10 +175,9 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       }
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) PopUtf8(text_);
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl) {
-      if (const char* clip = ImGui::GetClipboardText())
-        for (const char* p = clip; *p && text_.size() < 120; ++p)
-          if (static_cast<unsigned char>(*p) >= 0x20) text_ += *p;
+    if (paste::Pressed()) {  // paste_keys.h: io.KeyCtrl alone never saw Ctrl
+      for (char c : paste::Text())
+        if (text_.size() < 120 && static_cast<unsigned char>(c) >= 0x20) text_ += c;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Tab, false)) channel_ = Channel((channel_ + 1) % 3);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) return Close();
@@ -205,7 +206,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     const float size = 42.0f * s, head = 20.0f * s, pad = 30.0f * s;
     const float max_w = io.DisplaySize.x * 0.66f, wrap = max_w - 2 * pad;
     const ImVec2 ts = bold->CalcTextSizeA(size, FLT_MAX, wrap, text.c_str());
-    const char* label = kind == 1 ? "GAME UPDATE" : kind == 2 ? "SERVER RESTART" : "SERVER MESSAGE";
+    const char* label = kind == 1 ? "GAME UPDATE" : kind == 2 ? "SERVER RESTART" : kind == 3 ? "MAINTENANCE" : "SERVER MESSAGE";
     const float w = std::max(std::max(ts.x, 520.0f * s) + 2 * pad, font->CalcTextSizeA(head, FLT_MAX, 0, label).x + 2 * pad);
     const float h = pad * 0.7f + head + 10.0f * s + ts.y + pad * 0.8f;
     const float in = float(std::clamp(age / 0.25, 0.0, 1.0)), out = float(std::clamp((seconds - age) / 0.5, 0.0, 1.0));
@@ -214,7 +215,8 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
     // 1080 lines), so neither is hidden while the message is up.
     const float x0 = (io.DisplaySize.x - w) * 0.5f, y0 = 172.0f * s - (1.0f - in) * 30.0f * s;
     const ImU32 accent = kind == 2 ? IM_COL32(206, 62, 48, int(255 * alpha)) : kind == 1 ? IM_COL32(143, 179, 79, int(255 * alpha))
-                                                                                         : IM_COL32(201, 183, 122, int(255 * alpha));
+                         : kind == 3 ? IM_COL32(217, 160, 58, int(255 * alpha))  // maintenance: amber
+                                     : IM_COL32(201, 183, 122, int(255 * alpha));
     dl->AddRectFilled(ImVec2(x0 + 4 * s, y0 + 5 * s), ImVec2(x0 + w + 4 * s, y0 + h + 5 * s), IM_COL32(0, 0, 0, int(110 * alpha)), 4 * s);
     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(16, 18, 14, int(238 * alpha)), 4 * s);
     dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h), IM_COL32(241, 234, 211, int(70 * alpha)), 4 * s, 0, 1.5f * s);
@@ -258,7 +260,7 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
         Laid d{&l, typing ? 1.0f : float(std::clamp(12.0 - age, 0.0, 2.0) / 2.0), line, x0, {}, {}, Printable(l.text)};
         if (!l.notice) {
           d.tag = std::string("[") + ChannelLabel(l.channel) + "] ";
-          d.who = Printable(l.name) + ": ";
+          d.who = clan::Tagged(Printable(l.name)) + ": ";  // [TAG]Name: the clan tag the backend says
           d.body_x = x0 + bold->CalcTextSizeA(size, FLT_MAX, 0, d.tag.c_str()).x +
                      bold->CalcTextSizeA(size, FLT_MAX, 0, d.who.c_str()).x;
         }
@@ -282,8 +284,15 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
         float x = x0;
         shadowed(bold, ImVec2(x, y), ChannelColor(d.l->channel, alpha), d.tag, alpha);
         x += bold->CalcTextSizeA(size, FLT_MAX, 0, d.tag.c_str()).x;
-        shadowed(bold, ImVec2(x, y),
-                 d.l->own ? IM_COL32(255, 225, 140, int(255 * alpha)) : ChannelColor(d.l->channel, alpha), d.who, alpha);
+        if (clan::IsDevTag(clan::TagOf(Printable(d.l->name)))) {  // a developer's "[Dev]Name" cycles its colours
+          const std::string tagged = d.who.substr(0, d.who.size() - 2);
+          const float w = clan::DrawDevText(dl, bold, size, ImVec2(x, y), tagged, alpha, true);
+          shadowed(bold, ImVec2(x + w, y), ChannelColor(d.l->channel, alpha), ": ", alpha);
+        } else {
+          shadowed(bold, ImVec2(x, y),
+                   d.l->own ? IM_COL32(255, 225, 140, int(255 * alpha)) : ChannelColor(d.l->channel, alpha), d.who,
+                   alpha);
+        }
         const float body_wrap = wrap - (d.body_x - x0);
         dl->AddText(font, size, ImVec2(d.body_x + 1.5f * s, y + 1.5f * s), IM_COL32(0, 0, 0, int(180 * alpha)),
                     d.body.c_str(), nullptr, body_wrap);
@@ -325,8 +334,12 @@ class CommsOverlay final : public rex::ui::ImGuiDialog {
       }
       for (const std::string& name : speaking) {
         dl->AddCircleFilled(ImVec2(x + 6 * s, y + line * 0.5f), 5 * s, IM_COL32(130, 225, 120, 255));
-        shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), Printable(name), 1.0f);
-        x += 26 * s + bold->CalcTextSizeA(size, FLT_MAX, 0, name.c_str()).x;
+        const std::string shown = clan::Tagged(Printable(name));
+        if (clan::IsDevTag(clan::TagOf(Printable(name))))
+          clan::DrawDevText(dl, bold, size, ImVec2(x + 16 * s, y), shown, 1.0f, true);
+        else
+          shadowed(bold, ImVec2(x + 16 * s, y), IM_COL32(235, 235, 228, 255), shown, 1.0f);
+        x += 26 * s + bold->CalcTextSizeA(size, FLT_MAX, 0, shown.c_str()).x;
         if (x > io.DisplaySize.x * 0.45f) break;
       }
     }

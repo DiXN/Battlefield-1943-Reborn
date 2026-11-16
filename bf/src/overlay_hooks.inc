@@ -3,9 +3,8 @@
 // Steam, Epic Games and Discord overlays. A player's v0.3.0 crashed at its very first frame inside RTSSHooks64.dll, 8
 // starts of 8, and neither the log nor the crash report named it (12 Nov 2026). This is the table they are known by:
 // crash_report.cpp logs them at the start, when one arrives later and at the first game frame, and names them in a
-// crash report; the launcher's Report an issue page (ReportPage, game_menu_launcher.inc) says what to do about one.
-// Included at namespace scope by crash_report.cpp and inside ReportPage's body (the menu's source was being rebuilt by
-// another hand as this was written, so the page's edit stays within that one function): only types, constants and a
+// crash report; the Report an issue page (game_menu_report.inc RpOverlayNotice) says what to do about one.
+// Included at namespace scope by crash_report.cpp and inside RpOverlayNotice's body: only types, constants and a
 // lambda, which fit both places. Windows only; <windows.h>, <string> and <vector> come first.
 
 struct OverlayHook {

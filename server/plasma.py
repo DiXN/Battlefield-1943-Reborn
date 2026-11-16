@@ -32,7 +32,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I leaves the script's folder out
 import gmhost  # noqa: E402
+import player_stats  # noqa: E402
 import stats  # noqa: E402
+import text_filter  # noqa: E402
 
 HEADER = 12
 MULTI_LIMIT = 8064   # packets larger than this go as multi part (the client says fragmentSize=8096)
@@ -51,6 +53,7 @@ MATCH_SCORES = {}  # a game's GID -> {name, lower case -> {'name', 'score', 'at'
 LEADERBOARD_FILE = None  # where it is kept (--leaderboard), loaded at the start
 # The website's totals (server/stats.py): players who joined a match, this month's, hours played. Kept in --stats.
 STATS = stats.Stats()
+PLAYER_STATS = player_stats.PlayerStats()  # each player's stats as the servers count them (player_stats.py)
 
 # ---- Protect your name (TekRantGaming, 15 Nov 2026: "a secure your username option ... prevents anyone else from
 # taking that name ... store long term progression tracking for the user", with no email and no setup from players).
@@ -71,6 +74,61 @@ CLAIMS = {}         # address -> [times]: new and renamed names, at most CLAIMS_
 CLAIMS_AN_HOUR = 5
 NAME_UNUSED_DAYS = 180
 VERIFIED_FOR = 12 * 3600  # a sign in holds the name for the game's FESL login for this long (same id and address)
+
+# ---- Team names (TekRantGaming, 16 Nov 2026: "permanently secure TekRantGaming and ZALIAS names and all variations of
+# these names ... and provide a key for both users to keep that will allow them to use their names in the launcher").
+# Each owner's account is the public half of the key their recovery code makes (the codes are only with them). It holds
+# the owner's name, every name below and every lookalike of them (team_owner): nobody else can protect, sign in for or
+# log in under one (they get Soldier with a number), stats for them come only signed by the owner, they never expire
+# (account_active), and the owner plays under any of them with the same code (signed_name, claim). Lookalikes: any case,
+# underscores, leetspeak (0 o, 1 i, l i, 3 e, 4 a, @ a, 5 s, 7 t, 2 z), doubled letters, anything before or after a
+# "contains" stem, up to "typos" edits of a stem once prefixes and suffixes (xX, The, Real, Its, digits, TV...) are
+# off, and "parts": a name made of a "before" word (or none), a "middle" word and an "after" word, with a slip in each
+# (one edit each, two in all; with no "before" the middle exactly as written; the middle starting with the middle
+# word's letter, or for a Z its lookalike S or its neighbour X; no letter of the middle taken as an "after" word's
+# extra first letter), so
+# ThatZalisGai, ThatSaliasGuy and ZaliaGai are ZALIAS's while ThatTallGuy, ThatSaladGuy and ZaidGuy are not. TekRantGaming's watchlist of variations is in "names", each entry with spaces,
+# dots and hyphens left out (names are 3 to 15 letters, digits and underscores). --team-names FILE replaces this list.
+TEAM_OWNERS = [
+    {'owner': 'TekRantGaming', 'key': 'a183dac812d9732ea9982188b799feb4eb2f8e074977568b3f8f690a9c63b18a',
+     'contains': ['TekRantGaming', 'TekRant', 'TekRG'], 'typos': {'TekRantGaming': 2},
+     'names': ['TekRantGaming', 'TekRant', 'TekRG', 'TekRantG', 'TekRantGame', 'TekRantGames', 'TekRantGamer',
+               'TekRantGamers', 'TekRantGamingTV', 'TekRantGamingOfficial', 'TekRantGamingUK', 'TekRantGamingDev',
+               'TekRantGamingProject', 'TekRantGamingTeam', 'TekRantGamingCommunity', 'TekRantGamingNetwork',
+               'TekRantGamingServer', 'TekRantGamingServers', 'TekRantGamingOrg', 'TekRantGamingCom',
+               'Tek_Rant_Gaming', 'TekRant_Gaming', 'TekRantGaming_', '_TekRantGaming', 'TekRantGaming1',
+               'TekRantGaming2', 'TekRantGaming01', 'TekRantGaming123', 'TekRantGamingX', 'xTekRantGaming',
+               'TheTekRantGaming', 'RealTekRantGaming', 'ItsTekRantGaming', 'ImTekRantGaming', 'OfficialTekRantGaming',
+               'TechRantGaming', 'TekRankGaming', 'TekRantGamng', 'TekRantGming', 'TekRantGamin', 'TekRantGamming',
+               'TekRantGamimg', 'TekRantGamig', 'TekRantGaiming', 'TekRantGmaing', 'TekRantGamingg', 'TekRanttGaming',
+               'TekkRantGaming', 'TekRanntGaming', 'TekRantGam1ng', 'TekRantG4ming', 'T3kRantGaming', 'TekR4ntGaming',
+               'TekR@ntGaming', 'T3kR4ntG4ming', 'TekRantG4m1ng', 'TekRantGm', 'TekRGaming', 'TekRantGamez',
+               'TekRantGmz', 'TekRantGng', 'TekRant_G', 'tekrantgamingcom', 'wwwtekrantgamingcom',
+               'chattekrantgamingcom', 'tek_rant']},
+    {'owner': 'ZALIAS', 'key': 'da315ef804e4b95c28113f41e930b9a9227a88b227f480dd43b52505193f3bfb',
+     'contains': ['ZALIAS', 'ThatZalia', 'ZaliaGuy'],
+     'typos': {'ZALIAS': 1},
+     # ThatZaliaSGuy (16 Nov 2026, TekRantGaming: "do the same for the following name too ThatZaliaSGuy"): ZALIAS's
+     # own other name, so under this key too; its 25073 entry variation list is caught by these rules but for the
+     # generic short forms in TEAM_NAMES_LEFT_FREE (tools/test_accounts.py team checks a sample)
+     'parts': {'before': ['That', 'Dat', 'Tha', 'Da', 'The', 'Tht', ''], 'middle': ['Zalias', 'Zalia'],
+               'after': ['Guy', 'Gai', 'Gui', 'Guey', 'Guys', 'Dude', 'Boy', 'Man']},
+     'names': ['ZALIAS', 'ZAlias', 'ZALIAS_', '_ZALIAS', 'ZALIAS1', 'ZALIAS01', 'ZALIAS123', 'ZALIASX', 'TheZALIAS',
+               'ItsZALIAS', 'ImZALIAS', 'RealZALIAS', 'OfficialZALIAS', 'ZALIASOfficial', 'ZALIASGaming',
+               'ZALIASGamer', 'ZALIASDev', 'ZALIASTeam', 'ZALIASProject', 'ZALIASNetwork', 'Z_A_L_I_A_S', 'Zaliass',
+               'Zaliasss', 'Zallias', 'Zalais', 'Zaliasz', 'Zalials', 'Zalius', 'Zaleas', 'Zaleis', 'Zalies', 'Zalyas',
+               'Zalyass', 'Zaliash', 'Zalias2', 'Zalias3', 'ZaliasYT', 'ZaliasTV', 'ZaliasUK', 'ZaliasGames',
+               'ZaliasG', 'ZAL1AS', 'ZALlAS', 'Z4LIAS', 'Z@LIAS', 'Z4L1AS', 'ZALl4S', '2ALIAS', 'ZALIA5', 'ZALlA5',
+               'ZALIASSSS', 'ZALIAScom', 'wwwzaliascom', 'z_alias', 'ThatZaliaSGuy', 'ThatZaliaGuy', 'ThatZalia',
+               'TZalia', 'TZaliaGuy', 'ZaliaGuy', 'ThatZalGuy', 'ThatZaliGuy', 'DatZaliaGuy', 'ThatxZaliaxSxGu']},
+]
+# The watchlist's generic entries, left free for everyone (they would block normal players): TekRantGaming decides.
+TEAM_NAMES_LEFT_FREE = ['TRG', 'TRGaming', 'TRGGaming', 'TR_Gaming', 'TekGaming', 'Tek_Gaming', 'RantGaming', 'Rant',
+                        'Gaming', 'TechRant', 'Tech_Rant',
+                        # ThatZaliaSGuy's short forms
+                        'TZG', 'TZSG', 'TZAG', 'ThatZ', 'ThatZG', 'ThtZG', 'ThatZGuy', 'ZGuy', 'ZSGuy', 'TZGuy', 'TZSGuy',
+                        'Zal', 'Zali', 'Zals', 'Zalia', 'ZalGuy', 'ZalsGuy', 'ZaliGuy', 'TZalGuy', 'ThatSGuy', 'ThatGuy']
+TEAM = {'owners': [], 'by_key': {}, 'exact': {}, 'free': set(), 'cache': {}}  # set_team_names, below the accounts
 
 # ---- The version players need (TekRantGaming, 13 Nov 2026: "server version check for latest version and only to allow
 # latest version on and reject and prompt outdated clicnt connections give them a popup advising and a button to update
@@ -384,6 +442,11 @@ def free_name(name, pid, address=None):
     name = name[:15]
     if name_free_for(name, pid, address):
         return name
+    owner = team_owner(name)
+    if owner and not signed_in_for(team_account(owner), pid, address):
+        name = 'Soldier'  # a team name with a number is the team's too (team_owner)
+        if name_free_for(name, pid, address):
+            return name
     for n in range(2, 1000):
         suffix = str(n)
         candidate = name[:15 - len(suffix)] + suffix
@@ -394,11 +457,17 @@ def free_name(name, pid, address=None):
 
 # ---- accounts (Protect your name, above)
 def account_active(acct, now=None):
+    if acct.get('key') in TEAM['by_key']:
+        return True  # team names never expire
     return (now or time.time()) - acct.get('seen', 0) < NAME_UNUSED_DAYS * 86400
 
 
 def protected_by(name):
-    """The account whose protected name this is, or None (none, or unused for NAME_UNUSED_DAYS)."""
+    """The account whose protected name this is, or None (none, or unused for NAME_UNUSED_DAYS). A team name (any of an
+    owner's, team_owner) is always its owner's account."""
+    owner = team_owner(name)
+    if owner:
+        return team_account(owner)
     acct = ACCOUNTS.get(ACCOUNT_NAMES.get(name.lower(), ''))
     if acct and acct.get('name', '').lower() == name.lower() and account_active(acct):
         return acct
@@ -426,6 +495,176 @@ def valid_name(name):
     """A name the game's name page allows: 3 to 15 letters, digits and underscores."""
     return isinstance(name, str) and 3 <= len(name) <= 15 and all(c.isascii() and (c.isalnum() or c == '_')
                                                                    for c in name)
+
+
+# ---- team names (TEAM_OWNERS, above)
+_LOOKALIKE = str.maketrans({'0': 'o', '1': 'i', 'l': 'i', '|': 'i', '!': 'i', '3': 'e', '4': 'a', '@': 'a', '5': 's',
+                            '$': 's', '7': 't', '2': 'z', '6': 'g', '9': 'g', '8': 'b'})
+_PREFIXES = ('official', 'real', 'the', 'its', 'iam', 'im', 'mr', 'og', 'ttv', 'yt', 'xx', 'x')
+_SUFFIXES = ('official', 'gaming', 'gamers', 'gamer', 'games', 'game', 'team', 'live', 'dev', 'ttv', 'tv', 'yt', 'uk',
+             'us', 'hd', 'pro', 'xx', 'x', 'g')
+
+
+def name_skeleton(text):
+    """What a name looks like with case, separators, leetspeak and doubled letters taken out: T3kRantGaminggg and
+    tek_rant_gaming are both tekrantgaming; Z4L1AS and Zallias are both zaias (l and i count as one letter)."""
+    s = ''.join(c for c in str(text).lower() if c.isalnum() or c in '@$!|').translate(_LOOKALIKE)
+    out = []
+    for c in s:
+        if not out or out[-1] != c:
+            out.append(c)
+    return ''.join(out)
+
+
+def _cores(raw):
+    """The name (lower case, separators out) with prefixes, suffixes and digits at either end taken off, in every
+    order: xXTheZaliusTVXx gives zalius among others. As skeletons."""
+    seen, todo = set(), [raw]
+    while todo:
+        s = todo.pop()
+        if not s or s in seen or len(seen) > 64:
+            continue
+        seen.add(s)
+        todo.append(s.strip('0123456789'))
+        todo.extend(s[len(p):] for p in _PREFIXES if s.startswith(p))
+        todo.extend(s[:-len(q)] for q in _SUFFIXES if s.endswith(q))
+    return {name_skeleton(s) for s in seen}
+
+
+def _edits(a, b, most):
+    """The edits (a letter added, dropped, changed, or two side by side swapped) from a to b, or most + 1 when more."""
+    if abs(len(a) - len(b)) > most:
+        return most + 1
+    prev2, prev = None, list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                cur[j] = min(cur[j], prev2[j - 2] + 1)
+        if min(cur) > most:
+            return most + 1
+        prev2, prev = prev, cur
+    return prev[-1]
+
+
+def set_team_names(owners, left_free):
+    """The team names in use: TEAM_OWNERS (or --team-names) indexed by skeleton."""
+    TEAM.update(owners=[], by_key={}, exact={}, free={name_skeleton(n) for n in left_free}, cache={})
+    for o in owners:
+        key = str(o['key']).lower()
+        if len(key) != 64:
+            raise ValueError('a team name owner needs a 64 hex digit key: %s' % o.get('owner'))
+        int(key, 16)
+        e = {'owner': str(o['owner']), 'key': key,
+             'contains': [name_skeleton(s) for s in o.get('contains', [])],
+             'typos': [(name_skeleton(s), int(n)) for s, n in o.get('typos', {}).items()],
+             'parts': {k: sorted({name_skeleton(w) for w in o['parts'].get(k, [])})
+                       for k in ('before', 'middle', 'after')} if o.get('parts') else None}
+        TEAM['owners'].append(e)
+        TEAM['by_key'][key] = e
+        for n in [o['owner']] + list(o.get('names', [])):
+            TEAM['exact'].setdefault(name_skeleton(n), e)
+
+
+def team_owner(name):
+    """The team owner (TEAM_OWNERS) whose name this is or looks like, or None."""
+    if not isinstance(name, str) or not name:
+        return None
+    raw = ''.join(c for c in name.lower()[:32] if c.isalnum() or c in '@$!|')
+    cache = TEAM['cache']
+    if raw in cache:
+        return cache[raw]
+    if len(cache) > 20000:
+        cache.clear()
+    cache[raw] = found = _team_owner(raw)
+    return found
+
+
+def _team_owner(raw):
+    skel = name_skeleton(raw)
+    if not skel or skel in TEAM['free']:
+        return None
+    if skel in TEAM['exact']:
+        return TEAM['exact'][skel]
+    for o in TEAM['owners']:
+        if any(stem in skel for stem in o['contains']):
+            return o
+    cores = None
+    for o in TEAM['owners']:
+        for stem, most in o['typos']:
+            if len(skel) < len(stem) - most:
+                continue
+            if cores is None:
+                cores = _cores(raw)
+            looks = set(cores)
+            if len(stem) >= 8:  # a long name: also with anything around it (MyTekRankGamingFan)
+                looks.update(skel[i:i + n] for n in range(len(stem) - most, len(stem) + most + 1)
+                             for i in range(0, len(skel) - n + 1))
+            # (Same first letter: Alias is not ZALIAS with a letter dropped. A short stem with no letter dropped
+            # either: Zalia is a name of its own.)
+            shortest = len(stem) - most if len(stem) >= 8 else len(stem)
+            if any(c[:1] == stem[:1] and len(c) >= shortest and _edits(c, stem, most) <= most for c in looks):
+                return o
+    for o in TEAM['owners']:
+        if o['parts'] and _in_parts(skel, o['parts']):
+            return o
+    return None
+
+
+def _near(text, words):
+    '''The fewest edits from text to one of the words (2 when more than one).'''
+    return min([_edits(text, w, 1) for w in words] or [2])
+
+
+def _in_parts(skel, parts):
+    '''Whether the name is a "before" word (or none), a "middle" word and an "after" word, a slip in each (team_owner).'''
+    middles = parts['middle']
+    first = {w[:1] for w in middles} | ({'s', 'x'} if any(w[:1] == 'z' for w in middles) else set())  # S, 5, X for Z
+    for j in range(len(skel) - 1, 0, -1):  # where the after word starts
+        after = _near(skel[j:], parts['after'])
+        if after > 1 or skel[j + 1:] in parts['after']:  # (ThatSaladGuy: the D is Salad's, not a slip of Guy)
+            continue
+        for i in range(0, j):  # where the middle word starts
+            if skel[i] not in first or j - i < min(len(w) for w in middles) - 1:
+                continue
+            before = 0 if i == 0 and '' in parts['before'] else _near(skel[:i], [w for w in parts['before'] if w])
+            middle = _near(skel[i:j], middles)
+            if before <= 1 and middle <= (1 if i else 0) and before + middle + after <= 2:
+                return True
+    return False
+
+
+def team_account(owner):
+    """The owner's account, made the first time (it never expires: account_active)."""
+    acct = ACCOUNTS.get(owner['key'])
+    if acct is None:
+        now = int(time.time())
+        acct = ACCOUNTS[owner['key']] = {'key': owner['key'], 'name': owner['owner'], 'created': now, 'seen': now,
+                                         'progress': {}}
+        accounts_changed()
+    return acct
+
+
+def keep_team_names():
+    """At the start: each owner has an account under one of their names, and no other account keeps a team name (one
+    protected before the names were kept for the team loses it)."""
+    for o in TEAM['owners']:
+        acct = team_account(o)
+        if team_owner(acct.get('name', '')) is not o:
+            acct['name'] = o['owner']
+            accounts_changed()
+        ACCOUNT_NAMES[acct['name'].lower()] = o['key']
+    for key, acct in ACCOUNTS.items():
+        owner = team_owner(acct.get('name', ''))
+        if owner and owner['key'] != key:
+            if ACCOUNT_NAMES.get(acct['name'].lower()) == key:
+                del ACCOUNT_NAMES[acct['name'].lower()]
+            acct['name'] = ''
+            accounts_changed()
+
+
+set_team_names(TEAM_OWNERS, TEAM_NAMES_LEFT_FREE)
 
 
 def accounts_changed():
@@ -752,7 +991,7 @@ class Client:
             if not name_free_for(self.persona, pid, address):
                 renamed = free_name(self.persona, pid, address)
                 if renamed == self.persona:
-                    renamed = '%s%d' % (self.persona[:12], self.user_id)
+                    renamed = '%s%d' % ('Soldier' if team_owner(self.persona) else self.persona[:12], self.user_id)
                 self.note('the name %s is in use: this player is renamed %s' % (self.persona, renamed))
                 self.persona = renamed
             NAMES[self.persona.lower()] = (pid, None)
@@ -987,6 +1226,26 @@ class RemoteHost:
                                        'xuid': str(xuid), 'xnaddr': xnaddr_b64}) + '\n').encode())
 
 
+def signed_host_key(m, name, digest):
+    """A registration's host key when its signature checks (over this name and digest), else ''."""
+    import ed25519
+    h = m.get('host')
+    if not isinstance(h, dict):
+        return ''
+    key, text, sig = str(h.get('key', '')), str(h.get('text', '')), str(h.get('sig', ''))
+    parts = text.split('|')
+    if len(text) > 512 or len(parts) < 4 or parts[0] != 'bf1943-register' or parts[2] != digest or \
+            '|'.join(parts[3:]) != name:
+        return ''
+    try:
+        public, signature = bytes.fromhex(key), bytes.fromhex(sig)
+    except ValueError:
+        return ''
+    if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
+        return ''
+    return key.lower()
+
+
 class ServerCheck:
     """Which community servers the server list shows (TekRantGaming, 16 Nov 2026: a community server listed through our
     backend ran a modified build with bots; "go with option B": a server that is not an official build is hidden).
@@ -1053,23 +1312,7 @@ class ServerCheck:
                                                        or 'empty'))
 
     def host_key(self, m, name, digest):
-        """The registration's host key when its signature checks (over this name and digest), else ''."""
-        import ed25519
-        h = m.get('host')
-        if not isinstance(h, dict):
-            return ''
-        key, text, sig = str(h.get('key', '')), str(h.get('text', '')), str(h.get('sig', ''))
-        parts = text.split('|')
-        if len(text) > 512 or len(parts) < 4 or parts[0] != 'bf1943-register' or parts[2] != digest or \
-                '|'.join(parts[3:]) != name:
-            return ''
-        try:
-            public, signature = bytes.fromhex(key), bytes.fromhex(sig)
-        except ValueError:
-            return ''
-        if len(public) != 32 or not ed25519.verify(public, text.encode('utf-8'), signature):
-            return ''
-        return key.lower()
+        return signed_host_key(m, name, digest)
 
     def block_reason(self, name, address, key, digest):
         b = self.blocked
@@ -1122,6 +1365,56 @@ class ServerCheck:
                 self.note('server check: %r' % e)
 
 
+class Promoted:
+    """Community servers TekRantGaming shows with the official ones (16 Nov 2026: "promote some community servers at my
+    leisure to become official, or at least show in the official. And at any time I can revoke that, and they can just
+    simply go back to showing on the community tab"). Known by their host key (gmhost.host_proof, checked at their
+    registration): an address or a name can be faked or change, the key cannot without the host's own key file. Every
+    server of that host is promoted.
+
+    --promoted-file: {"servers": [{"key": host key (64 hex), "note": "what it is", "since": "UTC time"}]}, written by
+    the manager (manager.py promote, demote), read again when it changes (looked at every few seconds). A promoted
+    server still has to pass the build check: one that is hidden or blocked is never listed, promoted or not. A
+    promoted server is listed with "official": true (every game puts it on the Reborn tab) and "promoted": true (a game
+    since v0.4.7 marks it PROMOTED, never as run by TRG Studios); inside the backend it stays a community server: its
+    players' stats do not count, and the official network broadcasts do not go to it."""
+
+    def __init__(self, path, note):
+        self.path, self.note = path, note
+        self.keys, self.stamp, self.looked = {}, None, 0.0
+
+    def reload(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.looked < 5:
+            return
+        self.looked = now
+        try:
+            stamp = os.path.getmtime(self.path)
+        except OSError:
+            stamp = None
+        if stamp == self.stamp:
+            return
+        keys = {}
+        if stamp is not None:
+            try:
+                with open(self.path, encoding='utf-8') as f:
+                    raw = json.load(f)
+                for e in raw.get('servers', []):
+                    k = str(e.get('key', '')).strip().lower() if isinstance(e, dict) else ''
+                    if len(k) == 64 and all(c in '0123456789abcdef' for c in k):
+                        keys[k] = str(e.get('note', ''))[:80]
+            except (OSError, ValueError, AttributeError) as err:
+                self.note('promoted servers: %s not read (%s): the last list stays' % (self.path, err))
+                self.stamp = stamp
+                return
+        self.stamp, self.keys = stamp, keys
+        self.note('promoted servers: %d host%s%s' % (len(keys), '' if len(keys) == 1 else 's',
+                                                     ' (%s)' % ', '.join(k[:16] for k in keys) if keys else ''))
+
+    def has(self, key):
+        return bool(key) and key in self.keys
+
+
 class Registry:
     """Dedicated servers register here (server/gmhost.py run by the server package) and stay listed while their
     connection lasts. One JSON object per line:
@@ -1153,6 +1446,12 @@ class Registry:
                joins that game; with the version gate a game older than the newest release (or one that says no
                version) gets {"op": "outdated", "required", "yours"} and no reservation
                a v0.4.0 or newer game says its "version" and "platform" ("windows", "linux") in list, find and reserve
+      player:  {"op": "tag", "name", "id", "tag"} -> {"op": "tag", "ok", "tag", "why"?, "text"?, "dev"?}  the
+               player's clan tag (put_tag): "" for none; why "not_yours" (the name is not held for this player),
+               "length", "chars", "reserved", "profanity", "with_name" (text_filter.py), with the player's words
+      player:  {"op": "tags", "gid"?, "names"?, "me"?} -> {"op": "tags", "tags": {name: tag}}  the clan tags of a
+               server's players and of the names asked about (tags_reply); scoreboard, players and leaderboard rows
+               carry "tag" too
       player:  {"op": "name", "name", "id"} -> {"op": "name", "name"}  before logging in: the player's name, or it
                with a number when another player has it (free_name); held for that player id for 10 minutes, and
                while they are online. "protected_by_other": true when the name is another player's protected name
@@ -1169,6 +1468,14 @@ class Registry:
       player:  {"op": "stats_put", signed "stats_put|nonce|name|score|seconds|captures|Label=events,points;...|1,7"}
                -> {"op": "stats_put", "ok"}  totals for the leaderboard and the account (unsigned stats for a protected
                name are refused)
+    Each player's stats as the servers count them (player_stats.py, server_stats.cpp):
+      server:  {"op": "player_stats", "rows": [{"name", "kills", "deaths", ...}]}  each player's new counts; kept only
+               from official servers (or every server with --player-stats-from all)
+      anyone:  {"op": "leaderboard", "sort", "period", "me"} -> {"op": "leaderboard", "rows", "total", "me"?}  a board
+               by score, kills, kd, captures, seconds, ... for all time, this month or this week (without sort, period
+               and me: the old reply, by score)
+      anyone:  {"op": "player_card", "name"} -> {"op": "player_card", "found", every count, "maps", "places", ...}
+      anyone:  {"op": "achievement_share"} -> {"op": "achievement_share", "players", "have": {id: count}}
     """
     ids = itertools.count(1)
 
@@ -1184,6 +1491,69 @@ class Registry:
         # The build check (ServerCheck): the official backend lists only official builds' community servers.
         self.check = ServerCheck(args.check_servers, getattr(args, 'blocked_file', ''), self.note) \
             if args and getattr(args, 'check_servers', '') else None
+        # Promoted community servers (Promoted) and network broadcasts (gmhost.sign_network): both need official.key.
+        self.promoted = Promoted(args.promoted_file, self.note) if args and getattr(args, 'promoted_file', '') else None
+        trusted = gmhost.trusted_broadcast_keys(self.key) if self.key else []
+        self.network = gmhost.NetworkCheck(trusted)
+        self.admin = gmhost.NetworkCheck(trusted, per_minute=30)
+
+    def refresh_promoted(self):
+        """Each listed community server's promotion, from the promoted list as it is now (said in the log when it
+        changes)."""
+        if not self.promoted:
+            return
+        self.promoted.reload()
+        for gid, g in list(GAMES.items()):
+            if g.get('TYPE') != 'G':
+                continue
+            now = bool(not g.get('official') and g.get('listed', True) and not g.get('hidden')
+                       and self.promoted.has(g.get('host_key', '')))
+            if now != bool(g.get('promoted')):
+                g['promoted'] = now
+                self.note('game %s "%s" %s' % (gid, g.get('N', ''), 'promoted: listed with the Reborn servers (host %s)'
+                                               % g.get('host_key', '')[:16] if now else
+                                               'no longer promoted: back with the community servers'))
+
+    def relay(self, m, peer):
+        """A network broadcast from the official manager (gmhost.sign_network): checked, then passed to every
+        server registered here that it is for, over the server's own registry connection."""
+        why, b = self.network.broadcast(m)
+        if why:
+            self.note('%s network broadcast refused: %s' % (peer, why))
+            return {'op': 'network_broadcast', 'ok': False, 'why': why}
+        line = (json.dumps({'op': 'network_broadcast', 'signed': m['signed'], 'sig': m['sig']}) + '\n').encode()
+        sent = {'official': 0, 'community': 0}
+        for g in list(GAMES.values()):
+            host = g.get('gmhost')
+            if g.get('TYPE') != 'G' or not isinstance(host, RemoteHost):
+                continue
+            if b['scope'] == 'official' and not g.get('official'):
+                continue
+            try:
+                host.writer.write(line)
+            except (ConnectionError, RuntimeError, OSError):
+                continue
+            sent['official' if g.get('official') else 'community'] += 1
+        self.note('network broadcast %s (%s, to %s): %d official and %d community servers: %s' % (
+            b['id'], b['kind'], b['scope'], sent['official'], sent['community'], b['text']))
+        return {'op': 'network_broadcast', 'ok': True, 'id': b['id'], 'sent': sent}
+
+    def hosts(self):
+        """The community servers registered now, with their host keys (only for the official manager)."""
+        self.refresh_promoted()
+        rows = []
+        for g in GAMES.values():
+            if g.get('TYPE') != 'G' or g.get('official') or not isinstance(g.get('gmhost'), RemoteHost):
+                continue
+            rows.append({'gid': g['GID'], 'name': g.get('N', ''), 'host_key': g.get('host_key', ''),
+                         'from': g.get('from', ''), 'port': g.get('P', 0), 'version': g.get('server_version', ''),
+                         'players': g.get('AP', 0), 'max_players': g.get('MAX-PLAYERS', 0),
+                         'listed': bool(g.get('listed', True)), 'hidden': g.get('hidden', ''),
+                         'promoted': bool(g.get('promoted')),
+                         'promoted_key': bool(self.promoted and self.promoted.has(g.get('host_key', ''))),
+                         'region': g.get('region', '')})
+        rows.sort(key=lambda r: (r['host_key'] or '~', r['name'].lower()))
+        return rows
 
     def official(self, code, name):
         """An official code that checks: made with the official key, within two minutes, never seen before."""
@@ -1263,6 +1633,8 @@ class Registry:
         reply = {'op': 'name', 'name': name}
         if name.lower() != asked.lower() and protected_by(asked):
             reply['protected_by_other'] = True
+            if team_owner(asked):
+                reply['team_name'] = True  # kept for the team (TEAM_OWNERS): the game says so
         reply.update(extra or {})
         self.note('%s asked for the name %s: %s%s' % (address, asked, name, ' (protected)' if
                                                       reply.get('protected') else ''))
@@ -1279,6 +1651,9 @@ class Registry:
             return {'op': 'name', 'name': '', 'why': 'bad'}
         acct = ACCOUNTS.get(key)
         now = time.time()
+        owner = team_owner(asked)
+        if acct and owner and owner['key'] == key and valid_name(asked) and acct.get('name', '').lower() != asked.lower():
+            self.move_name(acct, asked, address)  # a team owner plays under another of their names: the account follows
         if acct and not acct.get('name') and valid_name(asked) and protected_by(asked) is None \
                 and name_holder(asked) in (None, pid):
             acct['name'] = asked  # its name was freed after a long time unused: protected again if still free
@@ -1309,42 +1684,59 @@ class Registry:
         acct = ACCOUNTS.get(key)
         owner = protected_by(name)
         if owner and owner is not acct:
-            return {'op': 'claim', 'ok': False, 'why': 'taken'}
+            # (A team name says "team_name", never "reserved": a game from before the version gate reads that word.)
+            return {'op': 'claim', 'ok': False, 'why': 'team_name' if team_owner(name) else 'taken'}
         if not (acct and acct.get('name', '').lower() == name.lower()):
             if name_holder(name) not in (None, pid):
                 return {'op': 'claim', 'ok': False, 'why': 'in_use'}
             times = [t for t in CLAIMS.get(address, []) if now - t < 3600]
-            if len(times) >= CLAIMS_AN_HOUR:
+            if len(times) >= CLAIMS_AN_HOUR and key not in TEAM['by_key']:  # a team owner moves among their names
                 CLAIMS[address] = times
                 return {'op': 'claim', 'ok': False, 'why': 'too_many'}
             CLAIMS[address] = times + [now]
             if len(ACCOUNTS) >= 200000 and not acct:
                 return {'op': 'claim', 'ok': False, 'why': 'too_many'}
-            old = ACCOUNT_NAMES.get(name.lower())
-            if old and old != key and old in ACCOUNTS:
-                ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
             if acct:
-                if acct.get('name') and ACCOUNT_NAMES.get(acct['name'].lower()) == key:
-                    del ACCOUNT_NAMES[acct['name'].lower()]
-                held = NAMES.get(acct.get('name', '').lower())
-                if held and held[1] is not None:  # the old name's hold from its name checks: free at once
-                    del NAMES[acct['name'].lower()]
-                row = LEADERBOARD.pop(acct.get('name', '').lower(), None)  # the leaderboard row moves with it
-                if row:
-                    row['name'] = name
-                    LEADERBOARD[name.lower()] = row
-                    save_leaderboard()
-                self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
+                self.move_name(acct, name, address)
             else:
-                acct = ACCOUNTS[key] = {'key': key, 'name': '', 'created': int(now), 'seen': int(now), 'progress': {}}
+                old = ACCOUNT_NAMES.get(name.lower())
+                if old and old != key and old in ACCOUNTS:
+                    ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
+                acct = ACCOUNTS[key] = {'key': key, 'name': name, 'created': int(now), 'seen': int(now), 'progress': {}}
                 self.note('%s protected the name %s' % (address, name))
-            acct['name'] = name
         acct['seen'] = int(now)
         ACCOUNT_NAMES[name.lower()] = key
         VERIFIED[key] = (pid, address, now + VERIFIED_FOR)
         NAMES[name.lower()] = (pid, now + 600)
         accounts_changed()
         return {'op': 'claim', 'ok': True, 'name': acct['name']}
+
+    def move_name(self, acct, name, address):
+        """The account moves to another name (a claim, or a team owner's name check under another of their names): its
+        old name is free at once, its leaderboard row moves with it."""
+        key = acct['key']
+        old = ACCOUNT_NAMES.get(name.lower())
+        if old and old != key and old in ACCOUNTS:
+            ACCOUNTS[old]['name'] = ''  # an account unused too long loses the name it no longer protects
+        if acct.get('name') and ACCOUNT_NAMES.get(acct['name'].lower()) == key:
+            del ACCOUNT_NAMES[acct['name'].lower()]
+        held = NAMES.get(acct.get('name', '').lower())
+        if held and held[1] is not None:  # the old name's hold from its name checks: free at once
+            del NAMES[acct['name'].lower()]
+        row = LEADERBOARD.pop(acct.get('name', '').lower(), None)  # the leaderboard row moves with it
+        if row:
+            other = LEADERBOARD.get(name.lower())
+            if other and other.get('score', 0) > row.get('score', 0):  # a team owner back on a name with its own row
+                row = other
+            row['name'] = name
+            LEADERBOARD[name.lower()] = row
+            save_leaderboard()
+        if acct.get('name'):
+            PLAYER_STATS.rename(acct['name'], name)  # and the stats the servers counted
+        self.note('%s moved the account of %s to %s' % (address, acct.get('name') or '(no name)', name))
+        acct['name'] = name
+        ACCOUNT_NAMES[name.lower()] = key
+        accounts_changed()
 
     def signed_stats(self, m):
         got = check_signed(m, 'stats_put')
@@ -1385,6 +1777,9 @@ class Registry:
                     if self.check and not official:
                         hidden, host_key = self.check.verdict(m, name, str(m.get('name', 'Server')),
                                                               writer.get_extra_info('peername')[0])
+                    elif self.promoted and not official and isinstance(m.get('build'), dict):
+                        host_key = signed_host_key(m, str(m.get('name', 'Server')),
+                                                   str(m['build'].get('digest', '')).lower())
                     n = next(Registry.ids)
                     gid, uid, pid = str(200 + n), 900 + n, next(TheaterClient.pids)
                     local = False
@@ -1432,6 +1827,7 @@ class Registry:
                         ': hidden, %s' % GAMES[gid]['hidden'] if GAMES[gid]['hidden'] else
                         ' (host %s)' % host_key[:16] if host_key else ''))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
+                    self.refresh_promoted()
                 elif op == 'status' and gid in GAMES:
                     GAMES[gid]['AP'] = int(m.get('players', 0))
                     STATS.status(gid, GAMES[gid]['AP'])  # the website's hours played (server/stats.py)
@@ -1460,7 +1856,7 @@ class Registry:
                             continue
                         rows.append({'name': persona, 'gid': g['GID'] if g else '', 'server': g.get('N', '') if g else '',
                                      'map': g.get('map', '') if g else ''})
-                    writer.write((json.dumps({'op': 'players', 'rows': rows[:200]}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'players', 'rows': with_tags(rows[:200])}) + '\n').encode())
                 elif op == 'match_score' and str(m.get('gid', '')) in GAMES:
                     # The pause's Scoreboard: each player's game sends its score in this match.
                     name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
@@ -1482,7 +1878,17 @@ class Registry:
                         if n.lower() not in table:
                             rows.append({'name': n, 'score': 0, 'at': 0})
                     rows.sort(key=lambda e: (-e['score'], e['name'].lower()))
-                    writer.write((json.dumps({'op': 'scoreboard', 'rows': rows[:64]}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'scoreboard', 'rows': with_tags(rows[:64])}) + '\n').encode())
+                elif op == 'tag':  # clan tags (tag_for, above)
+                    reply = put_tag(m, address)
+                    self.note('%s %s the clan tag "%s" for %s%s' % (
+                        address, 'set' if reply.get('ok') else 'was refused', str(m.get('tag', ''))[:16],
+                        str(m.get('name', ''))[:15], (': wears "%s"' % reply.get('tag')) if reply.get('ok') and
+                        reply.get('tag') != str(m.get('tag', '')) else '' if reply.get('ok') else
+                        ' (%s)' % reply.get('why')))
+                    writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'tags':
+                    writer.write((json.dumps(tags_reply(m, address)) + '\n').encode())
                 elif op == 'stats_put' and 'signed' in m:
                     reply = self.signed_stats(m)
                     writer.write((json.dumps(reply) + '\n').encode())
@@ -1518,13 +1924,60 @@ class Registry:
                     else:
                         writer.write((json.dumps({'op': 'recover', 'ok': False}) + '\n').encode())
                 elif op == 'name' and 'signed' in m:
-                    writer.write((json.dumps(self.signed_name(m, address)) + '\n').encode())
+                    reply = self.signed_name(m, address)
+                    note_name_check(reply, str(m.get('signed', '')).rsplit('|', 1)[-1], address)  # clan tags
+                    writer.write((json.dumps(reply) + '\n').encode())
+                elif op == 'network_broadcast' and not gid:
+                    # The official manager's network broadcast (gmhost.sign_network), passed on to the servers.
+                    writer.write((json.dumps(self.relay(m, peer)) + '\n').encode())
+                elif op == 'admin' and not gid:
+                    # The official manager's questions (gmhost.sign_admin): the community servers' host keys, so
+                    # TekRantGaming can pick one to promote. Signed: the rows hold the hosts' addresses.
+                    why, what = self.admin.admin(m)
+                    if why or what != 'hosts':
+                        self.note('%s admin question refused: %s' % (peer, why or 'unknown'))
+                        writer.write((json.dumps({'op': 'admin', 'ok': False, 'why': why or 'unknown'}) +
+                                      '\n').encode())
+                    else:
+                        writer.write((json.dumps({'op': 'admin', 'ok': True, 'hosts': self.hosts()}) + '\n').encode())
                 elif op == 'stats':
                     # The website's totals (server/stats.py, read by its feed): counts only, nothing about anyone.
                     writer.write((json.dumps(dict(STATS.totals(), op='stats')) + '\n').encode())
+                elif op == 'player_stats' and gid in GAMES:
+                    # A dedicated server's counts (server_stats.cpp): only a server we trust counts (player_stats.py).
+                    trusted = GAMES[gid].get('official') or getattr(self.args, 'player_stats_from', '') == 'all'
+                    if trusted:
+                        PLAYER_STATS.add(m.get('rows'))
+                elif op == 'leaderboard' and ('sort' in m or 'period' in m or 'me' in m):
+                    # Leaderboards (game_menu_progress.inc): a board by any stat and period, with the asker's own row.
+                    board = PLAYER_STATS.board(str(m.get('sort', 'score')), str(m.get('period', 'all')), 50,
+                                               str(m.get('me', ''))[:15], LEADERBOARD)
+                    board['rows'] = with_tags(board['rows'])
+                    if 'me' in board:
+                        board['me'] = with_tags([board['me']])[0]
+                    writer.write((json.dumps(dict(board, op='leaderboard')) + '\n').encode())
+                elif op == 'achievement_share':
+                    # Achievements (game_menu_progress.inc): how many players with an account have each one. Counts
+                    # only: the accounts' progress (Protect your name), nothing about anyone.
+                    have, players = {}, 0
+                    for acct in ACCOUNTS.values():
+                        ids = (acct.get('progress') or {}).get('achievements') or []
+                        if not acct.get('name'):
+                            continue
+                        players += 1
+                        for i in set(ids):
+                            if type(i) is int and 0 < i < 1000:
+                                have[str(i)] = have.get(str(i), 0) + 1
+                    writer.write((json.dumps({'op': 'achievement_share', 'players': players, 'have': have}) +
+                                  '\n').encode())
+                elif op == 'player_card':
+                    # Stats & Rewards, and a leaderboard row's card: one player's record (counts only, by name).
+                    card = PLAYER_STATS.card(str(m.get('name', ''))[:15], LEADERBOARD)
+                    writer.write((json.dumps(dict(card, op='player_card')) + '\n').encode())
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
-                    writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
+                    writer.write((json.dumps({'op': 'leaderboard', 'rows': with_tags(rows), 'total': total}) +
+                                  '\n').encode())
                 elif op == 'reserve' and maintenance_now(address):
                     # Maintenance mode (maintenance_now): every join refused with its text, whatever server was picked.
                     notice = maintenance_now(address)
@@ -1572,14 +2025,17 @@ class Registry:
                     if not asked or not pid:
                         writer.write((json.dumps({'op': 'name', 'name': asked}) + '\n').encode())
                     else:
-                        writer.write((json.dumps(self.name_reply(asked, pid, address)) + '\n').encode())
+                        reply = note_name_check(self.name_reply(asked, pid, address), pid, address)  # clan tags
+                        writer.write((json.dumps(reply) + '\n').encode())
                 elif op == 'find':
+                    self.refresh_promoted()
                     want = (str(m.get('address', '')), int(m.get('port', 18300) or 18300))
                     games = [for_player(g, writer, self.args) for g in GAMES.values() if g.get('TYPE') == 'G']
                     hit = [g for g in games if (g['I'], g['P']) == want]
                     writer.write((json.dumps({'op': 'found', 'server': listing(hit[0]) if hit else None}) +
                                   '\n').encode())
                 elif op == 'list':
+                    self.refresh_promoted()
                     # The address goes to the game (its ping and its join need it); the browser never shows it.
                     servers = [listing(for_player(g, writer, self.args)) for g in GAMES.values()
                                if g.get('TYPE') == 'G' and g.get('listed', True)]
@@ -1646,6 +2102,113 @@ def for_player(g, writer, args):
     return dict(g, I=host, XNADDR=base64.b64encode(gmhost.xnaddr(host)).decode())
 
 
+# ---- Clan tags (TekRantGaming, 16 Nov 2026: "can be left blank or can have custom text, shows up next to a username in
+# launcher, in game and in scoreboard like this [clan]Username. Ban the use of Devs and Dev clan tags and profanity
+# ... Developers TekRantGaming and ZALIAS are devs of this project and should have the clan tag of Dev."). The backend
+# decides who wears what: each game sends its player's tag here ({"op": "tag"}) and draws everyone's from what this
+# says ({"op": "tags"}, and "tag" in the scoreboard, players and leaderboard rows), never from what another game
+# claims. A tag is 2 to 4 letters or digits, checked by server/text_filter.py (the game's text_filter.h rules: Dev and
+# its lookalikes, staff tags, profanity and slurs, and the tag and name read together). It is worn while its player
+# holds the name (name_holder: the name check's hold, then the FESL login), and every game sends it again at its start
+# and with its match's tag requests, so nothing needs keeping on disk. The team names (TEAM_OWNERS, the developers'
+# accounts, which only their owners' signed games can hold) always wear Dev, whatever their game sends.
+TAGS = {}  # a name, lower case -> (tag, player id)
+NAME_FROM = {}  # a name, lower case -> (player id, address): the last name check that gave it (put_tag)
+DEV_TAG = 'Dev'
+
+
+def note_name_check(reply, pid, address):
+    """A name check's answer: which player and address it gave the name to, so only they set its tag."""
+    if isinstance(pid, str):
+        try:
+            pid = int(pid, 16) & 0xFFFFFFFF
+        except ValueError:
+            pid = 0
+    if isinstance(reply, dict) and reply.get('name') and pid:
+        if len(NAME_FROM) > 100000:
+            NAME_FROM.clear()
+        NAME_FROM[reply['name'].lower()] = (pid, address)
+    return reply
+
+
+def dev_name(name):
+    """Whether this is one of the developers' names (a team name of TEAM_OWNERS)."""
+    return bool(name) and team_owner(name) is not None
+
+
+def tag_for(name):
+    """The clan tag worn by the player under this name now ('' for none)."""
+    if not isinstance(name, str) or not name:
+        return ''
+    if dev_name(name):
+        return DEV_TAG
+    held = TAGS.get(name.lower())
+    if not held:
+        return ''
+    if name_holder(name) != held[1]:  # the name's hold ended, or another player has it now
+        TAGS.pop(name.lower(), None)
+        return ''
+    return held[0]
+
+
+def with_tags(rows):
+    """Rows of names ({'name': ...}) with each one's tag added where there is one (copies: the tables stay as kept)."""
+    out = []
+    for r in rows:
+        tag = tag_for(r.get('name', ''))
+        out.append(dict(r, tag=tag) if tag else r)
+    return out
+
+
+def put_tag(m, address):
+    """A game's {"op": "tag", "name", "id", "tag"}: its player's tag, worn from now on. Only the player holding the name
+    may set its tag (the same player id; for a protected name, the one signed in for it from this address)."""
+    name = str(m.get('name', ''))[:15]
+    tag = str(m.get('tag', '')).strip()[:16]
+    try:
+        pid = int(str(m.get('id', '')), 16) & 0xFFFFFFFF
+    except ValueError:
+        pid = 0
+    acct = protected_by(name) if name else None
+    if not name or not pid or name_holder(name) != pid or NAME_FROM.get(name.lower()) != (pid, address) or \
+            (acct and not signed_in_for(acct, pid, address)):
+        return {'op': 'tag', 'ok': False, 'why': 'not_yours', 'tag': tag_for(name),
+                'text': 'Your name is not signed in yet: your clan tag is used from your next start.'}
+    if dev_name(name):
+        return {'op': 'tag', 'ok': True, 'tag': DEV_TAG, 'dev': True}
+    why = text_filter.tag_problem(tag, name)
+    if why:
+        return {'op': 'tag', 'ok': False, 'why': why, 'text': text_filter.TAG_PROBLEM_TEXT[why], 'tag': tag_for(name)}
+    if len(TAGS) > 50000:
+        for k in [k for k, (_, p) in TAGS.items() if name_holder(k) != p]:
+            del TAGS[k]
+    if tag:
+        TAGS[name.lower()] = (tag, pid)
+    else:
+        TAGS.pop(name.lower(), None)
+    return {'op': 'tag', 'ok': True, 'tag': tag}
+
+
+def tags_reply(m, address):
+    """A game's {"op": "tags", "gid"?, "names"?, "me"?}: the tags of a server's players and of the names asked about
+    (64 at most), {name: tag} for those wearing one. "me" ({"name", "id", "tag"}) sets the asker's own first (put_tag),
+    so a tag is back at once after this backend restarts."""
+    if isinstance(m.get('me'), dict):
+        put_tag(m['me'], address)
+    names = []
+    g = GAMES.get(str(m.get('gid', '')))
+    if g:
+        names += g.get('names', [])
+    if isinstance(m.get('names'), list):
+        names += [str(n)[:15] for n in m['names'][:64]]
+    tags = {}
+    for n in names[:128]:
+        tag = tag_for(n)
+        if tag:
+            tags[n] = tag
+    return {'op': 'tags', 'tags': tags}
+
+
 def tick_of(value):
     """A server's tick rate in Hz as it registered it: a whole number from 10 to 240, else 0 (not said)."""
     try:
@@ -1659,7 +2222,8 @@ def listing(g):
     """A game as the server browser gets it."""
     return {'gid': g['GID'], 'name': g['N'], 'address': [g['I'], g['P']], 'map': g.get('map', ''),
             'players': g['AP'], 'max_players': g['MAX-PLAYERS'], 'mode': g.get('mode', 'classic'),
-            'description': g.get('description', ''), 'official': bool(g.get('official')),
+            'description': g.get('description', ''), 'official': bool(g.get('official') or g.get('promoted')),
+            'promoted': bool(g.get('promoted') and not g.get('official')),  # Promoted: on the Reborn tab, marked
             'next_map': g.get('next_map', ''), 'maps': g.get('maps', []), 'night': bool(g.get('night')),
             'region': g.get('region', ''), 'tick': g.get('tick', 0)}
 
@@ -1668,7 +2232,7 @@ def public(g):
     """A game's fields without our own bookkeeping."""
     return {k: v for k, v in g.items()
             if k not in ('host', 'gmhost', 'XNKID', 'XNKEY', 'XNADDR', 'map', 'mode', 'night', 'region', 'tick',
-                         'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest')}
+                         'server_version', 'local', 'hidden', 'from', 'host_key', 'build_digest', 'promoted')}
 
 
 async def http_client(reader, writer, log):
@@ -1719,6 +2283,8 @@ async def main():
                     help="the official builds' manifests (a folder of *.json): list only community servers that run "
                          'one (ServerCheck); the others are Direct connect only')
     ap.add_argument('--blocked-file', default='', help='with --check-servers: hosts never listed (ServerCheck)')
+    ap.add_argument('--promoted-file', default='',
+                    help='community servers listed with the official ones, by host key (Promoted; manager.py promote)')
     ap.add_argument('--login-delay', type=float, default=2.0, help='seconds before the login reply')
     # Off by default: with our HTTP reply the client never finishes the ticker request (docs/01-online-flow.md).
     ap.add_argument('--http-port', type=int, default=0, help='HTTP port for the news ticker (0: off)')
@@ -1748,8 +2314,15 @@ async def main():
                          'new joins are refused with its text (maintenance_now)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
+    ap.add_argument('--player-stats', default='',
+                    help="a file keeping each player's stats as the servers count them (server/player_stats.py)")
+    ap.add_argument('--player-stats-from', default='official', choices=('official', 'all'),
+                    help="whose counts are kept: official servers only, or every server (a test backend)")
     ap.add_argument('--accounts', default='',
                     help="a file keeping the players' accounts (Protect your name: protected names and progress)")
+    ap.add_argument('--team-names', default='',
+                    help='a JSON file of team names ({"owners": [...], "left_free": [...]}, as TEAM_OWNERS) in place of '
+                         'the built in ones (tests)')
     ap.add_argument('--accounts-save-every', type=float, default=30.0,
                     help='seconds between two writes of the accounts file (only when something changed)')
     ap.add_argument('--stats', default='',
@@ -1777,8 +2350,15 @@ async def main():
     ACCOUNTS_FILE = args.accounts or None
     if ACCOUNTS_FILE and os.path.exists(ACCOUNTS_FILE):
         load_accounts(ACCOUNTS_FILE)
+    if args.team_names:
+        with open(args.team_names, encoding='utf-8') as f:
+            team = json.load(f)
+        set_team_names(team.get('owners', []), team.get('left_free', TEAM_NAMES_LEFT_FREE))
+    keep_team_names()
     STATS.path = args.stats or None
     STATS.load()
+    global PLAYER_STATS
+    PLAYER_STATS = player_stats.PlayerStats(args.player_stats or None)
     for n, address in enumerate(args.game, 1):
         host, port = address.rsplit(':', 1)
         GAMES[str(n)] = {'GID': str(n), 'LID': '1', 'I': host, 'P': int(port), 'HU': n, 'HN': 'bf1943-server-%d' % n,
@@ -1826,8 +2406,15 @@ async def main():
             maintenance_now()
         accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
         stats_task = asyncio.ensure_future(keep_stats_saved(max(0.5, args.stats_save_every)))
+        async def keep_player_stats_saved():  # each player's stats (player_stats.py), when something changed
+            while True:
+                await asyncio.sleep(10)
+                PLAYER_STATS.save(force=True)
+        player_stats_task = asyncio.ensure_future(keep_player_stats_saved())
         log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
                                              ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
+        log.write('%s team names: %s\n' % (time.strftime('%H:%M:%S'),
+                                           ', '.join(o['owner'] for o in TEAM['owners']) or 'none'))
         t = STATS.totals()
         log.write('%s stats: %d players, %d this month, %d hours%s\n' % (
             time.strftime('%H:%M:%S'), t['players'], t['players_month'], t['hours'],
@@ -1849,8 +2436,10 @@ async def main():
             feed_task.cancel()
         accounts_task.cancel()
         stats_task.cancel()
+        player_stats_task.cancel()
         save_accounts()
         STATS.save()
+        PLAYER_STATS.save(force=True)
 
 
 if __name__ == '__main__':

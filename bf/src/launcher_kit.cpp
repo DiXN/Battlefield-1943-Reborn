@@ -585,8 +585,9 @@ float Cap(ImDrawList* d, const std::string& t, ImVec2 at, float h, bool draw) {
 
 float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2 at, float h, bool draw) {
   // The game's own buttons (its menus' glyph sprites, cut from its atlases: A, B, X, Y, LB, RB, LT, RT) for the Xbox
-  // styles, once the menu art is there.
-  if ((style == Style::kXbox360 || style == Style::kXboxSeries) && int(b) <= int(Button::kRT) && !MenuArtDir().empty()) {
+  // 360 style, once the menu art is there. Xbox Series draws Kenney's pictures, as every other style (TekRantGaming,
+  // 16 Nov 2026: our prompts all from Kenney's Input Prompts; the pack has no Xbox 360 buttons).
+  if (style == Style::kXbox360 && int(b) <= int(Button::kRT) && !MenuArtDir().empty()) {
     const float w = ArtAt(d, (std::string("glyph_") + PadName(b)).c_str(), ImVec2(at.x, at.y), h, IM_COL32(255, 255, 255, 255), draw);
     if (w > 0) return w;
   }
@@ -604,7 +605,9 @@ float Glyph(ImDrawList* d, Style style, Button b, const std::string& key, ImVec2
   if (const char* set = SetName(style)) {
     if (const char* pad = PadName(b)) {
       ImFontAtlasRect r;
-      if (const GlyphImage* g = Picture(set, pad, r)) {
+      const GlyphImage* g = b == Button::kRS ? Picture(set, "stick_r_click", r) : nullptr;  // the right stick's own
+      if (!g) g = Picture(set, pad, r);
+      if (g) {
         const float w = h * float(g->w) / float(g->h);
         if (draw)
           d->AddImage(ImGui::GetIO().Fonts->TexRef, ImVec2(at.x, at.y - h * 0.5f), ImVec2(at.x + w, at.y + h * 0.5f),

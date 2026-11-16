@@ -1273,8 +1273,38 @@ void ExtractGameArt(const fs::path& game, const fs::path& out_dir) {
   for (const auto& [key, folder] : kMaps)
     if (!fs::exists(out_dir / "minimap" / (std::string(folder) + ".png"))) minimaps.push_back(folder);
   const bool map_icons = !fs::exists(out_dir / "minimap" / kMapIconsFile);
-  if (todo.empty() && !music && !plants && !startup && !menu && !fonts && minimaps.empty() && !map_icons) return;
-  std::thread([game, out_dir, todo, music, plants, startup, trg_logo, menu, fonts, minimaps, map_icons] {
+  // The original menus' own sounds (TekRantGaming, 16 Nov 2026: "the original menus sounds for moving and button
+  // pressing ... used in our menus now and pause menus"): the four waves dice.UISound plays (game_music.cpp
+  // PlayMenuSound), from mainmenu-00.fbrb into cache\extracted\sounds.
+  const bool ui_sounds = !fs::exists(out_dir / "sounds" / "back.wav");
+  if (todo.empty() && !music && !plants && !startup && !menu && !fonts && minimaps.empty() && !map_icons && !ui_sounds)
+    return;
+  std::thread([game, out_dir, todo, music, plants, startup, trg_logo, menu, fonts, minimaps, map_icons, ui_sounds] {
+    if (ui_sounds) {  // first: small, and the menus want them from their first page
+      const auto t0 = std::chrono::steady_clock::now();
+      Archive a;
+      int made = 0;
+      if (LoadArchive(game / "dist" / "xenon" / "menu" / "main" / "mainmenu-00.fbrb", a)) {
+        // "back" last: its file is the one checked above, so a start that stopped half way makes them all again.
+        static const std::pair<const char*, const char*> kSounds[] = {
+            {"sound/beach_sfx/ui/bsfx_ui_fescroll_01_wave.res", "scroll"},
+            {"sound/beach_sfx/ui/bsfx_ui_fetick_01_wave.res", "tick"},
+            {"sound/beach_sfx/ui/bsfx_ui_feforward_01_wave.res", "forward"},
+            {"sound/beach_sfx/ui/bsfx_ui_febackwards_01_wave.res", "back"}};
+        for (const auto& [entry, file] : kSounds) {
+          auto it = a.entries.find(entry);
+          if (it == a.entries.end() || size_t(it->second.first) + it->second.second > a.data.size()) continue;
+          const std::vector<uint8_t> res(a.data.begin() + it->second.first,
+                                         a.data.begin() + it->second.first + it->second.second);
+          if (EaAudioToWav(res, nullptr, out_dir / "sounds" / (std::string(file) + ".wav"), 1.0f)) ++made;
+        }
+      }
+      if (made == 4)
+        REXLOG_INFO("BF game art: the menus' four sounds in {} ms",
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+      else
+        REXLOG_WARN("BF game art: {} of the menus' four sounds made (the menus are silent without them)", made);
+    }
     if (plants) {
       std::error_code made;
       fs::create_directories(out_dir, made);

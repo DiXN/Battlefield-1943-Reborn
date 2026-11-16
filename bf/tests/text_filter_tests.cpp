@@ -4,10 +4,15 @@
 #include "text_filter.h"
 
 #include <cstdio>
+#include <cstring>
+#include <iostream>
 #include <string>
 
 using bf1943::text_filter::Censor;
 using bf1943::text_filter::NameAllowed;
+using bf1943::text_filter::CheckTag;
+using bf1943::text_filter::TagProblem;
+using bf1943::text_filter::TagProblemCode;
 
 namespace {
 int failures = 0, checks = 0;
@@ -27,9 +32,31 @@ void Name(const std::string& name, bool allowed) {
     ++failures;
   }
 }
+// A clan tag (and the name it goes with): the problem code expected ("" when it may be worn).
+void Tag(const std::string& tag, const std::string& want, const std::string& name = "") {
+  ++checks;
+  const std::string got = TagProblemCode(CheckTag(tag, name));
+  if (got != want) {
+    std::printf("FAIL tag \"%s\" with \"%s\": \"%s\", want \"%s\"\n", tag.c_str(), name.c_str(), got.c_str(),
+                want.c_str());
+    ++failures;
+  }
+}
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  // --tags: each line of stdin "tag<TAB>name" answered with its problem code (tools/test_clan_tags.py compares the
+  // backend's Python rules, server/text_filter.py, with these).
+  if (argc > 1 && !std::strcmp(argv[1], "--tags")) {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      const size_t tab = line.find('\t');
+      const std::string tag = line.substr(0, tab), name = tab == std::string::npos ? "" : line.substr(tab + 1);
+      std::printf("%s\t%s\n", line.c_str(), TagProblemCode(CheckTag(tag, name)));
+    }
+    return 0;
+  }
   // Chat: the word as stars, the rest as typed.
   Chat("you fucking idiot", "you ******* idiot");
   Chat("this is bullshit!", "this is ********!");
@@ -103,6 +130,80 @@ int main() {
   Name("Hitman", true);
   Name("PacificHawk10", true);
   Name("Grape", true);
+
+  // Clan tags: worn.
+  Tag("", "");
+  Tag("ABC", "");
+  Tag("Wake", "");
+  Tag("UK", "");
+  Tag("Fuzz", "");
+  Tag("Boss", "");
+  Tag("Zulu", "");
+  Tag("1943", "");
+  Tag("Iwo", "");
+  Tag("Tide", "");
+  Tag("x7", "");
+  Tag("Fox", "", "Hound");
+  // Length and characters.
+  Tag("A", "length");
+  Tag("ABCDE", "length");
+  Tag("A-B", "chars");
+  Tag("A B", "chars");
+  Tag("[A]", "chars");
+  Tag("D.V", "chars");
+  // The developers' tag and its lookalikes.
+  Tag("Dev", "reserved");
+  Tag("DEV", "reserved");
+  Tag("dev", "reserved");
+  Tag("Devs", "reserved");
+  Tag("D3V", "reserved");
+  Tag("D3vs", "reserved");
+  Tag("xDevx", "length");  // five: too long before it is read
+  Tag("xDvx", "reserved");
+  Tag("DDEV", "reserved");
+  Tag("Deev", "reserved");
+  Tag("Dvz", "reserved");
+  Tag("Devz", "reserved");
+  Tag("Dev1", "reserved");
+  Tag("Adm", "reserved");
+  Tag("Admn", "reserved");
+  Tag("Mod", "reserved");
+  Tag("M0DS", "reserved");
+  Tag("EA", "reserved");
+  Tag("DICE", "reserved");
+  // Profanity and slurs (his example first).
+  Tag("NOG", "profanity");
+  Tag("N0G", "profanity");
+  Tag("nogg", "profanity");
+  Tag("NIG", "profanity");
+  Tag("N1G", "profanity");
+  Tag("NlG", "profanity");
+  Tag("NGGA", "profanity");
+  Tag("FAG", "profanity");
+  Tag("FGT", "profanity");
+  Tag("KKK", "profanity");
+  Tag("FU", "profanity");
+  Tag("FUK", "profanity");
+  Tag("Fck", "profanity");
+  Tag("STFU", "profanity");
+  Tag("SS", "profanity");
+  Tag("xSSx", "profanity");
+  Tag("88", "profanity");
+  Tag("1488", "profanity");
+  Tag("H88", "profanity");
+  Tag("ASS", "profanity");
+  Tag("A55", "profanity");
+  Tag("Cunt", "profanity");
+  Tag("Cum", "profanity");
+  Tag("Nazi", "profanity");
+  Tag("N4Z1", "profanity");
+  Tag("Kys", "profanity");
+  // The tag and the name together.
+  Tag("FU", "profanity", "Bob");
+  Tag("Bull", "with_name", "shit");
+  Tag("Big", "with_name", "Ass");
+  Tag("Shi", "with_name", "tHead");
+  Tag("Shi", "", "Fox");
 
   std::printf("%d of %d checks passed\n", checks - failures, checks);
   return failures ? 1 : 0;

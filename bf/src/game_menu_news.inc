@@ -399,8 +399,15 @@
           if (!sv.region.empty()) name = Upper(sv.region.substr(0, sv.region.find('-'))) +" \xC2\xB7 " + name;
           const std::string count = fmt::format("{}/{}", sv.players, sv.max_players);
           const float cw = kit::SpacedWidth(f.typed, st(9.5f), count, st(1));
+          float rw = cw;  // the count and the mark before it
+          if (sv.promoted) {  // a promoted community server (Promoted, plasma.py): marked, never passed off as ours
+            const char* mark = "PROMOTED";
+            const float mw = kit::SpacedWidth(f.typed, st(8.5f), mark, st(1.5f));
+            kit::Spaced(d, f.typed, st(8.5f), ImVec2(x1 - cw - st(10) - mw, y + st(3.5f)), IM_COL32(138, 112, 40, 255), mark, st(1.5f));
+            rw += mw + st(10);
+          }
           d->AddCircleFilled(ImVec2(x0 + st(3), y + st(8)), st(3), sv.players >= sv.max_players ? IM_COL32(217, 160, 58, 255) : kit::kGreen);
-          d->AddText(f.ui, st(12.5f), ImVec2(x0 + st(12), y), kit::kInk, NewsFit(f.ui, st(12.5f), name, x1 - x0 - st(24) - cw).c_str());
+          d->AddText(f.ui, st(12.5f), ImVec2(x0 + st(12), y), kit::kInk, NewsFit(f.ui, st(12.5f), name, x1 - x0 - st(24) - rw).c_str());
           kit::Spaced(d, f.typed, st(9.5f), ImVec2(x1 - cw, y + st(3)), kit::kInkSection, count, st(1));
           d->AddRectFilled(ImVec2(x0, y + st(17.5f)), ImVec2(x1, y + st(18)), kit::kRule);
           y += st(19);

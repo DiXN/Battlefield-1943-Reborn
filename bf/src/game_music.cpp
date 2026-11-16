@@ -10,14 +10,22 @@
 // licences\vgmstream.txt); the packets go to FFmpeg's XMA2 decoder (built into the SDK's FFmpeg, not registered).
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include <rex/cvar.h>
+#include <rex/hook.h>
 #include <rex/logging.h>
 
 #if defined(_WIN32)
@@ -29,9 +37,8 @@
 #endif
 #include <windows.h>
 #include <mmsystem.h>
-#else
-#include <SDL3/SDL.h>
 #endif
+#include <SDL3/SDL.h>  // the menu sounds' mixer on both systems; on Linux the WAV player too
 
 extern "C" {
 #include "libavcodec/avcodec.h"
@@ -263,4 +270,280 @@ void PlayMenuMusic(const fs::path& wav, bool on) {
 #endif
 }
 
+// ---- The original menus' sounds in ours (TekRantGaming, 16 Nov 2026: "the original menus sounds for moving and
+// button pressing is extracted and used in our menus now and pause menus").
+//
+// The game's menus (dice.UISound in main_nav, main_popups, common_screens and main_root .apt) play four waves:
+//   SND_NAV_UP, SND_NAV_DOWN          BSFX_UI_FEScroll_01    up and down a list, a page's tabs   -> kScroll
+//   SND_NAV_GRID                      BSFX_UI_FETick_01      left and right: an option's value   -> kTick
+//   SND_MENU_SELECT, _TRANSITION      BSFX_UI_FEForward_01   a press, a page opened              -> kForward
+//   SND_MENU_BACK                     BSFX_UI_FEBackwards_01 back out                            -> kBack
+// and nothing for SND_NAV_NOGO (a move at a list's end) and the pop-ups (SND_POPUP_ERROR, _INFO). shader_prep.cpp
+// makes the four into 16 bit WAVs in the user's cache (from mainmenu-00.fbrb, never shipped); here they are read at
+// the first sound, kept in memory at 48 kHz stereo and mixed on SDL's audio (one stream, the runtime's SDL, as the
+// voice chat's), apart from the menu music (Windows' PlaySound), so a press never stops the music. A sound whose
+// file is not there stays silent (looked for again every 5 s: the cache is made while the first page shows).
+//
+// While our menus show, the game's own copies of these four are kept quiet (the sub_826A8330 hook below): our pause
+// drives BF's pause list under ours with presses of its own (game_menu.cpp PressBf), and BF's menus would play
+// their sounds for those too, in a match where the game's sound is on.
+
+REXCVAR_DEFINE_BOOL(bf_menu_sounds, true, "BF1943/Audio", "The original menus' sounds in our menus");
+REXCVAR_DEFINE_DOUBLE(bf_menu_sounds_volume, 100.0, "BF1943/Audio", "How loud the menu sounds are, 0 to 100 (%)");
+
+namespace {
+constexpr int kMixRate = 48000;
+constexpr const char* kMenuSoundFiles[4] = {"scroll", "tick", "forward", "back"};
+
+struct MenuVoice {
+  int wave = 0;
+  size_t at = 0;  // frames played
+  float gain = 1.0f;
+};
+struct MenuMixer {
+  std::mutex mutex;
+  std::vector<float> waves[4];  // 48 kHz stereo, interleaved
+  double look_at[4] = {};       // when to look for a missing file again (steady seconds)
+  std::vector<MenuVoice> voices;
+  SDL_AudioStream* stream = nullptr;
+  bool no_device = false;
+  double last_at[4] = {-1, -1, -1, -1};
+#if defined(BF_DEV_TOOLS)
+  // BF_DEV_MENU_SOUND_OUT=<file.wav> (tests): no sound device; every sound mixed into that file at the moment it
+  // played, 48 kHz stereo 16 bit, from the first sound on (the evidence that each press made its sound).
+  std::string out_path;
+  std::vector<float> out;
+  double out_from = -1;
+#endif
+};
+MenuMixer g_mixer;
+
+double SteadySeconds() {
+  return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// A 16 bit PCM WAV (ours, EaAudioToWav) as 48 kHz stereo floats.
+bool ReadWav16(const fs::path& path, std::vector<float>& lr) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return false;
+  const std::vector<uint8_t> d((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+  if (d.size() < 44 || std::memcmp(d.data(), "RIFF", 4) != 0 || std::memcmp(&d[8], "WAVE", 4) != 0) return false;
+  auto u16 = [&](size_t at) { return uint32_t(d[at]) | uint32_t(d[at + 1]) << 8; };
+  auto u32 = [&](size_t at) { return u16(at) | u16(at + 2) << 16; };
+  int channels = 0, rate = 0, bits = 0;
+  const uint8_t* pcm = nullptr;
+  size_t bytes = 0;
+  for (size_t at = 12; at + 8 <= d.size();) {
+    const uint32_t size = u32(at + 4);
+    if (at + 8 + size > d.size()) break;
+    if (std::memcmp(&d[at], "fmt ", 4) == 0 && size >= 16) {
+      if (u16(at + 8) != 1) return false;
+      channels = int(u16(at + 10)), rate = int(u32(at + 12)), bits = int(u16(at + 22));
+    } else if (std::memcmp(&d[at], "data", 4) == 0) {
+      pcm = &d[at + 8], bytes = size;
+    }
+    at += 8 + size + (size & 1);
+  }
+  if (!pcm || bits != 16 || channels < 1 || channels > 2 || rate <= 0) return false;
+  const size_t frames = bytes / size_t(2 * channels);
+  if (frames == 0) return false;
+  auto sample = [&](size_t frame, int c) {
+    const uint8_t* p = pcm + (frame * channels + size_t(std::min(c, channels - 1))) * 2;
+    return float(int16_t(uint16_t(p[0] | p[1] << 8))) / 32768.0f;
+  };
+  const size_t out_frames = size_t(double(frames) * kMixRate / rate);
+  lr.resize(out_frames * 2);
+  for (size_t i = 0; i < out_frames; ++i) {  // linear: these are short clicks, made at 32 or 48 kHz
+    const double src = double(i) * rate / kMixRate;
+    const size_t i0 = std::min(size_t(src), frames - 1), i1 = std::min(i0 + 1, frames - 1);
+    const float t = float(src - double(i0));
+    for (int c = 0; c < 2; ++c) lr[i * 2 + c] = sample(i0, c) * (1 - t) + sample(i1, c) * t;
+  }
+  return true;
+}
+
+// SDL's audio thread asks for more: every sound playing, added up.
+void SDLCALL MixMenuSounds(void*, SDL_AudioStream* stream, int additional, int) {
+  float buffer[512 * 2];
+  while (additional > 0) {
+    const int frames = std::min(512, additional / 8);
+    if (frames <= 0) break;
+    std::fill(buffer, buffer + frames * 2, 0.0f);
+    {
+      std::lock_guard<std::mutex> lock(g_mixer.mutex);
+      for (MenuVoice& v : g_mixer.voices) {
+        const std::vector<float>& w = g_mixer.waves[v.wave];
+        const size_t total = w.size() / 2;
+        for (int i = 0; i < frames && v.at < total; ++i, ++v.at) {
+          buffer[i * 2] += w[v.at * 2] * v.gain;
+          buffer[i * 2 + 1] += w[v.at * 2 + 1] * v.gain;
+        }
+      }
+      g_mixer.voices.erase(std::remove_if(g_mixer.voices.begin(), g_mixer.voices.end(),
+                                          [](const MenuVoice& v) { return v.at >= g_mixer.waves[v.wave].size() / 2; }),
+                           g_mixer.voices.end());
+    }
+    for (int i = 0; i < frames * 2; ++i) buffer[i] = std::clamp(buffer[i], -1.0f, 1.0f);
+    SDL_PutAudioStreamData(stream, buffer, frames * 8);
+    additional -= frames * 8;
+  }
+}
+
+#if defined(BF_DEV_TOOLS)
+void WriteMenuSoundOut() {
+  std::vector<uint8_t> o;
+  const uint32_t bytes = uint32_t(g_mixer.out.size() * 2);
+  o.insert(o.end(), {'R', 'I', 'F', 'F'});
+  Le32(o, 36 + bytes);
+  o.insert(o.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+  Le32(o, 16), Le16(o, 1), Le16(o, 2), Le32(o, kMixRate), Le32(o, kMixRate * 4), Le16(o, 4), Le16(o, 16);
+  o.insert(o.end(), {'d', 'a', 't', 'a'});
+  Le32(o, bytes);
+  for (float v : g_mixer.out) Le16(o, uint16_t(int16_t(std::lround(std::clamp(v, -1.0f, 1.0f) * 32767.0f))));
+  std::ofstream f(g_mixer.out_path, std::ios::binary | std::ios::trunc);
+  f.write(reinterpret_cast<const char*>(o.data()), std::streamsize(o.size()));
+}
+#endif
+
+std::atomic<bool> g_menu_owns_ui_sound{false};
+}  // namespace
+
+// Our menus show (game_menu.cpp, every frame): the game's own menu sounds are ours to play meanwhile.
+void SetMenuOwnsUiSound(bool ours) { g_menu_owns_ui_sound.store(ours, std::memory_order_relaxed); }
+bool MenuOwnsUiSound() { return g_menu_owns_ui_sound.load(std::memory_order_relaxed); }
+
+// One of the four sounds (0 scroll, 1 tick, 2 forward, 3 back) from `dir` (the user's cache\extracted\sounds) at
+// `gain` (the menu's volume rows), from our menus' thread; `why` is for the log. Silent when its file is missing or
+// there is no sound device.
+void PlayMenuSound(const fs::path& dir, int which, float gain, const char* why) {
+  if (which < 0 || which > 3) return;
+  const double now = SteadySeconds();
+  std::unique_lock<std::mutex> lock(g_mixer.mutex);
+  // The same sound twice within 40 ms (a key's repeat and the pad's in one frame) is once.
+  if (g_mixer.last_at[which] >= 0 && now - g_mixer.last_at[which] < 0.04) return;
+  if (g_mixer.waves[which].empty()) {
+    if (now < g_mixer.look_at[which]) return;
+    lock.unlock();
+    std::vector<float> lr;
+    const bool ok = ReadWav16(dir / (std::string(kMenuSoundFiles[which]) + ".wav"), lr);
+    lock.lock();
+    if (!ok) {
+      if (g_mixer.look_at[which] == 0)
+        REXLOG_WARN("BF menu sounds: no {} sound in the cache yet: silent until it is made", kMenuSoundFiles[which]);
+      g_mixer.look_at[which] = now + 5;
+      return;
+    }
+    if (g_mixer.waves[which].empty()) {
+      REXLOG_INFO("BF menu sounds: the {} sound read ({:.0f} ms)", kMenuSoundFiles[which], 1000.0 * double(lr.size() / 2) / kMixRate);
+      g_mixer.waves[which] = std::move(lr);  // the audio thread has no voice of it yet: nothing reads it
+    }
+  }
+  g_mixer.last_at[which] = now;
+  gain = std::clamp(gain, 0.0f, 1.0f);
+#if defined(BF_DEV_TOOLS)
+  REXLOG_INFO("BF menu sounds: {} ({}, gain {:.2f})", kMenuSoundFiles[which], why ? why : "", gain);
+  static const char* out_env = std::getenv("BF_DEV_MENU_SOUND_OUT");
+  if (out_env && *out_env) {
+    if (g_mixer.out_from < 0) g_mixer.out_from = now, g_mixer.out_path = out_env;
+    const std::vector<float>& w = g_mixer.waves[which];
+    const size_t at = size_t((now - g_mixer.out_from) * kMixRate) * 2;
+    if (g_mixer.out.size() < at + w.size()) g_mixer.out.resize(at + w.size(), 0.0f);
+    // At full scale whatever the volume rows say (the log has the gain): a test keeps the PC silent with the master
+    // volume at 0, and the file is there to tell the sounds apart.
+    for (size_t i = 0; i < w.size(); ++i) g_mixer.out[at + i] += w[i];
+    WriteMenuSoundOut();
+    return;
+  }
+#else
+  (void)why;
+#endif
+  if (gain <= 0.0f) return;
+  if (!g_mixer.stream && !g_mixer.no_device) {
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+      REXLOG_WARN("BF menu sounds: SDL's audio did not start ({}): the menus are silent", SDL_GetError());
+      g_mixer.no_device = true;
+      return;
+    }
+    const SDL_AudioSpec spec{SDL_AUDIO_F32, 2, kMixRate};
+    lock.unlock();  // the callback takes the lock: never open the device holding it
+    SDL_AudioStream* stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, MixMenuSounds, nullptr);
+    lock.lock();
+    if (!stream) {
+      REXLOG_WARN("BF menu sounds: no sound device ({}): the menus are silent", SDL_GetError());
+      g_mixer.no_device = true;
+      return;
+    }
+    g_mixer.stream = stream;
+    SDL_ResumeAudioStreamDevice(stream);
+  }
+  if (!g_mixer.stream) return;
+  if (g_mixer.voices.size() >= 8) g_mixer.voices.erase(g_mixer.voices.begin());  // a held key: the oldest goes
+  g_mixer.voices.push_back({which, 0, gain});
+}
+
 }  // namespace bf1943
+
+// The game's own menu sounds (found 16 Nov 2026, runs sndmatch4 and 5). Its Flash player's callbacks (registered by
+// sub_826B77E0 at 82D13C48) have, for sounds:
+//   +0x54 sub_826A8330(system, r4 the movie, r5 1..4, r6 the name), through the thunk sub_826AAEF8: makes a
+//         Sound/SimpleSound of "<name>_Wave" and returns its handle. dice.UISound makes its four once when a movie
+//         loads, never per press (so it is never refused: the menus would keep a null handle for the whole run);
+//   +0x5C sub_8269C8B0(handle): the handle's method 0, a press's play (lr 829733CC, Sound.start);
+//   +0x58 sub_8269C8D8(handle): its method 2, the release when the movie goes.
+// The four BSFX_UI_FE handles are noted as they are made; their plays are skipped while our menus show
+// (SetMenuOwnsUiSound): our pause sends presses of its own to BF's hidden pause list, whose sounds would come with
+// ours in a match, where the game's sound is on. BF's own screens that have the real pad (our menu closed) and the
+// game's other sounds play as before.
+namespace {
+struct UiHandle {
+  std::atomic<uint32_t> handle{0};
+  std::atomic<int> which{-1};
+};
+UiHandle g_ui_handles[16];
+std::atomic<uint32_t> g_ui_next{0};
+UiHandle* UiHandleOf(uint32_t handle) {
+  if (!handle) return nullptr;
+  for (UiHandle& h : g_ui_handles)
+    if (h.handle.load(std::memory_order_relaxed) == handle) return &h;
+  return nullptr;
+}
+}  // namespace
+
+REX_EXTERN(__imp__sub_826A8330);
+REX_HOOK_RAW(sub_826A8330) {
+  char name[96] = {};
+  if (const uint32_t at = ctx.r6.u32; at >= 0x10000 && at < 0xF0000000)
+    for (size_t i = 0; i + 1 < sizeof(name) && base[at + i]; ++i) name[i] = char(std::tolower(static_cast<unsigned char>(base[at + i])));
+  __imp__sub_826A8330(ctx, base);
+  const std::string lower = name;
+  const int which = lower.find("bsfx_ui_fescroll") != std::string::npos      ? 0
+                    : lower.find("bsfx_ui_fetick") != std::string::npos      ? 1
+                    : lower.find("bsfx_ui_feforward") != std::string::npos   ? 2
+                    : lower.find("bsfx_ui_febackwards") != std::string::npos ? 3
+                                                                             : -1;
+  if (which >= 0 && ctx.r3.u32) {
+    UiHandle& h = g_ui_handles[g_ui_next.fetch_add(1, std::memory_order_relaxed) % 16];
+    h.which.store(which), h.handle.store(ctx.r3.u32);
+  }
+}
+
+REX_EXTERN(__imp__sub_8269C8B0);
+REX_HOOK_RAW(sub_8269C8B0) {
+  if (const UiHandle* h = UiHandleOf(ctx.r3.u32); h && bf1943::MenuOwnsUiSound()) {
+#if defined(BF_DEV_TOOLS)
+    REXLOG_INFO("BF menu sounds: the game's own {} kept quiet (our menus show)", bf1943::kMenuSoundFiles[h->which.load()]);
+#endif
+    return;
+  }
+#if defined(BF_DEV_TOOLS)
+  if (const UiHandle* h = UiHandleOf(ctx.r3.u32))
+    REXLOG_INFO("BF menu sounds: the game plays its own {}", bf1943::kMenuSoundFiles[h->which.load()]);
+#endif
+  __imp__sub_8269C8B0(ctx, base);
+}
+
+REX_EXTERN(__imp__sub_8269C8D8);
+REX_HOOK_RAW(sub_8269C8D8) {
+  if (UiHandle* h = UiHandleOf(ctx.r3.u32)) h->handle.store(0);  // released: its address is free again
+  __imp__sub_8269C8D8(ctx, base);
+}

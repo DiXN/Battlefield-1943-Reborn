@@ -14,6 +14,7 @@ void NoteCamera(const float pos[3], const float right[3], const float back[3]); 
 // The rendered camera as last noted (the pause menu's map: where the player is and looks); false before the first.
 bool Camera(float pos[3], float right[3], float back[3]);
 void NoteInWorld(bool in_world);                                                 // auto_join.cpp: on foot or seated
+bool InWorld();  // the local soldier is in the level (on foot or seated), as auto_join.cpp last noted it
 void NoteJoined(const std::string& address);                                     // game_menu.cpp: the server joined
 void NoteTeam(int team, int squad);  // the local player's team (1, 2; 0 not known) and squad (0 none)
 void ReadTeam(const uint8_t* base, bool level_loaded);  // auto_join.cpp's pad read: NoteTeam from the game's player

@@ -8,7 +8,7 @@
 // is 1920 x 1080; sizes here are its at 720 lines, on the Stage.
 
   static constexpr const char* kTabSubs[kTabCount] = {"WINDOW, RESOLUTION, FRAME RATE", "PRESETS, UPSCALING, LIGHTING",
-                                                      "VOLUME, VOICE CHAT", "MOUSE, KEYBOARD, CONTROLLER, AIM ASSIST",
+                                                      "VOLUME, VOICE CHAT", "KEYBOARD AND MOUSE, OR CONTROLLER",  // by device since 16 Nov
                                                       "NAME, LANGUAGE, CHAT",
                                                       // the sniper scope only in a build with it (scope_pip.h)
                                                       kScopePip ? "LETTERED FLAGS, SNIPER SCOPE" : "LETTERED FLAGS"};
@@ -17,6 +17,7 @@
   void BackFromSettings() {
     capture_.clear();
     sub_ = kSubNone;
+    ctl_device_ = -1, ctl_fresh_ = true;  // Controls opens on its choice again
     if (from_pause_) {
       from_pause_ = false;
       page_ = Page::kPause;
@@ -349,7 +350,7 @@
       const float wrap = hb.x - ha.x - st(36);
       float y = ha.y + st(18);
       kit::Spaced(d, f.typed, st(10), ImVec2(ha.x + st(18), y), kit::kInkSection, Upper(it.name), st(2));
-      y += st(20);
+      y += st(20) + help_top_;  // a device's picture under the name (Controls, game_menu_controls.inc)
       y += kit::Wrapped(d, f.ui, st(13.25f), ImVec2(ha.x + st(18), y), kit::kInk, it.help, wrap) + st(14);
       auto note_box = [&](const std::string& t) {  // a boxed note with the red tab
         const float nh = kit::WrappedHeight(f.ui, st(12), t, wrap - st(28)) + st(20);
@@ -404,11 +405,6 @@
     const bool edit = MenuChrome(d, io, st, status, online_ok);
     CaptureKeyInto(in);
     const bool restart = RestartPending();
-    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), restart ? kit::kStamp : kit::kKhakiDim,
-                restart ? "SETTINGS MARKED NEXT START TAKE EFFECT WHEN THE GAME STARTS AGAIN"
-                        : "EVERYTHING APPLIES IN GAME \xC2\xB7 SOME AT THE NEXT START",
-                st(2));
-    kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream, "SETTINGS");
     // ---- the categories: LB and RB (Q and E), or a click on the rail
     if (sub_ == kSubNone) {
       if (in.prev_tab) tab_ = (tab_ + kTabCount - 1) % kTabCount, row_ = 0, scroll_ = 0;
@@ -417,6 +413,20 @@
     tab_ = std::clamp(tab_, 0, int(kTabCount) - 1);
     const bool graphics = tab_ == kTabGraphics && sub_ == kSubNone;
     const bool controls = tab_ == kTabControls && sub_ == kSubNone;
+    // Controls by device (game_menu_controls.inc): its choice of two cards, or one device's page. Leaving the tab
+    // brings the choice back for the next visit.
+    if (!controls) ctl_device_ = -1, ctl_fresh_ = true;
+    const bool choice = controls && ctl_device_ < 0;
+    const int device_page = controls ? ctl_device_ : -1;
+    static const char* kDevicePage[2] = {"KEYBOARD & MOUSE", "CONTROLLER"};
+    kit::Spaced(d, f.typed, st(10.5f), st.P(48, 91), restart ? kit::kStamp : kit::kKhakiDim,
+                restart            ? "SETTINGS MARKED NEXT START TAKE EFFECT WHEN THE GAME STARTS AGAIN"
+                : device_page >= 0 ? "SETTINGS \xC2\xB7 CONTROLS \xC2\xB7 BACK GOES TO THE CHOICE"
+                : choice           ? "EVERYTHING APPLIES IN GAME \xC2\xB7 PICK WHAT YOU PLAY WITH"
+                                   : "EVERYTHING APPLIES IN GAME \xC2\xB7 SOME AT THE NEXT START",
+                st(2));
+    kit::GameText(d, kit::GameFont::kHeadline, st(40), st.P(48, 105), kit::kCream,
+                  device_page >= 0 ? kDevicePage[device_page] : "SETTINGS");
     // Graphics changes wait for Apply on this page, and Controls has its two pages as buttons (game_menu.cpp, at
     // Cvar): both only while this page draws.
     struct PageFlags {
@@ -432,7 +442,10 @@
     const std::string last_preset = settings_.Get("graphics_preset", "");
     const bool preset_back = graphics && CurrentGraphicsPreset() < 0 && !last_preset.empty();
     // ---- the prompts (first: a click on one is that button's press for the rest of the frame)
-    std::vector<Cue> cues = {{kit::Button::kA, graphics && on_preset_strip_ ? "USE THIS PRESET" : "CHANGE"},
+    std::vector<Cue> cues = {{kit::Button::kA, graphics && on_preset_strip_ ? "USE THIS PRESET"
+                                               : choice                       ? "OPEN"
+                                               : device_page == 0 && ctl_bind_row_ ? "BIND"
+                                                                              : "CHANGE"},
                              {kit::Button::kLB, "SECTION"},
                              {kit::Button::kRB, "SECTION"}};
     if (preset_back) cues.push_back({kit::Button::kX, "BACK TO " + Upper(last_preset)});
@@ -468,7 +481,10 @@
         return lines;
       };
       for (int t = 0; t < kTabCount; ++t) {
-        const std::vector<std::string> lines = caption_lines(kTabSubs[t]);
+        const std::vector<std::string> lines =
+            caption_lines(t == kTabControls && device_page >= 0
+                              ? (device_page == 0 ? "CONTROLS \xC2\xB7 KEYBOARD AND MOUSE" : "CONTROLS \xC2\xB7 CONTROLLER")
+                              : kTabSubs[t]);
         const float h = st(53) + st(10) * float(lines.size() - 1);
         const ImVec2 a(ra.x, y), b(rb.x, y + h);
         const bool sel = t == tab_;
@@ -492,29 +508,33 @@
       // The PC: its graphics card (as the renderer named it for the NIS check), its display, the preset the auto
       // detect chose (the GPU's tier once it is timed in the game; the fast tier's before).
       const float py = y + st(16);
-      kit::Spaced(d, f.typed, st(9.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR PC \xC2\xB7 AUTO DETECT", st(2));
-      rex::ui::Window* window = window_ ? window_() : nullptr;
-      const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
-      const DisplayMode desktop = DesktopDisplayMode(monitor, window);
-      const std::string gpu = ShortGpuName(settings_.Get("nis_support_gpu", ""));
-      const double slowness = GpuSlowness();
-      const std::string chosen = settings_.Get("auto_detect_gpu", "").empty() ? "Not run yet"
-                                 : slowness > 0 ? std::string(kTierPresets[TierOf(slowness)])
-                                                : std::string(kTierPresets[2]) + " (not timed yet)";
-      auto pc_row = [&](float yy, const char* k, const std::string& v) {
-        d->AddText(f.ui, st(11.5f), ImVec2(ra.x + st(20), yy), kit::kKhakiText, k);
-        float size = st(11.5f);
-        const float room = rb.x - ra.x - st(40) - kit::TextWidth(f.ui, st(11.5f), k) - st(10);
-        float vw = kit::TextWidth(f.ui_bold, size, v);
-        if (vw > room && vw > 0) size *= std::max(0.7f, room / vw), vw = kit::TextWidth(f.ui_bold, size, v);
-        d->AddText(f.ui_bold, size, ImVec2(rb.x - st(20) - vw, yy + (st(11.5f) - size) * 0.7f), kit::kKhaki, v.c_str());
-        d->AddRectFilled(ImVec2(ra.x + st(20), yy + st(21)), ImVec2(rb.x - st(20), yy + st(22)), IM_COL32(241, 234, 211, 20));
-      };
-      pc_row(py + st(18), "Graphics card", gpu.empty() ? "Not known yet" : gpu);
-      pc_row(py + st(45), "Display",
-             desktop.width > 0 ? fmt::format("{} \xC3\x97 {} \xC2\xB7 {} Hz", desktop.width, desktop.height, int(std::lround(desktop.refresh)))
-                               : "Not known");
-      pc_row(py + st(72), "Preset chosen for you", chosen);
+      if (controls) {  // Controls: the two devices, the one used last marked (game_menu_controls.inc)
+        ControlsDevicesCard(d, st, ra, rb, py);
+      } else {
+        kit::Spaced(d, f.typed, st(9.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR PC \xC2\xB7 AUTO DETECT", st(2));
+        rex::ui::Window* window = window_ ? window_() : nullptr;
+        const int monitor = std::atoi(settings_.Get("monitor", "0").c_str());
+        const DisplayMode desktop = DesktopDisplayMode(monitor, window);
+        const std::string gpu = ShortGpuName(settings_.Get("nis_support_gpu", ""));
+        const double slowness = GpuSlowness();
+        const std::string chosen = settings_.Get("auto_detect_gpu", "").empty() ? "Not run yet"
+                                   : slowness > 0 ? std::string(kTierPresets[TierOf(slowness)])
+                                                  : std::string(kTierPresets[2]) + " (not timed yet)";
+        auto pc_row = [&](float yy, const char* k, const std::string& v) {
+          d->AddText(f.ui, st(11.5f), ImVec2(ra.x + st(20), yy), kit::kKhakiText, k);
+          float size = st(11.5f);
+          const float room = rb.x - ra.x - st(40) - kit::TextWidth(f.ui, st(11.5f), k) - st(10);
+          float vw = kit::TextWidth(f.ui_bold, size, v);
+          if (vw > room && vw > 0) size *= std::max(0.7f, room / vw), vw = kit::TextWidth(f.ui_bold, size, v);
+          d->AddText(f.ui_bold, size, ImVec2(rb.x - st(20) - vw, yy + (st(11.5f) - size) * 0.7f), kit::kKhaki, v.c_str());
+          d->AddRectFilled(ImVec2(ra.x + st(20), yy + st(21)), ImVec2(rb.x - st(20), yy + st(22)), IM_COL32(241, 234, 211, 20));
+        };
+        pc_row(py + st(18), "Graphics card", gpu.empty() ? "Not known yet" : gpu);
+        pc_row(py + st(45), "Display",
+               desktop.width > 0 ? fmt::format("{} \xC3\x97 {} \xC2\xB7 {} Hz", desktop.width, desktop.height, int(std::lround(desktop.refresh)))
+                                 : "Not known");
+        pc_row(py + st(72), "Preset chosen for you", chosen);
+      }  // the PC's card
     }
     // ---- the rows and the help card, with the page's own buttons: dark, as the prompts under the page
     ImVec2 pa = st.P(288, 167), pb = st.P(907, 640);
@@ -527,24 +547,9 @@
                   lit || over ? kit::kCream : kit::kKhaki, label, st(1.5f));
       return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && capture_.empty();
     };
-    bool open_keys = false, open_remap = false, apply = false, defaults = false;
-    if (controls) {  // Keybinds and Remap gamepad over the rows
-      // 0.4.2: manila folder tabs standing on the rows' sheet (each opens its own page).
-      const float h = st(28), size = st(10);
-      float x = pa.x + st(6);
-      auto folder_tab = [&](const std::string& label) {
-        const float lw = kit::SpacedWidth(f.ui_bold, size, label, st(1.5f)), w = lw + st(44);
-        const ImVec2 a(x, pa.y), b(x + w, pa.y + h);
-        const bool over = ImGui::IsMouseHoveringRect(a, b);
-        kit::FolderTab(d, a, b, st.u, false, over);
-        kit::Spaced(d, f.ui_bold, size, ImVec2(a.x + (w - lw) * 0.5f, a.y + (h - size * 1.45f) * 0.5f), kit::kInk, label,
-                    st(1.5f));
-        x += w - st(3);
-        return over && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && capture_.empty();
-      };
-      open_keys = folder_tab("REMAP");  // 0.4.2: one page, the controller's column beside the keyboard's and the mouse's
-      pa.y += h;
-    }
+    bool apply = false, defaults = false;
+    // (16 Nov 2026: no REMAP folder tab on Controls any more. Each device's page has its own bindings at its end, and
+    // the 0.4.2 page with the controller's column beside the keys stays only in the first start's Controls step.)
     if (graphics) {  // Apply settings and Restore defaults under the rows
       const float h = st(30), gap = st(8), w = (pb.x - pa.x - gap) * 0.5f;
       pb.y -= h + st(8);
@@ -553,14 +558,27 @@
                           waiting ? fmt::format("APPLY SETTINGS ({})", waiting) : std::string("APPLY SETTINGS"), waiting > 0);
       defaults = dark_button(ImVec2(pa.x + w + gap, pb.y + st(8)), ImVec2(pb.x, pb.y + st(8) + h), "RESTORE DEFAULTS", false);
     }
-    SettingsBody(d, io, st, in, pa, pb, st.P(928, 167), st.P(1232, 640));
+    const ImVec2 ha = st.P(928, 167), hb = st.P(1232, 640);
+    if (choice) {
+      // Controls' choice: the two cards over the rows' and the help card's place (game_menu_controls.inc)
+      ControlsChoice(d, io, st, in, pa, hb);
+    } else if (device_page >= 0) {
+      ControlsDevicePage(d, io, st, in, pa, pb, ha, hb, device_page);  // game_menu_controls.inc
+    } else {
+      SettingsBody(d, io, st, in, pa, pb, ha, hb);
+    }
     // ---- the actions
     if (edit || in.view) return BeginAccount(false);
-    if (controls && (open_keys || in.x)) sub_ = kSubKeys, row_ = 0, scroll_ = 0;
-    else if (controls && open_remap) sub_ = kSubRemap, row_ = 0, scroll_ = 0;
+    // (Controls' X no longer opens the 0.4.2 bindings page: each device's page has its own, 16 Nov 2026.)
     if (graphics && (apply || in.y)) ApplyGraphicsPending();
     else if (graphics && (defaults || (in.x && !preset_back))) RestoreGraphicsDefaults();
     else if (in.x && preset_back) PresetBack();
 
-    if (in.back && !SubPageBack()) BackFromSettings();
+    if (in.back && device_page >= 0) {  // a device's page: back to the choice, its card chosen
+      REXLOG_INFO("BF settings: CONTROLS / back to the choice");
+      capture_.clear();
+      row_ = device_page, ctl_device_ = -1, scroll_ = 0;
+    } else if (in.back && !SubPageBack()) {
+      BackFromSettings();
+    }
   }

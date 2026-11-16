@@ -143,6 +143,7 @@ void NoteLevelChange();  // modern_mode.cpp: the new level's data gets the serve
 void TeamBalanceRoundOver();    // team_balance.cpp: nothing moves between a round's end and the next level
 void TeamBalanceLevelChange();  // team_balance.cpp: a new level, a new round
 void TeamBalanceTick(PPCContext& ctx, uint8_t* base);  // team_balance.cpp: once a second
+void ServerStatsTick();  // server_stats.cpp: each player's counts to the host's file, every 5 s
 }  // namespace bf1943
 
 namespace bf1943 {
@@ -373,6 +374,11 @@ namespace {
 // given first (spawn points' positions, the level file's exact values: three floats together) becomes the last
 // position, so the test's soldier spawns there (Wake Island: the carrier's spawn points moved to the airfield's flag,
 // to take it and reach the air raid bunker). Looked for every 3 s in the server's first 5 minutes.
+// A test aid only: it writes over every match in memory, not only the spawn points. On 16 Nov 2026 (the US carrier's 7
+// moved onto the Japanese carrier) two servers crashed 24 and 26 s after a player's game was killed ("Unhandled guest
+// access violation: write", sub_826230C8 in the free sub_82624D90, from the server tick); the same steps without it,
+// on the same build and on 0.4.6.7, never crashed (runs killtest1 to 3, oldsrv1, drop1). Do not read a crash in a run
+// that used it as the game's.
 void DevMoveSpawns(uint8_t* base) {
   struct Config {
     std::vector<std::array<uint32_t, 3>> from;
@@ -541,6 +547,7 @@ REX_HOOK_RAW(sub_824123F0) {
                  ThreadCostNow());
   bf1943::ModernModeTick(base);
   bf1943::GmHostStart();
+  bf1943::ServerStatsTick();
   bf1943::TeamBalanceTick(ctx, base);  // team_balance.cpp: an uneven match evened, a player who has died at a time
   std::string next;
   {

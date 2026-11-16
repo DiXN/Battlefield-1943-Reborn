@@ -48,8 +48,11 @@
 
 #include "account_key.h"
 #include "capture_points.h"
+#include "clan_tags.h"
 #include "display_modes.h"
 #include "game_install.h"
+#include "achievement_toast.h"  // the achievement popup, the pictures (game_menu_progress.inc)
+#include "reborn_achievements.h"  // Reborn's own achievements (NoteRebornAchievements)
 #include "launcher_kit.h"
 #include "private_match.h"
 #include "regions.h"
@@ -64,6 +67,8 @@
 #include "changelog.h"
 #include "news.h"
 #include "news_video.h"
+#include "paste_keys.h"  // Ctrl+V and Shift+Insert, the clipboard (the name page, Direct connect)
+#include "report.h"  // Report an issue (game_menu_report.inc)
 #include "update.h"
 
 #if defined(_WIN32)
@@ -411,6 +416,10 @@ const char* MapIconsFileName();         // shader_prep.cpp: the pause menu map's
 void PlayMenuMusic(const std::filesystem::path& wav, bool on);  // game_music.cpp
 void SetGameAudioMuted(bool muted);  // audio_settings.cpp: the game's own sound silent while our menus show
 void PlaySoundOnce(const std::filesystem::path& wav);
+// game_music.cpp: the original menus' sounds (0 scroll, 1 tick, 2 forward, 3 back), and the game's own kept quiet
+// while ours show.
+void PlayMenuSound(const std::filesystem::path& dir, int which, float gain, const char* why);
+void SetMenuOwnsUiSound(bool ours);
 }  // namespace bf1943
 #if defined(BF_DEV_TOOLS)
 REXCVAR_DEFINE_BOOL(bf_dev_auto_host, false, "BF1943",
@@ -465,6 +474,8 @@ int64_t LastGuestPresentMs();               // frame_rate.cpp: when the game las
 // Protect your name (account_key.h): what the latest name check said, for the menu.
 struct AccountNews {
   bool any = false, protected_name = false, other_owner = false;
+  bool team_name = false;  // the name asked for is kept for the team (server/plasma.py TEAM_OWNERS)
+  std::string name;        // the name the backend gave
   std::string progress;  // the account's progress (score|seconds|captures|stats|achievements), to take back
 };
 void SetAccount(const std::string& code, const std::string& name);  // below: the recovery code and its name
@@ -472,6 +483,7 @@ AccountNews TakeAccountNews();                                       // below: o
 bool SignedRegistryRequest(const std::string& code, const std::string& op, const std::string& fields,
                            std::string& reply);                      // below
 uint32_t OnlinePlayerId();                                           // live_layers.cpp
+const std::string& PlayerName();                                     // live_layers.cpp: the name played under
 bool ShadersAfterUpdate();                  // below: the shaders are prepared again after an update
 bool ShadersPreparedAtStart();              // below: this version's shaders were prepared before: no shader page
 const char* BfVersion();                    // pipeline_upload.cpp
@@ -783,6 +795,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool open() const { return open_; }
   // For the graphics panel (f8_panel.cpp): the launcher's own pages are up; the settings file.
   bool ShowingLauncher() const { return open_ && LauncherPage(page_); }
+  // The shader page is up: nothing else is drawn over it (achievement_toast.cpp waits).
+  bool ShowingShaders() const { return open_ && page_ == Page::kShaders; }
   // No input on the launcher's pages for `seconds` (the frame limiter then draws them at bf_menu_idle_fps).
   static int64_t SteadyMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -875,6 +889,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // takes it at the next pad read; only with the soldier in the world, as Start).
     if (!open_ && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !comms::TypingOrJustClosed())
       g_escape_press.store(true, std::memory_order_relaxed);  // not the chat box's Esc (comms_ui.cpp)
+    // F12: a screenshot for a report (game_menu_report.inc); not on the shader page, which nothing is drawn over.
+    if (!(open_ && page_ == Page::kShaders)) ReportShotTick(ImGui::GetForegroundDrawList(), io);
     UpdateWalk(io);
     if (hd_import_->turn_on.exchange(false)) SetCvar("native_x_renderer_hd_textures", "true");
     // D150: the GPU's speed, timed once (the log keeps it) after the stored pipelines are made and 3 s of steady
@@ -944,6 +960,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       // Back at BF's online menu (the match over, or its join failed): no Night Ops server's night here. A map change
       // on the server never comes back here, so its next map stays at night.
       if (stage == 2 && last_stage_ > 2) SetJoinedServerNight(false);
+      // A join that never reached the level is no match for Reborn's own achievements (the tutorial is none either).
+      if (stage == 2 && last_stage_ > 2) ach_join_ = AchJoin::kNone;
       last_stage_ = stage;
     }
     if (page_ == Page::kJoining) {
@@ -998,12 +1016,17 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       const bool in_match = MenuDriverStage() == 5 && page_ != Page::kJoining;  // the joining page is ours to its end
       const bool our_menus = page_ != Page::kIntro && !in_match && (pre_game_ || open_);
       bf1943::SetGameAudioMuted(our_menus && !pre_game_);
-      // (Quiet while the news' video plays with its sound, game_menu_news.inc.)
+      // Our menus play the original menus' sounds (MenuSounds): BF's own copies, from the presses we send its hidden
+      // menus, are kept quiet meanwhile. BF's own screens that have the real pad (passing_) play their own.
+      bf1943::SetMenuOwnsUiSound(open_);
+      // Quiet while the news' video plays with its sound (game_menu_news.inc); back once it ends or pauses, or the
+      // window closes (TekRantGaming, 16 Nov 2026).
       const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music) &&
-                        !(news_open_ && !news_muted_ && news::VideoShowing());
+                        !(news_open_ && !news_muted_ && news::VideoPlaying());
       PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
+    NoteRebornAchievements();  // Reborn's own achievements, once a joined match's level has the soldier
     // Every frame, the menu open or not (Yes closes the pause: the check never ran, run v41team1).
     if (team_suicide_at_ > 0 && ImGui::GetTime() >= team_suicide_at_) {  // after Change Team (ChangeTeamNow)
       team_suicide_at_ = -1;
@@ -1120,6 +1143,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     const bool typing = page_ == Page::kName || !capture_.empty() ||
                         (page_ == Page::kServers && (browser_typing_ || browser_tab_ == kTabDirect)) ||  // its search, an address
                         (page_ == Page::kPrivateMatch && PmTyping()) ||  // the match's name, its port, its password
+                        ReportTyping() ||  // Report an issue's fields
                         pw_popup_;  // a match's password
     if (!scripted) {
       key.up |= ImGui::IsKeyPressed(ImGuiKey_UpArrow);
@@ -1150,6 +1174,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Start showed the game's own pause). Never A there: on the Exit Game question it was YES. auto_join.cpp keeps the
     // press from the game until it is let go.
     if (in.start && InPause()) {
+      PlayMenuSound(kSoundBack, "Start closed the pause");
       ClosePause("Start");
       return;
     }
@@ -1174,44 +1199,56 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // A pop-up over whatever page is up (the version gate's UPDATE NEEDED, AskToUpdate; What's new after an update,
     // WhatsNewTick): that page is drawn without the buttons, the mouse's button, its movement and its wheel, which
     // are the pop-up's (ImGui's IsMouseClicked asks MouseDown first).
+    // Never over the shader page (TekRantGaming, 16 Nov 2026: "make sure nothing overlays over the shaders it should be
+    // the only screen visable until its finished"): a pop-up raised meanwhile waits for the page after it, and the
+    // news' video (a window of its own) is hidden.
+    const bool shader_page = page_ == Page::kShaders;
+    if (shader_page && news_open_) news::VideoHide();
     const bool over_popup =
-        update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ || new_version_popup_ ||
-        notice_popup_ || news_open_;
+        !shader_page && (update_popup_ || whats_new_open_ || own_popup_ || tick_popup_ || pw_popup_ || exp_popup_ ||
+                         new_version_popup_ || notice_popup_ || news_open_);
     const Input popup_in = in;
     const bool popup_down = io.MouseDown[0];
     const ImVec2 popup_delta = io.MouseDelta;
     const float popup_wheel = io.MouseWheel;
+    const SoundLook sound_before = LookForSound(popup_in);  // the original menus' sounds (MenuSounds)
     if (over_popup) in = {}, io.MouseDown[0] = false, io.MouseDelta = ImVec2(0, 0), io.MouseWheel = 0;
-    switch (page_) {
-      case Page::kIntro: IntroPage(d, io, in); break;
-      case Page::kStats: StatsPage(d, io, in); break;
-      case Page::kAchievements: AchievementsPage(d, io, in); break;
-      case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
-      case Page::kFriends: FriendsPage(d, io, in); break;
-      case Page::kScoreboard: ScoreboardPage(d, io, in); break;
-      case Page::kPrivateMatch: PrivateMatchPage(d, io, in); break;
-      case Page::kHelp: HelpPage(d, io, in); break;
-      case Page::kControls: ControlsPage(d, io, in); break;
-      case Page::kCredits: CreditsPage(d, io, in); break;
-      case Page::kSetup: FilesPage(d, io, in); break;
-      case Page::kName: AccountPage(d, io, in); break;
-      case Page::kShaders: ShadersPage(d, io, in); break;
-      case Page::kSetupSettings: SetupSettingsA1Page(d, io, in); break;
-      case Page::kPrompts: PromptsA1Page(d, io, in); break;
-      case Page::kVoice: VoicePage(d, io, in); break;
-      case Page::kAllSet: ReadyPage(d, io, in); break;
-      case Page::kHome: MenuPage(d, io, in); break;
-      case Page::kProjects: ProjectsPage(d, io, in); break;
-      case Page::kReport: ReportPage(d, io, in); break;
-      case Page::kStarting: StartingPage(d, io, in); break;
-      case Page::kUpdate: UpdatePage(d, io, in); break;
-      case Page::kMain: MenuPage(d, io, in); break;
-      case Page::kServers: BrowserPage(d, io, in); break;
-      case Page::kSettings: SettingsA1Page(d, io, in); break;
-      case Page::kJoining: JoiningPage(d, s, io, in); break;
-      case Page::kPause: PauseA1Page(d, io, in); break;
-      case Page::kLeaving: LeavingPage(d, s, io); break;
-    }
+    auto draw_page = [&](Input in) {
+      switch (page_) {
+        case Page::kIntro: IntroPage(d, io, in); break;
+        case Page::kStats: StatsPage(d, io, in); break;
+        case Page::kAchievements: AchievementsPage(d, io, in); break;
+        case Page::kLeaderboards: LeaderboardsPage(d, io, in); break;
+        case Page::kFriends: FriendsPage(d, io, in); break;
+        case Page::kScoreboard: ScoreboardPage(d, io, in); break;
+        case Page::kPrivateMatch: PrivateMatchPage(d, io, in); break;
+        case Page::kHelp: HelpPage(d, io, in); break;
+        case Page::kControls: ControlsPage(d, io, in); break;
+        case Page::kCredits: CreditsPage(d, io, in); break;
+        case Page::kSetup: FilesPage(d, io, in); break;
+        case Page::kName: AccountPage(d, io, in); break;
+        case Page::kShaders: ShadersPage(d, io, in); break;
+        case Page::kSetupSettings: SetupSettingsA1Page(d, io, in); break;
+        case Page::kPrompts: PromptsA1Page(d, io, in); break;
+        case Page::kVoice: VoicePage(d, io, in); break;
+        case Page::kAllSet: ReadyPage(d, io, in); break;
+        case Page::kHome: MenuPage(d, io, in); break;
+        case Page::kProjects: ProjectsPage(d, io, in); break;
+        case Page::kReport: ReportPage(d, io, in); break;
+        case Page::kStarting: StartingPage(d, io, in); break;
+        case Page::kUpdate: UpdatePage(d, io, in); break;
+        case Page::kMain: MenuPage(d, io, in); break;
+        case Page::kServers: BrowserPage(d, io, in); break;
+        case Page::kSettings: SettingsA1Page(d, io, in); break;
+        case Page::kJoining: JoiningPage(d, s, io, in); break;
+        case Page::kPause: PauseA1Page(d, io, in); break;
+        case Page::kLeaving: LeavingPage(d, s, io); break;
+      }
+    };
+    draw_page(in);
+    // The shader page done in this frame (it draws nothing then, AfterShaders): the page after it is drawn in the
+    // same frame, so no frame shows the game's own picture between the two (its LOADING screen, run shC_t3).
+    if (shader_page && page_ != Page::kShaders && LauncherPage(page_)) draw_page(Input{});
     if (over_popup) {
       io.MouseDown[0] = popup_down, io.MouseDelta = popup_delta, io.MouseWheel = popup_wheel;
       if (update_popup_) UpdatePopup(d, io, popup_in);
@@ -1228,10 +1265,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                          pw_popup_ || whats_new_open_))
         news::VideoHide();
     }
+    MenuSounds(sound_before, popup_in, popup_down, popup_delta);
     // The stamp on BF's own menus too: its main menu (and our pages over it) and the pause; never over a match.
     if (kit::WatermarkOn() && open_ &&
-        (page_ == Page::kStats ||
-         page_ == Page::kAchievements || page_ == Page::kLeaderboards || page_ == Page::kFriends ||
+        (page_ == Page::kFriends ||
          page_ == Page::kScoreboard || page_ == Page::kPrivateMatch || page_ == Page::kJoining || page_ == Page::kLeaving ||
          page_ == Page::kControls || page_ == Page::kCredits)) {  // the new look's pages stamp their own foot
       const Stage st = StageOf(io);
@@ -1244,6 +1281,120 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
  private:
+  // ---- the original menus' sounds (TekRantGaming, 16 Nov 2026: "the original menus sounds for moving and button
+  // pressing ... used in our menus now and pause menus"; game_music.cpp PlayMenuSound has the game's table).
+  //
+  // Judged once a frame for every page and pop-up, from what the player pressed and what it changed: the page, the
+  // selection (every page's row, tab, card and on screen key), a pop-up, a setting. A press that changes nothing
+  // plays nothing, as the original's SND_NAV_NOGO at a list's end. Up and down (and LB and RB, the tabs) are the
+  // scroll; left and right, and a slider dragged, the tick (the original's option values); A, a click that did
+  // something, and a page opened by a press are forward; B or Esc that went somewhere is back. The mouse moving
+  // over a new row is the scroll. Pages with nothing to press (the cards, shaders, starting, joining, leaving) are
+  // silent, and nothing plays for what changes by itself.
+  static constexpr int kSoundScroll = 0, kSoundTick = 1, kSoundForward = 2, kSoundBack = 3;
+  struct SoundLook {
+    Page page = Page::kMain;
+    bool open = false;
+    uint64_t selection = 0, popups = 0, values = 0;
+    bool with_values = false;  // values hashed (only on a frame with a press, a click or a drag)
+  };
+  static void HashIn(uint64_t& h, uint64_t v) { h = (h ^ v) * 0x100000001B3ull; }
+  static void HashIn(uint64_t& h, const std::string& s) {
+    for (unsigned char c : s) HashIn(h, c);
+    HashIn(h, 0xFFu);
+  }
+  SoundLook SoundLookNow(bool with_values) const {
+    SoundLook l;
+    l.page = page_, l.open = open_, l.with_values = with_values;
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (int v : {row_, tab_, pm_row_, pm_map_, direct_key_, popup_row_, pause_row_, home_row_, news_focus_,
+                  news_first_card_, setup_tab_, prompts_row_, help_row_, ctl_tab_, browse_row_, browser_tab_,
+                  preset_cursor_, voice_choice_, fr_row_, slot_cursor_, files_card_, allset_row_, name_key_,
+                  pm_edit_key_, project_, capture_slot_, ctl_device_})  // ctl_device_: Settings > Controls' card
+      HashIn(h, uint64_t(int64_t(v)));
+    HashIn(h, pause_focus_panel_);
+    l.selection = h;
+    h = 0xCBF29CE484222325ull;
+    for (bool b : {update_popup_, whats_new_open_, whats_new_all_, own_popup_, tick_popup_, pw_popup_, exp_popup_,
+                   new_version_popup_, notice_popup_, news_open_, quit_popup_, skip_popup_, files_help_, browsing_,
+                   browser_typing_, browser_has_players_, browser_not_full_, browser_night_, quick_waiting_ > 0,
+                   direct_keys_, direct_letters_, name_keys_})
+      HashIn(h, b);
+    for (int v : {pause_confirm_, handing_over_, passing_}) HashIn(h, uint64_t(int64_t(v)));
+    HashIn(h, capture_), HashIn(h, browser_region_);
+    // What the on screen keys typed (a key pressed is a press that did something).
+    for (const std::string* t : {&direct_text_, &name_text_, &pm_edit_text_, &pw_text_, &browser_search_}) HashIn(h, *t);
+    l.popups = h;
+    if (with_values) {
+      h = 0xCBF29CE484222325ull;
+      for (const auto& [k, v] : settings_.values) HashIn(h, k), HashIn(h, v);
+      for (const auto& [k, v] : gfx_pending_) HashIn(h, k), HashIn(h, v);
+      l.values = h;
+    }
+    return l;
+  }
+  SoundLook LookForSound(const Input& in) const {
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool pressed = in.accept || in.back || in.left || in.right || in.x || in.y || in.view || in.start;
+    return SoundLookNow(pressed || ImGui::IsMouseClicked(ImGuiMouseButton_Left) || io.MouseDown[0]);
+  }
+  // The menu's volume rows: Menu sounds on, its volume, and the master volume (all game audio).
+  float MenuSoundGain() const {
+    auto value = [this](const char* name, const char* fallback) {
+      std::string v = settings_.Get(std::string("cvar.") + name, "");
+      if (v.empty()) v = rex::cvar::GetFlagByName(name);
+      return v.empty() ? std::string(fallback) : v;
+    };
+    if (!Truthy(value("bf_menu_sounds", "true"))) return 0.0f;
+    const float master = float(std::atof(value("bf_master_volume", "100").c_str()));
+    const float menu = float(std::atof(value("bf_menu_sounds_volume", "100").c_str()));
+    return std::clamp(master / 100.0f, 0.0f, 1.0f) * std::clamp(menu / 100.0f, 0.0f, 1.0f);
+  }
+  void PlayMenuSound(int which, const char* why) {
+    bf1943::PlayMenuSound(UserDir() / "cache" / "extracted" / "sounds", which, MenuSoundGain(), why);
+  }
+  double slider_tick_at_ = -1;
+  void MenuSounds(const SoundLook& before, const Input& in, bool mouse_down, ImVec2 mouse_delta) {
+    if (!before.open && !open_) return;
+    for (Page p : {before.page, page_})
+      if (p == Page::kIntro || p == Page::kShaders || p == Page::kStarting || p == Page::kJoining ||
+          p == Page::kLeaving)
+        return;
+    const bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    const bool moved = mouse_delta.x != 0 || mouse_delta.y != 0;
+    const bool drag = mouse_down && !click && moved;
+    const bool vertical = in.up || in.down || in.prev_tab || in.next_tab;
+    const bool sideways = in.left || in.right;
+    const bool press = in.accept || in.x || in.y || in.view || in.start;
+    if (!vertical && !sideways && !press && !in.back && !click && !drag && !moved) return;
+    const SoundLook after = SoundLookNow(before.with_values);
+    const bool page = after.page != before.page || after.open != before.open;
+    const bool popup = after.popups != before.popups;
+    const bool selection = after.selection != before.selection;
+    const bool value = before.with_values && after.values != before.values;
+    const bool any = page || popup || selection || value;
+    if (in.back) {
+      if (any) PlayMenuSound(kSoundBack, "back");
+    } else if (press) {
+      if (any) PlayMenuSound(kSoundForward, "press");
+    } else if (click) {
+      if (page || popup) PlayMenuSound(kSoundForward, "click");
+      else if (value) PlayMenuSound(kSoundTick, "click on a value");
+      else if (selection) PlayMenuSound(kSoundForward, "click");
+    } else if (page) {
+      PlayMenuSound(kSoundForward, "page");
+    } else if (sideways) {
+      if (value || selection || popup) PlayMenuSound(kSoundTick, "left or right");
+    } else if (vertical) {
+      if (selection || value || popup) PlayMenuSound(kSoundScroll, "up or down");
+    } else if (drag) {
+      // A slider dragged: a tick for its value's changes, at most every 80 ms (the pad's held steps' pace).
+      if (value && ImGui::GetTime() - slider_tick_at_ > 0.08) slider_tick_at_ = ImGui::GetTime(), PlayMenuSound(kSoundTick, "slider");
+    } else if (moved && selection) {
+      PlayMenuSound(kSoundScroll, "mouse over");
+    }
+  }
+
   // ---- drawing helpers
 
   // The stencil (our headings) is the game's own headline lettering once its font is there (the new look,
@@ -1291,6 +1442,32 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                                IM_COL32(16, 18, 22, 60), IM_COL32(8, 10, 14, 0));
   }
   bool InMatch() const { return MenuDriverStage() == 5 && !(page_ == Page::kJoining); }
+
+  // Reborn's own achievements (reborn_achievements.h), for "loading into" a match: what the join was (Join), then
+  // the unlock once its level has loaded and the soldier is in it (on foot or seated) for a second and a half, not
+  // at the join's pick nor on the deploy screen. A community server is one not run by Reborn (not official), not this
+  // PC's own custom match and not a LAN match (the browser's Community tab: a friend's listed custom match is one).
+  enum class AchJoin { kNone, kOfficial, kCommunity, kOwnMatch, kLan };
+  AchJoin ach_join_ = AchJoin::kNone;
+  double ach_in_world_since_ = -1;
+  void NoteRebornAchievements() {
+    if (ach_join_ == AchJoin::kNone || REXCVAR_GET(server)) return;
+    const double now = ImGui::GetTime();
+    if (!(InMatch() && LevelLoaded() && comms::InWorld())) {
+      ach_in_world_since_ = -1;
+      return;
+    }
+    if (ach_in_world_since_ < 0) ach_in_world_since_ = now;
+    if (now - ach_in_world_since_ < 1.5) return;
+    static constexpr const char* kKinds[] = {"", "a Reborn server", "a community server", "this PC's own custom match", "a LAN match"};
+    const char* kind = kKinds[int(ach_join_)];
+    REXLOG_INFO("BF achievements: in the level of {} ({})", kind, joining_);
+    bool any = reborn_achievements::Unlock(reborn_achievements::kReborn, kind);
+    if (ach_join_ == AchJoin::kCommunity) any |= reborn_achievements::Unlock(reborn_achievements::kForever, kind);
+    if (ach_join_ == AchJoin::kOwnMatch) any |= reborn_achievements::Unlock(reborn_achievements::kInevitable, kind);
+    ach_join_ = AchJoin::kNone, ach_in_world_since_ = -1;
+    if (any) SendLeaderboard("an achievement");  // the account's awards, which the backend counts
+  }
 
   // Discord Rich Presence (discord_presence.cpp): what the player is doing, from the menus' own state, a few times a
   // second (the presence thread sends only changes, spaced out). Never an address or another player's name.
@@ -1569,26 +1746,31 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // music, extracted from the player's files (shader_prep.cpp ExtractGameArt), played by us before anything else;
     // the setting Startup cards off (bf_startup_cards = false) skips them.
     const char* restarted = std::getenv("BF_RESTARTED");  // started again by itself: no startup cards twice
-    if (fs::exists(UserDir() / "cache" / "extracted" / "startup" / "card5.png") &&
+    // Just installed by the setup: no startup cards either, the shader page comes right after the game files
+    // (TekRantGaming, 16 Nov 2026; AfterIntro).
+    if (!just_installed_ && fs::exists(UserDir() / "cache" / "extracted" / "startup" / "card5.png") &&
         settings_.Get("bf_startup_cards", "true") != "false" && !(restarted && *restarted == '1')) {
       page_ = Page::kIntro, intro_at_ = -1;
       return;
     }
     AfterIntro();
   }
-  // The intro's end (or none): the setup, or Home.
+  // The intro's end (or none): the shaders when this version's are not prepared, then the setup or Home
+  // (AfterShaders). TekRantGaming, 16 Nov 2026: "the initial setup screen when you give the game files right after it
+  // you should be in the full screen shader comp screen ... the actual onboaring section when you go through settings
+  // should no longer include the shader part ... if the game is updated it removes it shader chashe and builds a fresh
+  // batch of shaders with the same screen then you get dropped back into our main menu". So the shader page comes
+  // first on the first start (right after the game files, before the soldier name), after an update (its cache
+  // deleted when the game starts behind the page, update.cpp), and at any start whose shaders were never finished.
   void AfterIntro() {
-    if (settings_.Get("launcher_setup", "") == "done" && settings_.Get("player_name_chosen", "") == "1") {
-      // The shaders first when this version's are not prepared (the first start after an update): then the menu.
-      if (PrepareShadersAtStart("at the start, before the main menu")) return;
-      page_ = Page::kHome, home_row_ = 0;
+    const bool setup_done = settings_.Get("launcher_setup", "") == "done" && settings_.Get("player_name_chosen", "") == "1";
+    const std::string prepared_for = settings_.Get("shaders_prepared_for", "");
+    if (PrepareShadersAtStart(just_installed_                                   ? "right after the game files, before the onboarding"
+                              : !prepared_for.empty() && prepared_for != BfVersion() ? "the first start after an update, before the main menu"
+                              : setup_done                                      ? "at the start, before the main menu"
+                                                                                : "before the onboarding (never finished before)"))
       return;
-    }
-    if (RenameRequired()) return;  // the saved name was refused (profanity): only a new name, not the whole setup
-    setup_active_ = true;
-    settings_.values["launcher_setup"] = "started";
-    settings_.Save();
-    BeginAccount(true);
+    AfterShaders();
   }
   // The startup cards (TekRantGaming, 10 Nov 2026): the game's rating notice, then the logo cards with the logo music, each
   // logo arriving on a bar's first beat (the music is in 4/4 at about 125 beats a minute, a bar every 1.9 s): EA,
@@ -1685,12 +1867,14 @@ class GameMenu final : public rex::ui::ImGuiDialog {
  private:
   void FinishSetup(const fs::path& game_dir) {
     REXLOG_INFO("BF setup: the game is in {}", game_dir.string());
-    page_ = Page::kShaders, row_ = 0;  // the game starts; its shaders next (AfterShaders without a shader screen)
+    page_ = Page::kShaders, row_ = 0;  // until the launcher takes over (done: BeginLauncher, then the shader page)
     pre_game_ = false;
+    just_installed_ = true;  // the shader page next, without the startup cards (BeginLauncher, AfterIntro)
     if (auto done = std::move(setup_done_)) done(game_dir);
   }
 
   bool pre_game_ = false;  // the first start's pages, before the game runs: our own pad reads (HostPad)
+  bool just_installed_ = false;  // the setup just installed the game: its shader page comes next (AfterIntro)
   bool launcher_first_ = false;  // the launcher showed before the game (BeginLauncher); BF signs in only after Play
   bool played_ = false;          // Play started the game: after its shaders the launcher closes
   std::function<void()> start_game_;
@@ -2001,7 +2185,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         {"STATS & AWARDS", "Your service record: rank, awards and best rounds."},
         {"HELP & OPTIONS", "The game's controls, its own settings and how to play."},
         {"PC SETTINGS", "Display, graphics, audio, controls (the game's own options with them) and gameplay."},
-        {"ACHIEVEMENTS", "The game's achievements."},
+        {"ACHIEVEMENTS", "The game's achievements, and Reborn's own."},
         {"LEADERBOARDS", "Where you stand among every player."},
         {"HELP", "The game's tutorial on Wake Island, its controls on foot, in vehicles and in planes, and the credits."},
         {"RETURN TO GAME LIBRARY", "Close Battlefield 1943."}};
@@ -2189,7 +2373,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   double exp_popup_at_ = 0;           // ImGui's time when it opened
   std::string exp_accepted_address_;  // the server the player chose to connect to anyway
   std::string us_accepted_address_;   // the US Central server the player chose to connect to after its warning
-  static bool UsPlaytest(const ServerInfo& sv) { return sv.official && sv.region == "us-central"; }
+  static bool UsPlaytest(const ServerInfo& sv) { return sv.Reborn() && sv.region == "us-central"; }
   bool ExperimentalWarned(const ServerInfo& sv) {
     // 0.4.2: 60 Hz is no longer experimental (the default); the warning is for 75 and 100.
     const bool us = UsPlaytest(sv) && us_accepted_address_ != sv.address;
@@ -2385,8 +2569,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     SetJoinedServerNight(sv.night);
     joining_ = sv.name;
     joining_map_ = sv.map;
+    report::NoteLastMatch(UserDir(), sv.name, sv.Reborn(), sv.map, sv.players, sv.max_players, sv.ping_ms);  // a report's Last match
     presence_server_ = discord::ShownServerName(sv.name);  // Discord Rich Presence (NotePresence)
     presence_private_ = sv.player_hosted || pm_hosting_, presence_max_ = sv.max_players;
+    // Reborn's own achievements (NoteRebornAchievements): this PC's custom match is joined through here as well.
+    ach_join_ = pm_hosting_ ? AchJoin::kOwnMatch : !own_backend_.empty() ? AchJoin::kLan
+              : sv.official ? AchJoin::kOfficial : AchJoin::kCommunity;
+    ach_in_world_since_ = -1;
     joined_gid_ = sv.gid;  // the pause's Scoreboard and the match score sent to the backend
     comms::NoteJoined(sv.address);  // voice and text chat go to this server's host (comms.cpp)
     world::NoteJoined(sv.address);  // and the match's clock and weather come from it (world_sync.cpp)
@@ -2425,17 +2614,20 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // The shaders prepared at the start, and only there (TekRantGaming, 13 Nov 2026, as above: "remember the same way
   // kong handles its shaders with them pre compiled we can use them whenever we don't need to recompile any other
   // time"). The renderer makes its pipelines only once the game runs, so when they are not prepared for this version
-  // (a first start: the setup's step 8, with the settings just chosen; the first start after an update, or a setup
-  // closed before that step: before the main menu) the game starts now, behind the shader page, which waits for every
-  // stored pipeline and then writes the marker (shaders_prepared_for). The game goes on starting behind our pages,
-  // silent (SetGameAudioMuted), and is at its menu when the player picks a server. Every other start shows no shader
-  // page: the game starts at the first join, its pipelines made from the driver's cache behind the Joining page.
-  // False when there is nothing to prepare (or the game runs already).
+  // (a first start: right after the game files, before the onboarding; the first start after an update, its cache
+  // deleted, or a start whose shader page was left before its end: before the main menu or the onboarding; AfterIntro)
+  // the game starts now, behind the shader page, which waits for every stored pipeline and then writes the marker
+  // (shaders_prepared_for). The game goes on starting behind our pages, silent (SetGameAudioMuted), and is at its menu
+  // when the player picks a server. Every other start shows no shader page: the game starts at the first join, its
+  // pipelines made from the driver's cache behind the Joining page. False when there is nothing to prepare (or the
+  // game runs already).
   bool PrepareShadersAtStart(const char* why) {
     if (!pre_game_ || !start_game_ || ShadersPreparedForPlay()) return false;
+    const std::string prepared_for = settings_.Get("shaders_prepared_for", "");
+    shaders_update_ = !prepared_for.empty() && prepared_for != BfVersion();  // the page's UPDATED TO VERSION
     REXLOG_INFO("BF shaders: not prepared for v{} (prepared for \"{}\"): prepared now, {}; the game starts behind the "
-                "shader page",
-                BfVersion(), settings_.Get("shaders_prepared_for", ""), why);
+                "shader page{}",
+                BfVersion(), prepared_for, why, shaders_update_ ? " (an update: its shader cache is deleted first)" : "");
     pre_game_ = false, started_from_launcher_ = true;
     NoteStartValues();  // the renderer takes its settings now
     shaders_prepared_hint_ = false;
@@ -2718,10 +2910,9 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       if (c < 128 && allowed(c) && direct_text_.size() < 64) direct_text_ += char(c), direct_keys_ = false;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !direct_text_.empty()) direct_text_.pop_back();
-    if (ImGui::IsKeyPressed(ImGuiKey_V) && io.KeyCtrl)
-      if (const char* clip = ImGui::GetClipboardText())
-        for (const char* c = clip; *c && direct_text_.size() < 64; ++c)
-          if (allowed(static_cast<unsigned char>(*c))) direct_text_ += *c;
+    if (paste::Pressed())  // paste_keys.h: io.KeyCtrl alone never saw Ctrl
+      for (char c : paste::Text())
+        if (direct_text_.size() < 64 && allowed(static_cast<unsigned char>(c))) direct_text_ += c;
     // The finished lookup.
     if (direct_job_ && direct_job_->load() != 0) {
       if (direct_job_->load() == 1) {
@@ -3203,7 +3394,11 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       case kTabDisplay: return DisplayRows();
       case kTabGraphics: return GraphicsRows();
       case kTabAudio: return AudioRows();
-      case kTabControls: return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
+      case kTabControls:
+        // Settings > Controls and the first start's Controls step: one device's page (game_menu_controls.inc).
+        if (sub_ == kSubNone && (page_ == Page::kSettings || page_ == Page::kSetupSettings) && ctl_device_ >= 0)
+          return DeviceControlsRows(ctl_device_);
+        return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
       case kTabEnhancements: return EnhancementsRows();
       default: return GameplayRows();
     }
@@ -3775,10 +3970,19 @@ class GameMenu final : public rex::ui::ImGuiDialog {
                           "bf_menu_music"));
     rows.push_back(NotYet(Slider("Menu", "Menu music volume", "How loud the menu's music is.", "bf_menu_music_volume", 0,
                                  100, 5, Percent, 100)));
-    rows.push_back(NotYet(Toggle("Menu", "Menu sounds", "The game's own menu sounds as you move around our menu.",
-                                 "bf_menu_sounds")));
-    rows.push_back(NotYet(Slider("Menu", "Menu sound volume", "How loud the menu sounds are.", "bf_menu_sounds_volume",
-                                 0, 100, 5, Percent, 100)));
+    rows.push_back(Toggle("Menu", "Menu sounds",
+                          "The original menus' own sounds as you move and press in our menus and the pause, made from "
+                          "your game files. Applies at once.",
+                          "bf_menu_sounds"));
+    rows.push_back(Slider("Menu", "Menu sound volume", "How loud the menu sounds are (with the master volume). Applies at once.",
+                          "bf_menu_sounds_volume", 0, 100, 5, Percent, 100));
+    // The achievement popup and its chime (achievement_toast.h).
+    rows.push_back(Toggle("Achievements", "Achievement popups",
+                          "A note at the top right and a short chime when you unlock an achievement. "
+                          "Your own sounds\\achievement.wav in the game's user folder plays in place of the chime.",
+                          "bf_achievement_popups"));
+    rows.push_back(Slider("Achievements", "Achievement sound volume", "How loud the achievement chime is. 0 is silent.",
+                          "bf_achievement_volume", 0, 100, 5, Percent, 80));
     // The rest of the game's own Sound page (its master, music and dialogue volumes are the rows above).
     rows.push_back(GameChoice("Game sound", "Sound system",
                               "What you listen on, as the game's own setting: it mixes its sound for that.",
@@ -4019,65 +4223,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   // vehicle the walk keys are the throttle and the brake and the zoom key the second weapon, input_settings.cpp).
   // Select a row, then press the key or mouse button for it.
   std::vector<SettingRow> KeyRows() {
-    static const std::pair<const char*, const char*> kBinds[] = {
-        {"keybind_lstick_up", "Move forward / throttle"},
-        {"keybind_lstick_down", "Move back / brake"},
-        {"keybind_lstick_left", "Move left / turn left"},
-        {"keybind_lstick_right", "Move right / turn right"},
-        {"keybind_right_trigger", "Fire"},
-        {"keybind_left_trigger", "Zoom / second weapon"},
-        {"keybind_a", "Jump / change seat"},
-        {"keybind_b", "Enter, use, pick up / exit"},
-        {"keybind_x", "Reload"},
-        {"keybind_y", "Draw knife"},
-        {"keybind_left_shoulder", "Grenade, explosives"},
-        {"keybind_right_shoulder", "Toggle weapon / second weapon"},
-        {"keybind_lstick_press", "Sprint"},
-        {"keybind_rstick_press", "Crouch"},
-        {"keybind_back", "Command (tap), score (hold)"},
-        {"keybind_start", "Game menu"},
-        {"keybind_dpad_up", "Vehicle camera (D-pad up)"},
-        {"keybind_dpad_down", "D-pad down"},
-        {"keybind_dpad_left", "D-pad left"},
-        {"keybind_dpad_right", "D-pad right"},
-        {"keybind_rstick_up", "Look up (mouse camera off)"},
-        {"keybind_rstick_down", "Look down (mouse camera off)"},
-        {"keybind_rstick_left", "Look left (mouse camera off)"},
-        {"keybind_rstick_right", "Look right (mouse camera off)"},
-        {"keybind_push_to_talk", "Push to talk (voice chat)"},
-        {"keybind_chat_all", "Chat to everyone"},
-        {"keybind_chat_team", "Chat to your team"},
-        {"keybind_chat_squad", "Chat to your squad"}};
+    static const auto& kBinds = kBindActions;  // the actions and buttons: game_menu_controls.inc (16 Nov 2026)
     // 13 Nov 2026 ("Mouse and Keyboard keybinds should be available for remapping any key (except mouse look) with a
     // primary and second key for both a keyboard column and a mouse column. Click on a bind and holding Escape
     // should clear that bind slot"): a binding is the SDK's list of keys, any of which presses it; here its first two
     // keyboard keys and its first two mouse buttons, each a slot of its own. The wheel's notches are mouse buttons
     // for the bindings that are a button (look.cpp WheelNotch); the first visit puts the wheel where it was, on Toggle
     // Weapon.
-    if (!REXCVAR_GET(bf_wheel_bindable)) {
-      bool named = false;
-      for (const auto& [cvar, label] : kBinds) named = named || Cvar(cvar).find("Wheel") != std::string::npos;
-      if (!named) {
-        const std::string now = Cvar("keybind_right_shoulder");
-        SetCvar("keybind_right_shoulder", now.empty() ? "WheelUp,WheelDown" : now + ",WheelUp,WheelDown");
-      }
-      SetCvar("bf_wheel_bindable", "true");
-    }
+    EnsureWheelBindable();
     // 0.4.2 ("combine the Keybinds and Remap Gamepad tabs into a single tab called Remap, and add a single column
     // for controller inputs to the left of the Keyboard columns"): the first slot is the controller's button for the
     // action, from the bf_remap_* settings (which say what each button presses) read the other way round. A click or
     // A on it takes the next button; the button it takes swaps actions with the one it had, so every action keeps
     // one button. The sticks' own actions have none to change.
-    static const std::pair<const char*, const char*> kPadOf[] = {
-        {"keybind_a", "a"}, {"keybind_b", "b"}, {"keybind_x", "x"}, {"keybind_y", "y"},
-        {"keybind_left_shoulder", "lb"}, {"keybind_right_shoulder", "rb"}, {"keybind_left_trigger", "lt"},
-        {"keybind_right_trigger", "rt"}, {"keybind_lstick_press", "ls"}, {"keybind_rstick_press", "rs"},
-        {"keybind_back", "back"}, {"keybind_start", "start"}, {"keybind_dpad_up", "up"}, {"keybind_dpad_down", "down"},
-        {"keybind_dpad_left", "left"}, {"keybind_dpad_right", "right"}};
-    static const std::pair<const char*, const char*> kPadNames[] = {
-        {"a", "A"}, {"b", "B"}, {"x", "X"}, {"y", "Y"}, {"lb", "LB"}, {"rb", "RB"}, {"lt", "LT"}, {"rt", "RT"},
-        {"ls", "LS"}, {"rs", "RS"}, {"back", "Back"}, {"start", "Start"}, {"up", "D-Up"}, {"down", "D-Down"},
-        {"left", "D-Left"}, {"right", "D-Right"}};
+    static const auto& kPadOf = kPadOfBind;
+    static const auto& kPadNames = kPadButtonNames;
     auto pad_action = [](const std::string& cvar) -> std::string {
       for (const auto& [bind, id] : kPadOf)
         if (cvar == bind) return id;
@@ -4593,7 +4753,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         // press/<key>, hold/<key>, release/<key>: f6, f7, f8 and the arrows as ImGui sees them (the graphics panel)
         const std::string k = w.substr(w.find('/') + 1);
         // A single letter (the chat's T, Y, U and push to talk's B), enter, esc, tab, backspace: the chat box tests.
-        const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6
+        const ImGuiKey key = k == "f8" ? ImGuiKey_F8 : k == "f7" ? ImGuiKey_F7 : k == "f6" ? ImGuiKey_F6 : k == "f12" ? ImGuiKey_F12
+                             : k == "f2" ? ImGuiKey_F2 : k == "f3" ? ImGuiKey_F3 : k == "f4" ? ImGuiKey_F4
                              : k == "right" ? ImGuiKey_RightArrow : k == "left" ? ImGuiKey_LeftArrow
                              : k == "down" ? ImGuiKey_DownArrow : k == "up" ? ImGuiKey_UpArrow
                              : k == "enter" ? ImGuiKey_Enter : k == "esc" ? ImGuiKey_Escape : k == "tab" ? ImGuiKey_Tab
@@ -4606,8 +4767,18 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         }
       } else if (w.rfind("type/", 0) == 0) {
         ImGui::GetIO().AddInputCharactersUTF8(w.substr(5).c_str());
-      } else if (w.rfind("move/", 0) == 0 || w.rfind("click/", 0) == 0 || w.rfind("mdown/", 0) == 0 || w.rfind("mup/", 0) == 0) {
+      } else if (w.rfind("clip/", 0) == 0) {  // clip/<text>: the clipboard's text for the next paste (paste_keys.h),
+        paste::TestText() = w.substr(5);     // never the PC's own clipboard
+      } else if (w.rfind("paste/", 0) == 0) {  // paste/<text>: that, then Ctrl+V as the SDK sends it (LeftCtrl, V)
+        paste::TestText() = w.substr(6);
+        ImGuiIO& io = ImGui::GetIO();
+        io.AddKeyEvent(ImGuiKey_LeftCtrl, true);
+        io.AddKeyEvent(ImGuiKey_V, true), io.AddKeyEvent(ImGuiKey_V, false);
+        io.AddKeyEvent(ImGuiKey_LeftCtrl, false);
+      } else if (w.rfind("move/", 0) == 0 || w.rfind("click/", 0) == 0 || w.rfind("mdown/", 0) == 0 || w.rfind("mup/", 0) == 0 ||
+                 w.rfind("rclick/", 0) == 0) {  // rclick/<x>/<y>: the right button's click there
         const bool click = w[0] == 'c', down = w.rfind("mdown/", 0) == 0, up = w.rfind("mup/", 0) == 0;
+        const bool rclick = w[0] == 'r';
         const size_t a = w.find('/'), b = w.find('/', a + 1);
         const float x = float(std::atof(w.substr(a + 1, b - a - 1).c_str())), y = float(std::atof(w.substr(b + 1).c_str()));
         const Stage st = StageOf(ImGui::GetIO());
@@ -4617,6 +4788,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         io.AddMousePosEvent(at.x, at.y);
         script_mouse_ = ImVec2(at.x - 2, at.y), script_mouse_to_ = at;  // a scripted test run's mouse (OnDraw)
         if (click) io.AddMouseButtonEvent(0, true), release_click_ = true;
+        if (rclick) io.AddMouseButtonEvent(1, true), io.AddMouseButtonEvent(1, false);
         if (down) io.AddMouseButtonEvent(0, true);
         if (up) io.AddMouseButtonEvent(0, false);
       }
@@ -4721,6 +4893,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       else if (what == "bfright") PressBf({0x0008}), Passing(0x0008);
       else if (what == "bfy") PressBf({0x8000}), Passing(0x8000);
       else if (what == "bfstart") open_ = false, PressBf({kPadStart});  // ours closed, the game's own pause (traces)
+      else if (what == "show") ShowPause();  // ours again, over whatever BF shows (the menu sounds' test: BF's quiet)
 #if defined(BF_DEV_TOOLS)
       // sdlmb4, sdlmb5: a mouse side button pressed and let go (issue 14).
       else if (what == "sdlmb4" || what == "sdlmb5") PushSideButton(what == "sdlmb4" ? SDL_BUTTON_X1 : SDL_BUTTON_X2, true);
@@ -5206,9 +5379,13 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   }
 
 #include "game_menu_launcher.inc"
+#include "game_menu_clan.inc"
 #include "game_menu_home.inc"
 #include "game_menu_news.inc"
+#include "game_menu_report.inc"  // Report an issue, the form that files on GitHub
 #include "game_menu_browser.inc"
+#include "game_menu_progress.inc"  // Stats & Rewards, Leaderboards, Achievements
+#include "game_menu_controls.inc"  // Settings > Controls by device: the choice, each device's rows and drawings
 #include "game_menu_settings.inc"
 #include "game_menu_setup.inc"
 #include "game_menu_map.inc"
@@ -5273,7 +5450,21 @@ class GameMenu final : public rex::ui::ImGuiDialog {
     // Protect your name: the name check's answer (signed in for the protected name, with the account's progress to take
     // back; or the name is another player's), and a claim or recovery done on the name page.
     if (const AccountNews news = TakeAccountNews(); news.any) {
-      acct_online_ = news.protected_name ? 1 : news.other_owner ? 2 : 0;
+      acct_online_ = news.protected_name ? 1 : news.team_name ? 3 : news.other_owner ? 2 : 0;
+      // A team owner (server/plasma.py TEAM_OWNERS) signed in under another of their names: the account follows it.
+      const std::string chosen = settings_.Get("player_name", ""), acct = settings_.Get("account_name", "");
+      const auto same = [](const std::string& x, const std::string& y) {
+        return x.size() == y.size() && std::equal(x.begin(), x.end(), y.begin(), [](char p, char q) {
+                 return std::tolower(static_cast<unsigned char>(p)) == std::tolower(static_cast<unsigned char>(q));
+               });
+      };
+      if (news.protected_name && same(news.name, chosen) && !same(acct, chosen) &&
+          !settings_.Get("account_code", "").empty()) {
+        settings_.values["account_name"] = chosen;
+        settings_.Save();
+        SetAccount(settings_.Get("account_code", ""), chosen);
+        REXLOG_INFO("BF account: the protected name is now {} (one of the account's team names)", chosen);
+      }
       if (!news.progress.empty()) TakeBackProgress(news.progress, "the name check");
     }
     ApplyAccountResult();
@@ -5326,6 +5517,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         }
       }
     }
+    // Clan tags (clan_tags.h): the tags of this server's players every 10 s, and this player's own sent again.
+    if (MenuDriverStage() == 5 && !joined_gid_.empty()) clan::MatchTick(joined_gid_, PlayerName(), OnlinePlayerId());
     if (MenuDriverStage() == 5 && LevelLoaded()) {
       match_accum_ += io.DeltaTime;
       if (match_accum_ >= 60) {
@@ -5398,7 +5591,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   std::atomic<bool> acct_busy_{false};
   std::string acct_message_;
   bool acct_message_bad_ = false, acct_show_code_ = false, code_mode_ = false;
-  int acct_online_ = 0;  // from this start's name check: 1 signed in for the protected name, 2 another player's name
+  int acct_online_ = 0;  // from this start's name check: 1 signed in for the protected name, 2 another player's name,
+                         // 3 a name kept for the team
 
   Settings settings_;
   std::function<void(bool)> fullscreen_;
@@ -5463,7 +5657,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   double shaders_behind_from_ = 0;
   bool shaders_prepared_hint_ = false;  // decided at Play (ShadersPreparedForPlay), before the game has loaded
   bool join_after_shaders_ = false;     // a server picked on Home: its join once the shader page is done
-  bool setup_shader_step_ = false;      // the first start's step 8 is up: Ready follows it (AfterShaders)
+  bool shaders_update_ = false;         // the shader page is an update's (PrepareShadersAtStart: another version's marker)
   double shaders_wait_from_ = -1;       // the game was started for the shader page: until its renderer is up (or 60 s)
 
   // King Kong's rule decided at Play: the start's own check (CheckShadersAfterUpdate) runs once the game has loaded,
@@ -5808,6 +6002,7 @@ void ApplyPlayerIdentity(const fs::path& user_dir) {
   }
   SetPlayerIdentity(name, id);
   SetAccount(settings.Get("account_code", ""), settings.Get("account_name", ""));
+  clan::SetSavedTag(settings.Get("clan_tag", ""));  // sent once the name check has the name (clan_tags.h)
   StartNameCheck(name, id);
 }
 
@@ -5847,10 +6042,13 @@ void SetAccount(const std::string& code, const std::string& name) {
   std::lock_guard lock(g_account_mutex);
   g_account_code = code, g_account_name = name;
 }
-// The code, when it protects this name (any case): else empty.
+// The code, when it protects this name (any case), or the account has a name: else empty. A name check under another
+// name is signed too: a team owner (server/plasma.py TEAM_OWNERS) plays under any of their names with one code, and for
+// anyone else the backend answers it as a plain one.
 std::string AccountCodeFor(const std::string& name) {
   std::lock_guard lock(g_account_mutex);
-  return !g_account_code.empty() && SameName(g_account_name, name) ? g_account_code : std::string();
+  return !g_account_code.empty() && (!g_account_name.empty() || SameName(g_account_name, name)) ? g_account_code
+                                                                                                 : std::string();
 }
 AccountNews TakeAccountNews() {
   std::lock_guard lock(g_account_mutex);
@@ -5903,16 +6101,22 @@ void StartNameCheck(const std::string& name, uint32_t player_id) {
       news.any = true;
       news.protected_name = JsonField(reply, "protected") == "true";
       news.other_owner = JsonField(reply, "protected_by_other") == "true";
+      news.team_name = JsonField(reply, "team_name") == "true";
+      news.name = answer;
+      if (news.team_name) REXLOG_INFO("BF account: the name asked for is kept for the Reborn team");
       news.progress = JsonField(reply, "progress_text");
       if (news.protected_name) REXLOG_INFO("BF account: signed in for the protected name {}", answer);
       if (news.other_owner) REXLOG_INFO("BF account: the name asked for is another player's protected name");
       std::lock_guard lock(g_account_mutex);
       g_account_news = news;
     }
-    std::lock_guard lock(check->mutex);
-    check->answer = answer;
-    check->done = true;
-    check->done_cv.notify_all();
+    {
+      std::lock_guard lock(check->mutex);
+      check->answer = answer;
+      check->done = true;
+      check->done_cv.notify_all();
+    }
+    if (!answer.empty()) clan::SendOwnTag(answer, OnlinePlayerId());  // the clan tag, for the name the backend gave
   }).detach();
 }
 uint32_t PlayerId();  // live_layers.cpp
@@ -5964,6 +6168,7 @@ void GraphicsPanelPad(uint16_t buttons);  // f8_panel.cpp
 // Our menus, the graphics panel (F8) or the match admin's panel (F9) have the controller and the mouse.
 bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen() || world::AdminPanelOpen(); }
 bool LauncherShowing() { return g_menu && g_menu->ShowingLauncher(); }
+bool ShaderScreenShowing() { return g_menu && g_menu->ShowingShaders(); }
 bool LauncherKeyboardLast() { return g_menu && g_menu->KeyboardLast(); }
 // look.cpp (the vehicle mouse's stick): the game's own Vertical look is Inverted (GstInput Scheme2FlipY).
 bool GameVerticalLookInverted() { return g_menu && g_menu->GameFlipY(); }
@@ -5979,8 +6184,8 @@ fs::path MenuUserDir() { return g_menu ? g_menu->UserDir() : fs::path(); }
 // King Kong's rule exactly (its shader_prepared.h; TekRantGaming, 11 Nov 2026: shaders compile when the game files
 // are first given, then never again until the game updates, when they are all compiled again; "Copy Kong exactly").
 // At each start (bf1943_app.h, before the shaders are prepared and before the renderer opens its storage):
-// - shaders prepared for another version: an update; the shader page makes every pipeline again, over the cache
-//   (nothing deleted: update.cpp), "UPDATED TO VERSION";
+// - shaders prepared for another version: an update; the old shader and pipeline cache is deleted and the shader page
+//   builds a fresh set, "UPDATED TO VERSION", then the main menu (update.cpp; TekRantGaming, 16 Nov 2026, v0.4.7);
 // - prepared for this version (shaders_prepared_for, written once the page has compiled them all) and the renderer's
 //   storage still there: no shader page; the renderer makes its stored pipelines behind the menus, from the driver's
 //   cache (pipelines first met in play are kept in the storage and made the same way at the next start);

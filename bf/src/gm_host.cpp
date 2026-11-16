@@ -34,6 +34,7 @@
 #include <rex/logging.h>
 
 #include "server_list.h"  // JsonField, JsonString; winsock2.h
+#include "server_stats.h"   // each player's counts, sent with the status
 
 #if defined(_WIN32)
 #include <natupnp.h>
@@ -1169,6 +1170,11 @@ void Serve() {
           alive = false;
         }
         WriteStatus(st);
+        // Each player's stats since the last beat (server_stats.cpp), for Stats & Rewards and the Leaderboards.
+        if (const std::string counts = bf1943::TakeServerStatsMessage(current); alive && !counts.empty() && !link.Send(counts)) {
+          host.Note("backend link lost (player stats)");
+          alive = false;
+        }
       }
     }
     host.DropAll();

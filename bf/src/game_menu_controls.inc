@@ -1,0 +1,680 @@
+// Controls by device (TekRantGaming, 16 Nov 2026: "when you open the control settings page I want an image of a
+// keyboard and mouse and an image of a controller; you click on one of them and then you get the full control
+// settings and everything for what you clicked on only, instead of a page that has both"). His pick of the two
+// mockups was C1 "Kit Issue" (runs\ui-designs\build_controls.py, out\c1_*.png), included inside GameMenu
+// (game_menu.cpp) before game_menu_settings.inc:
+//   - Settings > Controls opens on a choice of two paper cards, a keyboard and mouse and a controller drawn in the
+//     menus' ink (our own line drawings, no art from the game or anyone else), the card of the device used last
+//     chosen. Left and right (or the mouse) choose, A (Enter) or a click opens; B (Esc) leaves the settings.
+//   - The page behind a card is the settings page's own list (SettingsBody) with that device's rows only, sorted
+//     into sections, its bindings at the end: two keys and two mouse buttons for each action on the keyboard's, the
+//     controller's button for each action on the controller's. The help card draws the device with the chosen row's
+//     keys or buttons lit. B (Esc) goes back to the choice.
+//   - Button prompts and Camera turning work for both, so both pages have them. Every row is still the one
+//     ControlsRows, KeyRows or RemapRows made (the same settings and cvars), only sorted by device.
+
+  int ctl_device_ = -1;    // the Controls tab: -1 the choice, 0 the keyboard and mouse's page, 1 the controller's
+  bool ctl_fresh_ = true;  // the choice not shown since Controls was opened: its cursor starts on the device used last
+  bool ctl_bind_row_ = false;  // the chosen row is a binding (last frame's): the A prompt says BIND
+  float help_top_ = 0;     // room left under the help card's title for a picture (SettingsBody)
+
+  // The actions BF reads, the SDK's keybind_* settings, each named by what BF does with it (BF's own Help & Options >
+  // Controls for the soldier, vehicles and planes, runs help3 and helpveh1; in a vehicle the walk keys are the
+  // throttle and the brake and the zoom key the second weapon, input_settings.cpp). Shared by KeyRows and the two
+  // device pages.
+  static constexpr std::pair<const char*, const char*> kBindActions[] = {
+      {"keybind_lstick_up", "Move forward / throttle"},
+      {"keybind_lstick_down", "Move back / brake"},
+      {"keybind_lstick_left", "Move left / turn left"},
+      {"keybind_lstick_right", "Move right / turn right"},
+      {"keybind_right_trigger", "Fire"},
+      {"keybind_left_trigger", "Zoom / second weapon"},
+      {"keybind_a", "Jump / change seat"},
+      {"keybind_b", "Enter, use, pick up / exit"},
+      {"keybind_x", "Reload"},
+      {"keybind_y", "Draw knife"},
+      {"keybind_left_shoulder", "Grenade, explosives"},
+      {"keybind_right_shoulder", "Toggle weapon / second weapon"},
+      {"keybind_lstick_press", "Sprint"},
+      {"keybind_rstick_press", "Crouch"},
+      {"keybind_back", "Command (tap), score (hold)"},
+      {"keybind_start", "Game menu"},
+      {"keybind_dpad_up", "Vehicle camera (D-pad up)"},
+      {"keybind_dpad_down", "D-pad down"},
+      {"keybind_dpad_left", "D-pad left"},
+      {"keybind_dpad_right", "D-pad right"},
+      {"keybind_rstick_up", "Look up (mouse camera off)"},
+      {"keybind_rstick_down", "Look down (mouse camera off)"},
+      {"keybind_rstick_left", "Look left (mouse camera off)"},
+      {"keybind_rstick_right", "Look right (mouse camera off)"},
+      {"keybind_push_to_talk", "Push to talk (voice chat)"},
+      {"keybind_chat_all", "Chat to everyone"},
+      {"keybind_chat_team", "Chat to your team"},
+      {"keybind_chat_squad", "Chat to your squad"}};
+  // The controller's button behind each button action (the bf_remap_* settings say what each button presses).
+  static constexpr std::pair<const char*, const char*> kPadOfBind[] = {
+      {"keybind_a", "a"}, {"keybind_b", "b"}, {"keybind_x", "x"}, {"keybind_y", "y"},
+      {"keybind_left_shoulder", "lb"}, {"keybind_right_shoulder", "rb"}, {"keybind_left_trigger", "lt"},
+      {"keybind_right_trigger", "rt"}, {"keybind_lstick_press", "ls"}, {"keybind_rstick_press", "rs"},
+      {"keybind_back", "back"}, {"keybind_start", "start"}, {"keybind_dpad_up", "up"}, {"keybind_dpad_down", "down"},
+      {"keybind_dpad_left", "left"}, {"keybind_dpad_right", "right"}};
+  static constexpr std::pair<const char*, const char*> kPadButtonNames[] = {
+      {"a", "A"}, {"b", "B"}, {"x", "X"}, {"y", "Y"}, {"lb", "LB"}, {"rb", "RB"}, {"lt", "LT"}, {"rt", "RT"},
+      {"ls", "LS"}, {"rs", "RS"}, {"back", "Back"}, {"start", "Start"}, {"up", "D-Up"}, {"down", "D-Down"},
+      {"left", "D-Left"}, {"right", "D-Right"}};
+  static constexpr const char* kPadButtonLong[] = {"A", "B", "X", "Y", "Left bumper", "Right bumper", "Left trigger",
+                                                   "Right trigger", "Left stick press", "Right stick press", "Back",
+                                                   "Start", "D-pad up", "D-pad down", "D-pad left", "D-pad right"};
+
+  // 13 Nov 2026: the wheel's notches are mouse buttons for the bindings that are a button (look.cpp WheelNotch); the
+  // first visit to the bindings puts the wheel where it was, on Toggle Weapon.
+  void EnsureWheelBindable() {
+    if (REXCVAR_GET(bf_wheel_bindable)) return;
+    bool named = false;
+    for (const auto& [cvar, label] : kBindActions) named = named || Cvar(cvar).find("Wheel") != std::string::npos;
+    if (!named) {
+      const std::string now = Cvar("keybind_right_shoulder");
+      SetCvar("keybind_right_shoulder", now.empty() ? "WheelUp,WheelDown" : now + ",WheelUp,WheelDown");
+    }
+    SetCvar("bf_wheel_bindable", "true");
+  }
+
+  // The controller's button (index in kPadButtonNames) that presses a button action ("a", "lt", ...), or -1.
+  int PadButtonOf(const std::string& action) {
+    for (int b = 0; b < int(std::size(kPadButtonNames)); ++b)
+      if (Cvar(std::string("bf_remap_") + kPadButtonNames[b].first) == action) return b;
+    return -1;
+  }
+
+  // ---- the rows of each device's page
+  // ControlsRows' rows (its Mapping rows are left out while the settings page draws, controls_buttons_), each given
+  // the section it has on its device's page, or none when it belongs to the other device.
+  std::string DeviceSection(int device, const SettingRow& r) {
+    const std::string& n = r.name;
+    const bool invert = n.rfind("Invert", 0) == 0;
+    if (r.section == "Input") return device == 1 && n == "Keyboard & mouse" ? "" : "Input";
+    if (r.section == "Keyboard & mouse") return device != 0 ? "" : invert ? "Invert" : "Mouse";
+    if (r.section == "Controller") {
+      if (device != 1) return "";
+      if (invert || n == "Left stick" || n == "Camera horizontal") return "Invert";
+      if (n == "Aim" || n == "Aim assist" || n == "Aim assist strength") return "Aim";
+      if (n.rfind("Vibration", 0) == 0) return "Vibration";
+      return "Look";
+    }
+    if (r.section == "Game controls") {
+      if (device != 1) return "";
+      return n == "Game vibration" ? "Vibration" : n == "Game sensitivity" ? "Look" : "Game layouts";
+    }
+    return "";
+  }
+
+  std::vector<SettingRow> DeviceControlsRows(int device) {
+    static const char* kKeyboardSections[] = {"Input", "Mouse", "Invert"};
+    static const char* kPadSections[] = {"Input", "Look", "Invert", "Aim", "Vibration", "Game layouts"};
+    std::vector<SettingRow> all = ControlsRows();
+    std::vector<SettingRow> rows;
+    auto sorted = [&](const char* section) {
+      for (const SettingRow& r : all)
+        if (DeviceSection(device, r) == section) {
+          SettingRow copy = r;
+          copy.section = section;
+          if (copy.name == "Keyboard & mouse")
+            copy.help = "Controllers always work. With this on, a keyboard and mouse work too, at the same time: the "
+                        "mouse turns the camera and stays in the game window while you play (our menu frees it). Your "
+                        "keys are under Bindings on this page.";
+          rows.push_back(std::move(copy));
+        }
+    };
+    if (device == 0)
+      for (const char* s : kKeyboardSections) sorted(s);
+    else
+      for (const char* s : kPadSections) sorted(s);
+    if (device == 0) KeyboardBindRows(rows);
+    else PadButtonRows(rows);
+    for (const SettingRow& r : all)  // the keys while playing (F2, the performance metrics) on both
+      if (r.section == "Keys while playing") rows.push_back(r);
+    return rows;
+  }
+
+  // The keyboard's page: each action's two keys and two mouse buttons (the 13 Nov bindings without the controller's
+  // column, which is on the controller's page). A click on a slot, or A on the one left and right are on, waits for
+  // a press (CaptureBind).
+  void KeyboardBindRows(std::vector<SettingRow>& rows) {
+    EnsureWheelBindable();
+    for (const auto& [cvar, label] : kBindActions) {
+      SettingRow r{"Bindings", label,
+                   "Two keys and two mouse buttons for each action: any of them does it. Click a slot (or A on it), "
+                   "then press the key or the mouse button; the mouse columns also take the side buttons and, for the "
+                   "button actions, a wheel notch. Esc keeps what it has; hold Esc to clear the slot."};
+      const std::string name = cvar;
+      const bool chosen = int(rows.size()) == row_;
+      const std::array<std::string, 4> slots = BindSlots(Cvar(cvar));
+      r.slots.assign(slots.begin(), slots.end());
+      r.slot_cursor = chosen ? std::clamp(slot_cursor_, 0, 3) : -1;
+      r.slot_capture = capture_ == cvar ? capture_slot_ : -1;
+      r.slot_click = [this, name](int slot) {
+        slot_cursor_ = std::clamp(slot, 0, 3);
+        capture_ = name, capture_slot_ = slot_cursor_;
+      };
+      r.activate = [this, name] { capture_ = name, capture_slot_ = std::clamp(slot_cursor_, 0, 3); };
+      r.nudge = [this](int by) { slot_cursor_ = std::clamp(slot_cursor_ + by, 0, 3); };
+      rows.push_back(r);
+    }
+    SettingRow reset{"Bindings", "Reset bindings",
+                     "Every key and mouse button back to its default. The controller's buttons keep theirs (they are "
+                     "on the controller's page)."};
+    reset.activate = [this] {
+      for (const auto& [cvar, label] : kBindActions)
+        if (const auto* info = rex::cvar::GetFlagInfo(cvar)) SetCvar(cvar, info->default_value);
+      REXLOG_INFO("BF settings: the keys and mouse buttons back to their defaults");
+    };
+    rows.push_back(reset);
+  }
+
+  // The controller's page: each button action's button. Left and right (or A) give it another; the action that had
+  // that button takes this one's, so every action keeps one (0.4.2's swap). The sticks' own actions have none to
+  // change, and chat and voice have no button.
+  void PadButtonRows(std::vector<SettingRow>& rows) {
+    std::vector<std::string> names(std::begin(kPadButtonLong), std::end(kPadButtonLong));
+    for (const auto& [cvar, label] : kBindActions) {
+      std::string action;
+      for (const auto& [bind, id] : kPadOfBind)
+        if (std::string(cvar) == bind) action = id;
+      if (action.empty()) continue;
+      SettingRow r{"Buttons", label,
+                   "The controller's button for this action. Left and right choose another; the action that had it "
+                   "takes this one's button, so every action keeps one.",
+                   names};
+      r.index = PadButtonOf(action);
+      if (r.index < 0) r.options.push_back("None"), r.index = int(r.options.size()) - 1;
+      r.choose = [this, action](int i) {
+        const int n = int(std::size(kPadButtonNames)), had = PadButtonOf(action);
+        if (i < 0 || i >= n || i == had) return;
+        const std::string to = std::string("bf_remap_") + kPadButtonNames[i].first, other = Cvar(to);
+        SetCvar(to, action);
+        if (had >= 0) SetCvar(std::string("bf_remap_") + kPadButtonNames[had].first, other);
+        REXLOG_INFO("BF settings: the controller's {} now does {} ({} does {})", kPadButtonNames[i].second, action,
+                    had >= 0 ? kPadButtonNames[had].second : "nothing else", had >= 0 ? other : std::string("-"));
+      };
+      rows.push_back(r);
+    }
+    SettingRow reset{"Buttons", "Reset buttons", "Every controller button back to its own action. The keys keep theirs."};
+    reset.activate = [this] {
+      for (const auto& [id, shown] : kPadButtonNames) SetCvar(std::string("bf_remap_") + id, id);
+      REXLOG_INFO("BF settings: the controller's buttons back to their own actions");
+    };
+    rows.push_back(reset);
+  }
+
+  // ---- the drawings: a keyboard with its arrows, a mouse, a controller (C1's, build_controls.py), in ink on paper.
+  // A lit part is green, the chosen one red.
+  struct DeviceLit {
+    std::set<std::string> keys, mouse, pad;  // keys by the SDK's names, mouse parts (lmb rmb wheel m4 m5), pad parts
+    std::string key_sel, mouse_sel, pad_sel;
+    bool mouse_all = false;  // the whole mouse lit (its own settings)
+  };
+  static constexpr ImU32 kLitInk = IM_COL32(111, 125, 74, 255);  // a lit part: the olive the paper's green fades to
+
+  // The key's place on a 18.5 by 6.4 keys grid, its label and the SDK's name for it.
+  struct ArtKey {
+    float x, y, w;
+    const char* label;
+    const char* id;
+  };
+  static const std::vector<ArtKey>& KeyboardKeys() {
+    static const std::vector<ArtKey> keys = [] {
+      std::vector<ArtKey> k;
+      auto row = [&](float y, float x, std::initializer_list<std::tuple<float, const char*, const char*>> ks) {
+        for (const auto& [w, label, id] : ks) {
+          if (label) k.push_back({x, y, w, label, id});
+          x += w;
+        }
+      };
+      row(0, 0, {{1, "Esc", "Escape"}, {1, nullptr, nullptr}, {1, "F1", "F1"}, {1, "F2", "F2"}, {1, "F3", "F3"},
+                 {1, "F4", "F4"}, {0.5f, nullptr, nullptr}, {1, "F5", "F5"}, {1, "F6", "F6"}, {1, "F7", "F7"},
+                 {1, "F8", "F8"}, {0.5f, nullptr, nullptr}, {1, "F9", "F9"}, {1, "F10", "F10"}, {1, "F11", "F11"},
+                 {1, "F12", "F12"}});
+      row(1.4f, 0, {{1, "`", "Backtick"}, {1, "1", "1"}, {1, "2", "2"}, {1, "3", "3"}, {1, "4", "4"}, {1, "5", "5"},
+                    {1, "6", "6"}, {1, "7", "7"}, {1, "8", "8"}, {1, "9", "9"}, {1, "0", "0"}, {1, "-", "Minus"},
+                    {1, "=", "Plus"}, {2, "Back", "Backspace"}});
+      row(2.4f, 0, {{1.5f, "Tab", "Tab"}, {1, "Q", "Q"}, {1, "W", "W"}, {1, "E", "E"}, {1, "R", "R"}, {1, "T", "T"},
+                    {1, "Y", "Y"}, {1, "U", "U"}, {1, "I", "I"}, {1, "O", "O"}, {1, "P", "P"}, {1, "[", "LBracket"},
+                    {1, "]", "RBracket"}, {1.5f, "\\", "Backslash"}});
+      row(3.4f, 0, {{1.75f, "Caps", "CapsLock"}, {1, "A", "A"}, {1, "S", "S"}, {1, "D", "D"}, {1, "F", "F"},
+                    {1, "G", "G"}, {1, "H", "H"}, {1, "J", "J"}, {1, "K", "K"}, {1, "L", "L"}, {1, ";", "Semicolon"},
+                    {1, "'", "Quote"}, {2.25f, "Enter", "Return"}});
+      row(4.4f, 0, {{2.25f, "Shift", "Shift"}, {1, "Z", "Z"}, {1, "X", "X"}, {1, "C", "C"}, {1, "V", "V"},
+                    {1, "B", "B"}, {1, "N", "N"}, {1, "M", "M"}, {1, ",", "Comma"}, {1, ".", "Period"},
+                    {1, "/", "Slash"}, {2.75f, "Shift", "Shift"}});
+      row(5.4f, 0, {{1.25f, "Ctrl", "Control"}, {1.25f, "", ""}, {1.25f, "Alt", "Alt"}, {6.25f, "Space", "Space"},
+                    {1.25f, "Alt", "Alt"}, {1.25f, "Fn", ""}, {1.25f, "", ""}, {1.25f, "Ctrl", "Control"}});
+      row(1.4f, 15.5f, {{1, "Ins", "Insert"}, {1, "Home", "Home"}, {1, "PgUp", "PageUp"}});
+      row(2.4f, 15.5f, {{1, "Del", "Delete"}, {1, "End", "End"}, {1, "PgDn", "PageDown"}});
+      row(4.4f, 16.5f, {{1, "\xE2\x96\xB2", "Up"}});
+      row(5.4f, 15.5f, {{1, "\xE2\x97\x80", "Left"}, {1, "\xE2\x96\xBC", "Down"}, {1, "\xE2\x96\xB6", "Right"}});
+      return k;
+    }();
+    return keys;
+  }
+
+  // A small label centred on c: below 16 pixels the menu's fonts drew nothing in the first test (run ctl1, keys under
+  // about 13 px were blank), so it is drawn at 16 and its vertices scaled down to `size` round the centre.
+  static void SmallLabel(ImDrawList* d, ImFont* font, float size, ImVec2 c, ImU32 col, const char* t) {
+    const float drawn = std::max(size, 16.0f), k = size / drawn;
+    const float w = kit::TextWidth(font, drawn, t);
+    const int start = d->VtxBuffer.Size;
+    d->AddText(font, drawn, ImVec2(c.x - w * 0.5f, c.y - drawn * 0.72f), col, t);
+    if (k < 1)
+      for (int i = start; i < d->VtxBuffer.Size; ++i)
+        d->VtxBuffer[i].pos = ImVec2(c.x + (d->VtxBuffer[i].pos.x - c.x) * k, c.y + (d->VtxBuffer[i].pos.y - c.y) * k);
+  }
+
+  // The keyboard, its top left at `at`, `u` a key's width (18.5 keys wide, 6.4 high, its frame a third of a key out).
+  void KeyboardArt(ImDrawList* d, ImVec2 at, float u, const DeviceLit& lit) {
+    const kit::Fonts& f = kit::GetFonts();
+    const float gap = u * 0.12f, line = std::max(1.0f, u * 0.075f);
+    const ImVec2 f0(at.x - u * 0.35f, at.y - u * 0.35f), f1(at.x + 18.85f * u, at.y + 6.75f * u);
+    d->AddRectFilled(f0, f1, IM_COL32(233, 225, 201, 255), u * 0.35f);
+    d->AddRect(f0, f1, kit::kInk, u * 0.35f, 0, line * 1.4f);
+    for (const ArtKey& k : KeyboardKeys()) {
+      const ImVec2 a(at.x + k.x * u + gap * 0.5f, at.y + k.y * u + gap * 0.5f), b(a.x + k.w * u - gap, a.y + u - gap);
+      const bool sel = *k.id && lit.key_sel == k.id, on = *k.id && lit.keys.count(k.id);
+      d->AddRectFilled(a, b, sel ? kit::kStamp : on ? kLitInk : kit::kPaperLight, u * 0.12f);
+      d->AddRect(a, b, kit::kInk, u * 0.12f, 0, sel ? line * 1.6f : line);
+      const float size = u * (std::strlen(k.label) <= 3 ? 0.36f : 0.27f);
+      if (size >= 5.0f && *k.label)
+        SmallLabel(d, f.ui_bold, size, ImVec2((a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f), sel || on ? kit::kCream : kit::kInkFaint,
+                   k.label);
+    }
+  }
+
+  // The mouse from above, `h` high (0.66 h wide), its top left at `at`.
+  void MouseArt(ImDrawList* d, ImVec2 at, float h, const DeviceLit& lit) {
+    const float w = h * 0.66f, line = std::max(1.2f, h * 0.012f), r = w * 0.48f;
+    auto fill = [&](const char* part) {
+      return lit.mouse_sel == part ? kit::kStamp : lit.mouse.count(part) || lit.mouse_all ? kLitInk : kit::kPaperLight;
+    };
+    // the side buttons (on the left, as a right hand's mouse has them)
+    const ImVec2 s0(at.x - w * 0.07f, at.y + h * 0.47f), s1(at.x + w * 0.04f, at.y + h * 0.59f);
+    const ImVec2 t0(at.x - w * 0.07f, at.y + h * 0.61f), t1(at.x + w * 0.04f, at.y + h * 0.73f);
+    d->AddRectFilled(s0, s1, fill("m5"), w * 0.03f), d->AddRect(s0, s1, kit::kInk, w * 0.03f, 0, line);
+    d->AddRectFilled(t0, t1, fill("m4"), w * 0.03f), d->AddRect(t0, t1, kit::kInk, w * 0.03f, 0, line);
+    const ImVec2 b0(at.x, at.y), b1(at.x + w, at.y + h);
+    d->AddRectFilled(b0, b1, lit.mouse_all ? kLitInk : kit::kPaperLight, r);
+    const float split = at.y + h * 0.42f, mid = at.x + w * 0.5f;
+    d->AddRectFilled(b0, ImVec2(mid, split), fill("lmb"), r, ImDrawFlags_RoundCornersTopLeft);
+    d->AddRectFilled(ImVec2(mid, at.y), ImVec2(b1.x, split), fill("rmb"), r, ImDrawFlags_RoundCornersTopRight);
+    d->AddRect(b0, b1, kit::kInk, r, 0, line * 1.3f);
+    d->AddLine(ImVec2(b0.x + line, split), ImVec2(b1.x - line, split), kit::kInk, line);
+    d->AddLine(ImVec2(mid, at.y), ImVec2(mid, split), kit::kInk, line);
+    const ImVec2 w0(mid - w * 0.07f, at.y + h * 0.12f), w1(mid + w * 0.07f, at.y + h * 0.32f);
+    d->AddRectFilled(w0, w1, fill("wheel"), w * 0.07f), d->AddRect(w0, w1, kit::kInk, w * 0.07f, 0, line);
+  }
+
+  // The controller (a generic two stick pad, no maker's marks), its box 600 by 420 at scale `s` from `at`.
+  void PadArt(ImDrawList* d, ImVec2 at, float s, const DeviceLit& lit) {
+    const kit::Fonts& f = kit::GetFonts();
+    auto P = [&](float x, float y) { return ImVec2(at.x + x * s, at.y + y * s); };
+    const float line = std::max(1.2f, 2.4f * s);
+    const ImU32 body = IM_COL32(236, 228, 204, 255);
+    auto fill = [&](const char* part) {
+      return lit.pad_sel == part ? kit::kStamp : lit.pad.count(part) ? kLitInk : kit::kPaperLight;
+    };
+    auto box = [&](float x0, float y0, float x1, float y1, float r, const char* part, ImDrawFlags fl = 0) {
+      d->AddRectFilled(P(x0, y0), P(x1, y1), fill(part), r * s, fl);
+      d->AddRect(P(x0, y0), P(x1, y1), kit::kInk, r * s, fl, line);
+    };
+    box(130, 36, 218, 74, 16, "lt", ImDrawFlags_RoundCornersTop), box(382, 36, 470, 74, 16, "rt", ImDrawFlags_RoundCornersTop);
+    box(116, 76, 238, 106, 14, "lb"), box(362, 76, 484, 106, 14, "rb");
+    // the body and its grips as one shape: each drawn a line wider in ink, then all of them filled
+    const float deg = 3.14159265f / 180.0f, o = line;
+    d->AddRectFilled(ImVec2(P(100, 98).x - o, P(100, 98).y - o), ImVec2(P(500, 266).x + o, P(500, 266).y + o), kit::kInk, 84 * s + o);
+    d->AddEllipseFilled(P(160, 262), ImVec2(74 * s + o, 108 * s + o), kit::kInk, 24 * deg, 48);
+    d->AddEllipseFilled(P(440, 262), ImVec2(74 * s + o, 108 * s + o), kit::kInk, -24 * deg, 48);
+    d->AddRectFilled(P(100, 98), P(500, 266), body, 84 * s);
+    d->AddEllipseFilled(P(160, 262), ImVec2(74 * s, 108 * s), body, 24 * deg, 48);
+    d->AddEllipseFilled(P(440, 262), ImVec2(74 * s, 108 * s), body, -24 * deg, 48);
+    auto stick = [&](float x, float y, const char* part) {
+      d->AddCircleFilled(P(x, y), 38 * s, body, 40), d->AddCircle(P(x, y), 38 * s, kit::kInk, 40, line);
+      d->AddCircleFilled(P(x, y), 28 * s, fill(part), 40), d->AddCircle(P(x, y), 28 * s, kit::kInk, 40, line);
+      d->AddCircle(P(x, y), 19 * s, kit::kInk, 32, line * 0.6f);
+    };
+    stick(185, 178, "ls"), stick(365, 258, "rs");
+    // the D-pad: its two arms outlined, then filled over the join
+    d->AddRect(P(234, 222), P(256, 294), kit::kInk, 3 * s, 0, line), d->AddRect(P(209, 247), P(281, 269), kit::kInk, 3 * s, 0, line);
+    d->AddRectFilled(ImVec2(P(234, 222).x + line * 0.5f, P(234, 222).y + line * 0.5f), ImVec2(P(256, 294).x - line * 0.5f, P(256, 294).y - line * 0.5f), fill("dpad"), 3 * s);
+    d->AddRectFilled(ImVec2(P(209, 247).x + line * 0.5f, P(209, 247).y + line * 0.5f), ImVec2(P(281, 269).x - line * 0.5f, P(281, 269).y - line * 0.5f), fill("dpad"), 3 * s);
+    box(253, 171, 279, 185, 7, "back"), box(321, 171, 347, 185, 7, "start");
+    d->AddCircleFilled(P(300, 132), 17 * s, kit::kPaperLight, 32), d->AddCircle(P(300, 132), 17 * s, kit::kInk, 32, line);
+    d->AddCircle(P(300, 132), 9 * s, kit::kInk, 24, line * 0.6f);
+    static const std::tuple<const char*, const char*, float, float> kFace[] = {
+        {"y", "Y", 428, 140}, {"x", "X", 393, 175}, {"b", "B", 463, 175}, {"a", "A", 428, 210}};
+    for (const auto& [part, label, x, y] : kFace) {
+      d->AddCircleFilled(P(x, y), 18 * s, fill(part), 32), d->AddCircle(P(x, y), 18 * s, kit::kInk, 32, line);
+      const float size = 20 * s;
+      const bool on = lit.pad_sel == part || lit.pad.count(part);
+      if (size >= 5.0f) SmallLabel(d, f.ui_bold, size, P(x, y), on ? kit::kCream : kit::kInk, label);
+    }
+  }
+
+  // ---- the pictures (TekRantGaming, 16 Nov 2026: "a nice, high-quality image of the controller that's actually being
+  // used, so the PlayStation one, the Xbox version too, etc. For Steam Deck, just use the Steam controller, the new one.
+  // And ... an image of the keyboard and mouse as well that matches"): our own shaded drawings
+  // (runs\ui-designs\build_devices.py) in glyphs\devices beside the exe, no maker's logos, with anchors.txt: each
+  // picture's size and its buttons' places, so the chosen one is lit over it. The line drawings above stay for a
+  // missing file.
+  struct DevicePicture {
+    float w = 0, h = 0;
+    std::map<std::string, std::vector<float>> parts;  // part x y radius; grid x y key; box x y width height
+  };
+  const DevicePicture* DevicePictureOf(const std::string& name) {
+    static std::map<std::string, DevicePicture> table;
+    static bool read = false;
+    if (!read) {
+      read = true;
+      std::ifstream in(ExecutableDir() / "glyphs" / "devices" / "anchors.txt");
+      for (std::string line; std::getline(in, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // a Windows line end read on Linux
+        if (line.empty() || line[0] == '#') continue;
+        std::istringstream words(line);
+        std::string id;
+        DevicePicture p;
+        if (!(words >> id >> p.w >> p.h)) continue;
+        std::string part;
+        std::vector<float>* at = nullptr;
+        for (std::string w; words >> w;) {
+          char* end = nullptr;
+          const float v = std::strtof(w.c_str(), &end);
+          if (end && *end == 0 && at) at->push_back(v);
+          else at = &p.parts[w];
+        }
+        table[id] = std::move(p);
+      }
+      REXLOG_INFO("BF settings: {} device pictures", table.size());
+    }
+    const auto it = table.find(name);
+    return it == table.end() ? nullptr : &it->second;
+  }
+  fs::path DevicePictureFile(const std::string& name) { return ExecutableDir() / "glyphs" / "devices" / (name + ".png"); }
+  // The controller in use, as the prompts show it: the Button prompts setting, or (Automatic, or the keyboard's
+  // prompts chosen) the controller last pressed (game_menu.cpp PadFamily). The Steam Deck's is the Steam Controller.
+  std::string PadPictureName() {
+    std::string v = Cvar("bf_button_prompts");
+    if (v == "keyboard") v = "auto";
+    switch (kit::StyleFor(v, false)) {
+      case kit::Style::kXbox360: return "xbox360";
+      case kit::Style::kPlayStation3: return "ps3";
+      case kit::Style::kPlayStation5: return "ps5";
+      case kit::Style::kSteamDeck: return "steam";
+      default: return "xbox_series";
+    }
+  }
+
+  // A part lit over a picture: green, or red for the chosen one (a ring, filled a little).
+  static void LitRing(ImDrawList* d, ImVec2 c, float r, bool chosen) {
+    const ImU32 col = chosen ? IM_COL32(220, 60, 46, 255) : IM_COL32(143, 199, 79, 255);
+    d->AddCircleFilled(c, r * 1.12f, chosen ? IM_COL32(220, 60, 46, 70) : IM_COL32(143, 199, 79, 55), 40);
+    d->AddCircle(c, r * 1.12f, col, 40, std::max(2.0f, r * 0.13f));
+  }
+
+  // The controller in use, centred in a box `w` by at most `max_h` from `at`, its lit buttons ringed. Its height
+  // (0 when the picture is missing: the caller draws the line drawing).
+  float PadPicture(ImDrawList* d, ImVec2 at, float w, float max_h, const DeviceLit& lit, bool draw = true) {
+    const std::string name = PadPictureName();
+    const DevicePicture* p = DevicePictureOf(name);
+    if (!p || p->w <= 0 || p->h <= 0) return 0;
+    const float k = std::min(w / p->w, max_h / p->h), pw = p->w * k, ph = p->h * k;
+    if (!draw) return ph;
+    const ImVec2 a(at.x + (w - pw) * 0.5f, at.y), b(a.x + pw, a.y + ph);
+    if (!kit::DrawImageFile(d, DevicePictureFile(name), a, b, true, false, 1600)) return 0;
+    auto ring = [&](const std::string& part, bool chosen) {
+      const auto it = p->parts.find(part);
+      if (it == p->parts.end() || it->second.size() < 3) return;
+      LitRing(d, ImVec2(a.x + it->second[0] * k, a.y + it->second[1] * k), it->second[2] * k, chosen);
+    };
+    for (const std::string& part : lit.pad) ring(part, false);
+    if (!lit.pad_sel.empty()) ring(lit.pad_sel, true);
+    return ph;
+  }
+
+  // The keyboard picture `w` wide from `at`, its lit keys over it; its height (0: missing).
+  float KeyboardPicture(ImDrawList* d, ImVec2 at, float w, const DeviceLit& lit, bool draw = true) {
+    const DevicePicture* p = DevicePictureOf("keyboard");
+    if (!p || p->w <= 0) return 0;
+    const auto grid = p->parts.find("grid");
+    if (grid == p->parts.end() || grid->second.size() < 3) return 0;
+    const float k = w / p->w, h = p->h * k;
+    if (!draw) return h;
+    if (!kit::DrawImageFile(d, DevicePictureFile("keyboard"), at, ImVec2(at.x + w, at.y + h), true, false, 1800)) return 0;
+    const float gx = at.x + grid->second[0] * k, gy = at.y + grid->second[1] * k, u = grid->second[2] * k, gap = u * 0.06f;
+    for (const ArtKey& key : KeyboardKeys()) {
+      if (!*key.id) continue;
+      const bool sel = lit.key_sel == key.id, on = lit.keys.count(key.id) > 0;
+      if (!sel && !on) continue;
+      const ImVec2 k0(gx + key.x * u + gap, gy + key.y * u + gap), k1(gx + (key.x + key.w) * u - gap, gy + (key.y + 1) * u - gap);
+      d->AddRectFilled(k0, k1, sel ? IM_COL32(220, 60, 46, 150) : IM_COL32(143, 199, 79, 120), u * 0.1f);
+      d->AddRect(k0, k1, sel ? IM_COL32(240, 80, 60, 255) : IM_COL32(160, 214, 92, 255), u * 0.1f, 0, std::max(1.5f, u * 0.05f));
+    }
+    return h;
+  }
+
+  // The mouse picture, its body `h` high, the body's top left at `at`; its lit parts over it. False: missing.
+  bool MousePicture(ImDrawList* d, ImVec2 at, float h, const DeviceLit& lit) {
+    const DevicePicture* p = DevicePictureOf("mouse");
+    if (!p) return false;
+    const auto box = p->parts.find("box");
+    if (box == p->parts.end() || box->second.size() < 4) return false;
+    const float k = h / box->second[3];
+    const ImVec2 a(at.x - box->second[0] * k, at.y - box->second[1] * k);
+    if (!kit::DrawImageFile(d, DevicePictureFile("mouse"), a, ImVec2(a.x + p->w * k, a.y + p->h * k), true, false, 800)) return false;
+    // the lit parts as MouseArt places them, see through
+    const float w = box->second[2] * k, r = w * 0.48f, split = at.y + h * 0.42f, mid = at.x + w * 0.5f;
+    auto tint = [&](const char* part) -> ImU32 {
+      if (lit.mouse_sel == part) return IM_COL32(220, 60, 46, 150);
+      if (lit.mouse.count(part)) return IM_COL32(143, 199, 79, 120);
+      return 0;
+    };
+    if (ImU32 c = tint("lmb")) d->AddRectFilled(at, ImVec2(mid, split), c, r, ImDrawFlags_RoundCornersTopLeft);
+    if (ImU32 c = tint("rmb")) d->AddRectFilled(ImVec2(mid, at.y), ImVec2(at.x + w, split), c, r, ImDrawFlags_RoundCornersTopRight);
+    if (ImU32 c = tint("wheel")) d->AddRectFilled(ImVec2(mid - w * 0.08f, at.y + h * 0.11f), ImVec2(mid + w * 0.08f, at.y + h * 0.33f), c, w * 0.08f);
+    if (ImU32 c = tint("m5")) d->AddRectFilled(ImVec2(at.x - w * 0.09f, at.y + h * 0.47f), ImVec2(at.x + w * 0.06f, at.y + h * 0.59f), c, w * 0.03f);
+    if (ImU32 c = tint("m4")) d->AddRectFilled(ImVec2(at.x - w * 0.09f, at.y + h * 0.61f), ImVec2(at.x + w * 0.06f, at.y + h * 0.73f), c, w * 0.03f);
+    if (lit.mouse_all) d->AddRect(ImVec2(at.x - 3, at.y - 3), ImVec2(at.x + w + 3, at.y + h + 3), IM_COL32(160, 214, 92, 255), r, 0, std::max(2.0f, h * 0.012f));
+    return true;
+  }
+
+  // The keyboard above the mouse (the help card), `w` wide; its height.
+  float KeyboardMouseArt(ImDrawList* d, ImVec2 at, float w, const DeviceLit& lit, bool draw = true) {
+    if (const float kh = KeyboardPicture(d, at, w, lit, false); kh > 0) {  // the pictures
+      const float mh = w * 0.34f, gap = w * 0.02f;
+      if (draw) {
+        KeyboardPicture(d, at, w, lit);
+        MousePicture(d, ImVec2(at.x + (w - mh * 0.66f) * 0.5f, at.y + kh + gap), mh, lit);
+      }
+      return kh + gap + mh * 1.08f;
+    }
+    const float u = w / 19.2f, kh = 7.1f * u, mh = std::min(w * 0.42f, 6.2f * u);
+    if (draw) {
+      KeyboardArt(d, ImVec2(at.x + 0.35f * u, at.y + 0.35f * u), u, lit);
+      MouseArt(d, ImVec2(at.x + (w - mh * 0.66f) * 0.5f, at.y + kh + u * 0.6f), mh, lit);
+    }
+    return kh + u * 0.6f + mh;
+  }
+
+  // What the chosen row of a device page lights in its drawing.
+  DeviceLit LitOf(int device, const SettingRow& r) {
+    DeviceLit lit;
+    if (device == 0) {
+      if (!r.slots.empty()) {
+        for (size_t k = 0; k < r.slots.size(); ++k) {
+          const std::string& v = r.slots[k];
+          if (v.empty()) continue;
+          const bool cursor = int(k) == r.slot_cursor || int(k) == r.slot_capture;
+          if (MouseKeyName(v)) {
+            const std::string part = v == "LMB" ? "lmb" : v == "RMB" ? "rmb" : v == "MB4" || v == "Mouse4" ? "m4"
+                                     : v == "MB5" || v == "Mouse5" ? "m5" : "wheel";
+            if (cursor) lit.mouse_sel = part;
+            else lit.mouse.insert(part);
+          } else {
+            for (size_t at = 0; at <= v.size();) {  // "Shift+Up": both keys
+              size_t plus = v.find('+', at);
+              if (plus == std::string::npos) plus = v.size();
+              std::string key = v.substr(at, plus - at);
+              if (key == "Ctrl") key = "Control";
+              if (cursor) lit.key_sel = key;
+              lit.keys.insert(key);
+              at = plus + 1;
+            }
+          }
+        }
+      } else if (r.section == "Mouse" || r.section == "Invert") {
+        lit.mouse_all = true;
+      }
+      return lit;
+    }
+    if (r.section == "Buttons" && !r.options.empty() && r.index >= 0 && r.index < int(std::size(kPadButtonNames))) {
+      std::string id = kPadButtonNames[r.index].first;
+      if (id == "up" || id == "down" || id == "left" || id == "right") id = "dpad";
+      lit.pad_sel = id;
+    } else if (r.section == "Look" || r.section == "Invert") {
+      lit.pad.insert(r.name == "Left stick" ? "ls" : "rs");
+    } else if (r.section == "Aim") {
+      lit.pad.insert("lt");
+    }
+    return lit;
+  }
+
+  // ---- a device's page: its rows (pa..pb), and on the help card (ha..hb) the device drawn under the chosen row's
+  // name, its keys or buttons lit (the help's words under the picture). Settings > Controls and the first start's
+  // Controls step both draw it (TekRantGaming, 16 Nov 2026: the setup's Controls page should look as Settings').
+  void ControlsDevicePage(ImDrawList* d, ImGuiIO& io, const Stage& st, Input in, ImVec2 pa, ImVec2 pb, ImVec2 ha,
+                          ImVec2 hb, int device_page) {
+    const float art_w = hb.x - ha.x - st(36);
+    const float pad_s = art_w / 600.0f * 0.95f;
+    // the controller's picture (PadPicture), or its line drawing when the file is missing
+    const float pad_h = PadPicture(d, ha, art_w, st(220), DeviceLit{}, false);
+    const float art_h = device_page == 0 ? KeyboardMouseArt(d, ha, art_w, DeviceLit{}, false)
+                        : pad_h > 0     ? pad_h
+                                        : 410.0f * pad_s;
+    help_top_ = art_h + st(16);
+    SettingsBody(d, io, st, in, pa, pb, ha, hb);
+    help_top_ = 0;
+    const std::vector<SettingRow> rows = RowsOf(tab_);
+    if (!rows.empty()) {
+      const SettingRow& r = rows[size_t(std::clamp(row_, 0, int(rows.size()) - 1))];
+      ctl_bind_row_ = !r.slots.empty();
+      const DeviceLit lit = LitOf(device_page, r);
+      const ImVec2 at(ha.x + st(18), ha.y + st(40));
+      if (device_page == 0) KeyboardMouseArt(d, at, art_w, lit);
+      else if (pad_h <= 0 || PadPicture(d, at, art_w, st(220), lit) <= 0)
+        PadArt(d, ImVec2(at.x + (art_w - 600 * pad_s) * 0.5f, at.y - 30 * pad_s), pad_s, lit);
+    }
+  }
+
+  // ---- the choice: two cards over the rows' and the help card's place (a..b)
+  void ControlsChoice(ImDrawList* d, ImGuiIO& io, const Stage& st, const Input& in, ImVec2 a, ImVec2 b) {
+    const kit::Fonts& f = kit::GetFonts();
+    if (ctl_fresh_) row_ = KeyboardLast() ? 0 : 1, ctl_fresh_ = false;
+    row_ = std::clamp(row_, 0, 1);
+    if (in.left || in.up) row_ = 0;
+    if (in.right || in.down) row_ = 1;
+    const int last = KeyboardLast() ? 0 : 1;
+    const float gap = st(21), w = (b.x - a.x - gap) * 0.5f;
+    int open = -1;
+    static const char* kKick[2] = {"01 \xC2\xB7 KEYBOARD AND MOUSE", "02 \xC2\xB7 CONTROLLER"};
+    static const char* kName[2] = {"KEYBOARD & MOUSE", "CONTROLLER"};
+    static const std::pair<const char*, const char*> kList[2][4] = {
+        {{"MOUSE", "Sensitivity, aiming, vehicles, hold or toggle aim"},
+         {"INVERT", "On foot, vehicles, planes"},
+         {"BINDINGS", "28 actions \xC2\xB7 two keys, two mouse buttons"},
+         {"BOTH PAGES", "Button prompts, camera turning"}},
+        {{"LOOK", "Sensitivity, response, dead zone, invert"},
+         {"AIM", "Hold or toggle, aim assist and its strength"},
+         {"FEEL", "Vibration, the game's own layouts"},
+         {"BUTTONS", "16 buttons, each to any action"}}};
+    for (int k = 0; k < 2; ++k) {
+      const ImVec2 c0(a.x + float(k) * (w + gap), a.y), c1(c0.x + w, b.y);
+      const bool over = ImGui::IsMouseHoveringRect(c0, c1);
+      if (over && io.MouseDelta.x + io.MouseDelta.y != 0) row_ = k;
+      if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) open = k;
+      const bool sel = row_ == k;
+      kit::PaperArt(d, c0, c1);
+      d->AddRect(c0, c1, kit::kBorder, 0, 0, st(1.3f));
+      kit::Spaced(d, f.typed, st(9), ImVec2(c0.x + st(21), c0.y + st(19)), kit::kInkSection, kKick[k], st(2.2f));
+      if (k == last) {  // the stamp on the device used last
+        const char* t = "LAST USED";
+        const float size = st(15), tw = kit::GameTextWidth(kit::GameFont::kHeadlineMedium, size, t);
+        const ImVec2 s1(c1.x - st(20), c0.y + st(14)), s0(s1.x - tw - st(18), s1.y);
+        const ImVec2 s2(s1.x, s1.y + size + st(14));
+        d->AddRect(s0, s2, kit::kStamp, 0, 0, st(2));
+        kit::GameText(d, kit::GameFont::kHeadlineMedium, size, ImVec2(s0.x + st(9), s0.y + st(7)), kit::kStamp, t);
+      }
+      // the drawing, centred in its band
+      const ImVec2 p0(c0.x + st(22), c0.y + st(44)), p1(c1.x - st(22), c0.y + st(250));
+      DeviceLit none;
+      if (k == 0) {
+        const float kw = (p1.x - p0.x) * 0.80f;
+        if (const float kh = KeyboardPicture(d, p0, kw, none, false); kh > 0) {  // the pictures, the mouse beside
+          const float mh = kh * 0.92f, total = kw + mh * 0.66f * 0.75f;
+          const ImVec2 kat((p0.x + p1.x - total) * 0.5f, (p0.y + p1.y - kh) * 0.5f);
+          KeyboardPicture(d, kat, kw, none);
+          MousePicture(d, ImVec2(kat.x + kw - mh * 0.66f * 0.25f, kat.y + kh * 0.30f), mh, none);
+        } else {
+          const float u = kw / 19.2f, mh = 6.4f * u;
+          const float total = kw + u * 1.2f + mh * 0.66f, x = (p0.x + p1.x - total) * 0.5f, y = (p0.y + p1.y - 7.1f * u) * 0.5f;
+          KeyboardArt(d, ImVec2(x + 0.35f * u, y + 0.35f * u), u, none);
+          MouseArt(d, ImVec2(x + kw + u * 1.2f, y + (7.1f * u - mh) * 0.5f), mh, none);
+        }
+      } else {
+        const float ph = PadPicture(d, p0, p1.x - p0.x, p1.y - p0.y, none, false);
+        if (ph <= 0 || PadPicture(d, ImVec2(p0.x, (p0.y + p1.y - ph) * 0.5f), p1.x - p0.x, p1.y - p0.y, none) <= 0) {
+          const float s = std::min((p1.x - p0.x) / 600.0f, (p1.y - p0.y) / 400.0f) * 0.92f;
+          PadArt(d, ImVec2((p0.x + p1.x) * 0.5f - 300 * s, (p0.y + p1.y) * 0.5f - 200 * s), s, none);
+        }
+      }
+      kit::GameText(d, kit::GameFont::kHeadline, st(30), ImVec2(c0.x + st(20), c0.y + st(266)), kit::kInk, kName[k]);
+      float y = c0.y + st(316);
+      for (const auto& [key, value] : kList[k]) {
+        kit::Spaced(d, f.typed, st(8), ImVec2(c0.x + st(21), y + st(5)), kit::kInkSection, key, st(1.8f));
+        const float vw = kit::TextWidth(f.ui_bold, st(12), value);
+        d->AddText(f.ui_bold, st(12), ImVec2(c1.x - st(21) - vw, y), kit::kInk, value);
+        d->AddLine(ImVec2(c0.x + st(21), y + st(24)), ImVec2(c1.x - st(21), y + st(24)), kit::kRule, 1.0f);
+        y += st(30);
+      }
+      // the band at the foot: OPEN, green with the red tab on the chosen card
+      const ImVec2 o0(c0.x, c1.y - st(41)), o1 = c1;
+      d->AddRectFilled(o0, o1, sel ? kit::kGreen : kit::kPaperDim);
+      if (sel) d->AddRectFilled(o0, ImVec2(o0.x + st(5), o1.y), kit::kStamp);
+      float x = o0.x + st(21);
+      if (sel) x += kit::Glyph(d, PromptStyle(), kit::Button::kA, KeyFor(kit::Button::kA), ImVec2(x, (o0.y + o1.y) * 0.5f), st(21)) + st(9);
+      kit::Spaced(d, f.ui_bold, st(13.5f), ImVec2(x, o0.y + (st(41) - st(13.5f) * 1.45f) * 0.5f), sel ? kit::kCream : kit::kInkFaint,
+                  "OPEN", st(2));
+      if (k == last) {
+        const float tw = kit::SpacedWidth(f.typed, st(8), "LAST USED", st(1.8f));
+        kit::Spaced(d, f.typed, st(8), ImVec2(o1.x - st(21) - tw, o0.y + st(16)), sel ? kit::kCream : kit::kInkSection, "LAST USED", st(1.8f));
+      }
+      if (sel) d->AddRect(c0, c1, kit::kGreen, 0, 0, st(3));
+    }
+    if (open < 0 && in.accept) open = row_;
+    if (open >= 0) {
+      REXLOG_INFO("BF settings: CONTROLS / {} opened", open == 0 ? "keyboard and mouse" : "controller");
+      ctl_device_ = open, row_ = 0, scroll_ = 0, slot_cursor_ = 0;
+    }
+  }
+
+  // The rail's card under the categories while Controls is open: the two devices, the one used last marked.
+  void ControlsDevicesCard(ImDrawList* d, const Stage& st, ImVec2 ra, ImVec2 rb, float py) {
+    const kit::Fonts& f = kit::GetFonts();
+    kit::Spaced(d, f.typed, st(9.5f), ImVec2(ra.x + st(20), py), kit::kKhakiDim, "YOUR DEVICES", st(2));
+    const bool keyboard = KeyboardLast();
+    auto device_row = [&](float yy, const char* name, bool last, bool open) {
+      d->AddText(f.ui, st(11.5f), ImVec2(ra.x + st(20), yy), open ? kit::kCream : kit::kKhakiText, name);
+      if (last) {
+        const float tw = kit::SpacedWidth(f.typed, st(8), "LAST USED", st(1.6f));
+        kit::Spaced(d, f.typed, st(8), ImVec2(rb.x - st(20) - tw, yy + st(3)), kit::kGreenBright, "LAST USED", st(1.6f));
+      }
+      d->AddRectFilled(ImVec2(ra.x + st(20), yy + st(21)), ImVec2(rb.x - st(20), yy + st(22)), IM_COL32(241, 234, 211, 20));
+    };
+    device_row(py + st(18), "Keyboard and mouse", keyboard, ctl_device_ == 0);
+    device_row(py + st(45), "Controller", !keyboard, ctl_device_ == 1);
+  }

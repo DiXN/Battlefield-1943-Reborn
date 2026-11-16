@@ -1,16 +1,19 @@
 // The first start in the new look, Version A1 (TekRantGaming, 12 Nov 2026, 18:30: "fundamentally change the
 // onboarding and setup process ... a page that lets them know that voice chat is used in game ... open mic ... the
 // default ... push to talk with the keybind customizable ... both teams can hear each other ... directional audio ...
-// an advisory, saying that this is an early playtest"). Nine steps: 1 game files, 2 soldier name (their pages as
+// an advisory, saying that this is an early playtest"). Eight steps: 1 game files, 2 soldier name (their pages as
 // they were, game_menu_launcher.inc), then in this file's frame (the steps in a rail at the left, the page on paper at
 // the right): 3 Display, 4 Graphics, 5 Controls (the settings rows, game_menu_settings.inc), 6 button prompts, 7 voice
-// chat, 8 shaders (ShadersPage, game_menu_launcher.inc: the game starts behind it with the settings just chosen and
-// its pipelines are made, so no join ever shows a shader page; TekRantGaming, 13 Nov 2026), 9 ready. Until v0.4.0
+// chat, 8 ready. The shaders are no step of it since v0.4.7 (TekRantGaming, 16 Nov 2026: "the initial setup screen
+// when you give the game files right after it you should be in the full screen shader comp screen ... the actual
+// onboaring section when you go through settings should no longer include the shader part"): the full screen shader
+// page comes right after the game files (ShadersPage, game_menu_launcher.inc), then step 2. From v0.4.1 to v0.4.6
+// they were step 8, before Ready. Until v0.4.0
 // the shaders were step 2 in name only (made at the first join) and a Modern and Classic page stood before Ready:
 // Modern is gone ("we are dropping support for modern and going full in on classic being the default"). Included
 // inside GameMenu (game_menu.cpp) after game_menu_settings.inc.
 
-  static constexpr int kSetupSteps = 9;
+  static constexpr int kSetupSteps = 8;
   struct SetupStepRow {
     const char* name;
     const char* sub;
@@ -19,10 +22,9 @@
       {"GAME FILES", "YOUR COPY OF THE GAME"},    {"SOLDIER NAME", "WHAT PLAYERS SEE"},
       {"DISPLAY", "WINDOW, RESOLUTION, FRAME RATE"}, {"GRAPHICS", "PRESET, UPSCALING, LIGHTING"},
       {"CONTROLS", "MOUSE, KEYBOARD, CONTROLLER"}, {"BUTTON PROMPTS", "XBOX, PLAYSTATION, KEYBOARD"},
-      {"VOICE CHAT", "OPEN MIC OR PUSH TO TALK"}, {"SHADERS", "PREPARED ONCE, NOW"},
-      {"READY", "THE PLAYTEST, THEN PLAY"}};
+      {"VOICE CHAT", "OPEN MIC OR PUSH TO TALK"}, {"READY", "THE PLAYTEST, THEN PLAY"}};
   static constexpr const char* kSetupNext[kSetupSteps] = {"SOLDIER NAME", "DISPLAY", "GRAPHICS", "CONTROLS", "BUTTON PROMPTS",
-                                                          "VOICE CHAT", "SHADERS", "READY", ""};
+                                                          "VOICE CHAT", "READY", ""};
   int voice_choice_ = -1;  // 8: 0 open mic (the recommended one), 1 push to talk; -1 not looked at yet
 
   struct SetupPanel {
@@ -127,36 +129,66 @@
         "The picture's quality. A preset sets every row at once: move over them with left and right, and A uses the "
         "one you are on. Medium suits a GTX 1060 or an RX 580 at 1080p, High an RTX 2060 and up. Auto detect chooses "
         "one for your graphics card.",
-        "The mouse, the keyboard and the controller. Keyboard and mouse play works beside a controller; the keys are "
-        "under Keyboard bindings."};
+        "Pick what you play with: keyboard and mouse, or a controller. Each opens its own page with only its settings "
+        "and bindings, as in Settings, Controls. Both work at once in the game."};
     NotePage(setup_tab_ == 0 ? "setup display" : setup_tab_ == 1 ? "setup graphics" : "setup controls");
     const Stage st = StageOf(io);
     tab_ = setup_tab_ == 0 ? kTabDisplay : setup_tab_ == 1 ? kTabGraphics : kTabControls;
     CaptureKeyInto(in);
+    // Controls as Settings has it since 16 Nov 2026 (TekRantGaming: "our controls page is not the same as our new
+    // controls page in the settings, can we make them look the same"): the choice of two cards, then one device's
+    // page with the device drawn on the help card (game_menu_controls.inc). B on a device's page goes to the choice.
+    const bool controls = tab_ == kTabControls && sub_ == kSubNone;
+    if (!controls) ctl_device_ = -1, ctl_fresh_ = true;
+    const bool choice = controls && ctl_device_ < 0;
+    const int device_page = controls ? ctl_device_ : -1;
+    struct ButtonsFlag {
+      bool& flag;
+      ~ButtonsFlag() { flag = false; }
+    } buttons_flag{controls_buttons_};
+    controls_buttons_ = controls;
     const int step = 3 + setup_tab_;
     const SetupPanel p = SetupFrame(d, io, st, step);
     const bool custom = tab_ == kTabGraphics && sub_ == kSubNone && CurrentGraphicsPreset() < 0 &&
                         !settings_.Get("graphics_preset", "").empty();
-    std::vector<Cue> cues = {{kit::Button::kA, tab_ == kTabGraphics && on_preset_strip_ ? "USE THIS PRESET" : "CHANGE"},
+    std::vector<Cue> cues = {{kit::Button::kA, choice                                    ? "OPEN"
+                                               : device_page >= 0 && ctl_bind_row_         ? "BIND"
+                                               : tab_ == kTabGraphics && on_preset_strip_ ? "USE THIS PRESET"
+                                                                                          : "CHANGE"},
                              {kit::Button::kRB, "NEXT PAGE"},
                              {kit::Button::kStart, "AUTO DETECT", "P"}};
     if (custom) cues.push_back({kit::Button::kX, "BACK TO " + Upper(settings_.Get("graphics_preset", ""))});
     cues.push_back({kit::Button::kY, "SKIP THE SETTINGS"});
-    cues.push_back({kit::Button::kB, "BACK"});
+    cues.push_back({kit::Button::kB, device_page >= 0 ? "BACK TO THE CHOICE" : "BACK"});
     Prompts(d, st, st.P(48, 662), cues, in, 15);
-    const float y = SetupTitle(d, st, p, step, kNames[setup_tab_], kAbout[setup_tab_]);
-    const ImVec2 pa(p.a.x + st(16), y), pb(p.b.x - st(16) - st(226), p.b.y - st(16));
+    static const char* kDevice[2] = {"KEYBOARD & MOUSE", "CONTROLLER"};  // as Settings titles them (no dot: the
+                                                                          // headline font has none)
+    const float y = SetupTitle(d, st, p, step, device_page >= 0 ? kDevice[device_page] : kNames[setup_tab_],
+                               kAbout[setup_tab_]);
+    // A device's page has the wider help card Settings has, for the device's picture.
+    const float help_w = controls ? st(304) : st(226);
+    const ImVec2 pa(p.a.x + st(16), y), pb(p.b.x - st(16) - help_w, p.b.y - st(16));
     const ImVec2 ha(pb.x + st(12), y), hb(p.b.x - st(16), p.b.y - st(16));
+    auto body = [&](Input body_in) {
+      if (choice) ControlsChoice(d, io, st, body_in, pa, hb);
+      else if (device_page >= 0) ControlsDevicePage(d, io, st, body_in, pa, pb, ha, hb, device_page);
+      else SettingsBody(d, io, st, body_in, pa, pb, ha, hb);
+    };
     if (skip_popup_) {
       Input none;
-      SettingsBody(d, io, st, none, pa, pb, ha, hb);
+      body(none);
       SkipQuestion(d, io, st, in);
       return;
     }
     Input list_in = in;
     list_in.back = list_in.next_tab = list_in.prev_tab = list_in.start = list_in.y = list_in.x = false;
-    SettingsBody(d, io, st, list_in, pa, pb, ha, hb);
+    body(list_in);
     if (in.x) PresetBack();
+    if (in.back && device_page >= 0 && capture_.empty()) {  // a device's page: back to the choice, its card chosen
+      REXLOG_INFO("BF launcher: setup controls / back to the choice");
+      row_ = device_page, ctl_device_ = -1, scroll_ = 0;
+      return;
+    }
     if (in.back && SubPageBack()) return;
     SetupKeys(in);
   }
@@ -300,18 +332,18 @@
     if (in.back && capture_.empty()) SetupBack();
   }
 
-  // ---- 9: ready (the playtest's advisory, the communities, then the main menu)
+  // ---- 8: ready (the playtest's advisory, the communities, then the main menu)
   void ReadyPage(ImDrawList* d, ImGuiIO& io, Input in) {
     NotePage("setup ready");
     const Stage st = StageOf(io);
     const kit::Fonts& f = kit::GetFonts();
-    const SetupPanel p = SetupFrame(d, io, st, 9);
+    const SetupPanel p = SetupFrame(d, io, st, 8);
     const bool restart = RestartPending();
     Prompts(d, st, st.P(48, 662),
             {{kit::Button::kA, restart ? "FINISH AND RESTART" : "INTO THE MAIN MENU", "", true}, {kit::Button::kX, "JOIN OUR DISCORD"},
              {kit::Button::kY, steam_added_ ? "ADDED TO STEAM" : "ADD TO STEAM"}, {kit::Button::kB, "BACK"}},
             in, 15);
-    float y = SetupTitle(d, st, p, 9, "THANK YOU, " + Upper(settings_.Get("player_name", "SOLDIER")),
+    float y = SetupTitle(d, st, p, 8, "THANK YOU, " + Upper(settings_.Get("player_name", "SOLDIER")),
                          "You are in an early playtest of Battlefield 1943 Reborn. The menus you see are a placeholder; the game "
                          "behind them is what we are testing. What helps us most right now: how stable the servers and the game "
                          "are for you, and every bug you find. New content comes once that is solid.");
