@@ -71,6 +71,8 @@ struct MapPlayer {
   bool spotted = false;  // an enemy the game's minimap shows (or showed a moment ago)
 };
 std::vector<MapPlayer> MapPlayers();  // as last read (a few times a second); none outside a match
+// Every player of the match on a team, the local one too, as last read (0 outside a match): Discord's player count.
+int MatchPlayerCount();
 // From the pad hook (auto_join.cpp), at the game's pad reads, ten times a second at most.
 void MapPlayersTick(const uint8_t* base, bool level_loaded);
 
