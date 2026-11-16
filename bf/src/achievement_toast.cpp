@@ -29,6 +29,7 @@ REXCVAR_DEFINE_DOUBLE(bf_achievement_volume, 80.0, "BF1943/Audio", "How loud the
 
 namespace bf1943 {
 namespace fs = std::filesystem;
+bool ShaderScreenShowing();  // game_menu.cpp: the shader page is up (nothing is drawn over it)
 namespace {
 
 // One popup's timeline, in seconds: in from the right, held, out to the right.
@@ -287,6 +288,9 @@ void AchievementToast::OnDraw(ImGuiIO& io) {
   {
     std::lock_guard lock(mutex_);
     if (queue_.empty()) return;
+    // Not over the shader page (TekRantGaming, 16 Nov 2026: the only screen visible until it is finished): one
+    // unlocked meanwhile (the game signs in behind it after an update) waits, its chime too, and shows after it.
+    if (queue_.front().started < 0 && ShaderScreenShowing()) return;
     if (queue_.front().started < 0) {
       queue_.front().started = now;
       PlayAchievementSound();

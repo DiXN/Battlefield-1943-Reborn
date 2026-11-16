@@ -791,6 +791,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
   bool open() const { return open_; }
   // For the graphics panel (f8_panel.cpp): the launcher's own pages are up; the settings file.
   bool ShowingLauncher() const { return open_ && LauncherPage(page_); }
+  // The shader page is up: nothing else is drawn over it (achievement_toast.cpp waits).
+  bool ShowingShaders() const { return open_ && page_ == Page::kShaders; }
   // No input on the launcher's pages for `seconds` (the frame limiter then draws them at bf_menu_idle_fps).
   static int64_t SteadyMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
@@ -6057,6 +6059,7 @@ void GraphicsPanelPad(uint16_t buttons);  // f8_panel.cpp
 // Our menus or the graphics panel (F8) have the controller and the mouse.
 bool GameMenuOpen() { return (g_menu && g_menu->open()) || GraphicsPanelOpen(); }
 bool LauncherShowing() { return g_menu && g_menu->ShowingLauncher(); }
+bool ShaderScreenShowing() { return g_menu && g_menu->ShowingShaders(); }
 bool LauncherKeyboardLast() { return g_menu && g_menu->KeyboardLast(); }
 // look.cpp (the vehicle mouse's stick): the game's own Vertical look is Inverted (GstInput Scheme2FlipY).
 bool GameVerticalLookInverted() { return g_menu && g_menu->GameFlipY(); }
