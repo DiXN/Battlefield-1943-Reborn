@@ -1162,7 +1162,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
   static uint16_t last_real = 0;
 #if defined(BF_DEV_TOOLS)
   // BF_REAL_PAD=<s>:<button>[/<hold s>],... (tests): buttons on the real pad's state, from the process start, as if
-  // pressed on the controller (a, b, x, y, start, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
+  // pressed on the controller (a, b, x, y, start, back, up, down), before anything of ours reads it. BF_REAL_PAD_FROM=seated: from the
   // moment the soldier first sits in a vehicle instead (BF_SEEK_VEHICLE gets it there), and from then on each time it
   // gets in or out of one is logged.
   if (connected) {
@@ -1180,6 +1180,7 @@ extern "C" REX_FUNC(__imp__XamInputGetState) {
         it.button = !std::strncmp(c, "start", 5) ? 0x0010
                     : !std::strncmp(c, "up", 2)   ? 0x0001
                     : !std::strncmp(c, "down", 4) ? 0x0002
+                    : !std::strncmp(c, "back", 4) ? 0x0020  // held: the game's scoreboard in a match
                     : *c == 'b'                   ? 0x2000
                     : *c == 'x'                   ? 0x4000  // the end of round screen's next info screen
                     : *c == 'y'                   ? 0x8000

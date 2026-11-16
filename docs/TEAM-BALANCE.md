@@ -45,6 +45,13 @@ flag (the level's HUD makes its names again; the count of swaps starts again at 
 LOSE pair is written to the victory view's outcomeText, which the end of round menu covers in the same frame (X only
 moves between the scoreboard and the top players screen), so it is not seen; it is kept right all the same.
 
+## Checked after a move (16 Nov 2026, runs sc_move1 and sc_move2, two players)
+
+The moved player keeps their score: -10 before the move stayed -10 after it, and was -20 after a death on the new
+team. The scoreboard held during play (Back on a controller; BF_MATCH_SCRIPT back/4) shows the moved player in the
+new team's column on both players' screens. The end of round screen shows them on the new team's side, with that
+score, on both screens ("your team lost" for the moved player, "won" for the other).
+
 ## server.json (each server)
 
 | key | default | range |
