@@ -1015,9 +1015,10 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       // Our menus play the original menus' sounds (MenuSounds): BF's own copies, from the presses we send its hidden
       // menus, are kept quiet meanwhile. BF's own screens that have the real pad (passing_) play their own.
       bf1943::SetMenuOwnsUiSound(open_);
-      // (Quiet while the news' video plays with its sound, game_menu_news.inc.)
+      // Quiet while the news' video plays with its sound (game_menu_news.inc); back once it ends or pauses, or the
+      // window closes (TekRantGaming, 16 Nov 2026).
       const bool want = our_menus && (Cvar("bf_menu_music") != "false" || dev_music) &&
-                        !(news_open_ && !news_muted_ && news::VideoShowing());
+                        !(news_open_ && !news_muted_ && news::VideoPlaying());
       PlayMenuMusic(UserDir() / "cache" / "extracted" / "music" / "menu.wav", want);
     }
     NotePresence();  // Discord Rich Presence, the menu open or not
@@ -3392,7 +3393,6 @@ class GameMenu final : public rex::ui::ImGuiDialog {
         // Settings > Controls: one device's page (game_menu_controls.inc); the first start's step keeps them all.
         if (sub_ == kSubNone && page_ == Page::kSettings && ctl_device_ >= 0) return DeviceControlsRows(ctl_device_);
         return sub_ == kSubRemap ? RemapRows() : sub_ == kSubKeys ? KeyRows() : ControlsRows();
-
       case kTabEnhancements: return EnhancementsRows();
       default: return GameplayRows();
     }
