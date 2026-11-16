@@ -34,6 +34,25 @@ servers.bat** ends everything. **Start servers (no window).bat** starts them wit
 starts its servers by itself. The page answers only on the PC itself, unless you set a password for it and allow
 other machines.
 
+## Time of day and weather
+
+Each server keeps its own clock and weather, and every player on it sees the same. In a server's settings:
+
+- **Day and night**: the light, the shadows and the sky follow the server's clock. Off, it is the game's own afternoon.
+- **Time of day at the start**, and **A day lasts** (minutes for a whole day and night; 0 keeps the time still).
+- **Cloud cover**, **Cloud change rate** (how fast clouds form and dissolve) and **Weather** (0 fair to 100 a storm:
+  more and denser cloud; from about half, mist and far rain shafts; a little higher, rain; from about two thirds,
+  lightning in the clouds).
+- **Distance fog** (a haze that hides what is far; at 100 the sight is about a kilometre) and **Ground fog** (a low
+  layer over the sea and the shore). Both show with either sky.
+- **Wind** (0 calm to 100 a gale): how far the rain leans.
+- **Cloud height** (200 to 1500 metres over the sea): where the clouds begin. Low, the planes fly through them and
+  can hide in them.
+- **Admin player IDs**: players who may change all of the above while the server runs, with **F9** in the game. A
+  player who presses F9 in a match without the right is shown their ID to send you.
+
+A match hosted from the game (Custom match) has the same settings under **Weather and time**, and its host is its admin.
+
 ## Updates
 
 Players' games are always on the newest release (the main backend lets no older one in), so keep your servers on it

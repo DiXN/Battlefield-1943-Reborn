@@ -110,7 +110,7 @@ class Grass {
   };
   bool LoadPlants(Diligent::IRenderDevice* device);
   Pass* DrawPass(Diligent::TEXTURE_FORMAT color, Diligent::TEXTURE_FORMAT depth, uint8_t depth_func, bool depth_clip,
-                 bool depth_write);
+                 bool depth_write, uint32_t samples);
   void WriteConstants(Diligent::IDeviceContext* context, const void* constants, size_t size);
   void TimerBegin(Diligent::IDeviceContext* context);
   void TimerEnd(Diligent::IDeviceContext* context);
