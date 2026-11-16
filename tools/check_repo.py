@@ -18,7 +18,7 @@ def main():
     bad = []
     for name in filter(None, out.decode('utf-8').split('\0')):
         lower = name.lower()
-        # The launcher's button glyphs: CC0 prompt pictures (Xelu's and Kenney's, bf/glyphs/LICENSE.txt), never the
+        # The launcher's button glyphs: CC0 prompt pictures (Kenney's Input Prompts, bf/glyphs/LICENSE.txt), never the
         # game's; the only pictures allowed.
         if lower.startswith('bf/glyphs/') and lower.endswith('.png'):
             pass

@@ -1,7 +1,7 @@
 // The launcher's look, Version 1 "Field Report" (TekRantGaming's pick, 8 Nov 2026; the mockups on the canvas
 // NuRomvsn2iGAKwH3kQ13eH): an olive backdrop with a map grid, field report paper with tape, stencil headings, typed
 // captions, black tape strips for the button prompts and the red EARLY PLAYTEST stamp. And the button glyphs: King
-// Kong's per button pictures (Xelu's and Kenney's CC0 prompts, bf/glyphs), drawn from ImGui's font atlas, so a prompt
+// Kong's per button pictures (Kenney's CC0 Input Prompts, bf/glyphs), drawn from ImGui's font atlas, so a prompt
 // costs nothing per frame; the Xbox 360's are drawn as the game draws its own (coloured discs).
 //
 // Sizes are the mockups' pixels at 720 lines: every function takes `u`, the display's height / 720.

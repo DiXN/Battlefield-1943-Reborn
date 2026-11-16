@@ -10,7 +10,7 @@
 // get their letters here (capture_points.cpp: lettered copies drawn into its empty side), whatever the prompt style.
 // King Kong found its sheet by scanning guest memory (its freezes, issue 11). Here nothing is scanned: NativeXRenderer
 // hands each k_8_8_8_8 texture it loads (D142); one of those sizes is hashed, and a known atlas gets the chosen
-// style's pictures (bf/glyphs, Xelu's and Kenney's CC0 prompts) drawn over its Xbox 360 ones. The Xbox 360 style
+// style's pictures (bf/glyphs, Kenney's CC0 Input Prompts) drawn over its Xbox 360 ones. The Xbox 360 style
 // leaves them as they are.
 // The keyboard style names the key that presses each button where the player is (GitHub issue 1: in a landing boat
 // "THROTTLE TO RELEASE BOAT" showed the mouse, the zoom key on foot, while W throttles there): of the controller
@@ -175,18 +175,21 @@ bool Choose(const std::string& set, const std::string& button, bool seated, Choi
     }
     return Choose("xbox_series", button, seated, out);
   }
-  std::string name = button;
+  std::string name = button, general;
   int turns = 0;
   if (button.rfind("dpad_", 0) == 0) {
     name = "dpad_up";
     turns = button == "dpad_right" ? 1 : button == "dpad_down" ? 2 : button == "dpad_left" ? 3 : 0;
   } else if (button == "ls" || button == "rs") {
-    name = "stick";
+    // The right stick's own picture and each move's direction where the set has them (Kenney's Input Prompts,
+    // TekRantGaming 16 Nov 2026), else the one picture for both sticks.
+    name = button == "rs" ? "stick_r" : "stick", general = "stick";
   } else if (button == "ls_click" || button == "rs_click") {
-    name = "stick_click";
+    name = button == "rs_click" ? "stick_r_click" : "stick_click", general = "stick_click";
   } else if (button == "ls_lr" || button == "ls_ud" || button == "rs_lr" || button == "rs_ud") {
-    name = "stick_move";
+    name = std::string(button[0] == 'r' ? "stick_r_" : "stick_") + button.substr(3), general = "stick_move";
   }
+  if (!general.empty() && !Load(set, name)) name = general;
   if (Load(set, name)) {
     out = {set, name, turns};
     return true;

@@ -111,7 +111,7 @@ function New-Bin([string]$dest, [switch]$Shaders, [switch]$Flat) {
     # state; no shader code), read at the first start (bf\src\shader_prep.cpp). Missing from every package up to
     # 0.1.5, so players' first sessions built all pipelines during play. Not for a server (it draws nothing).
     if ($Shaders) {
-        # The launcher's button glyphs (Xelu's and Kenney's CC0 prompts, glyphs\LICENSE.txt): the player's only.
+        # The launcher's button glyphs (Kenney's CC0 Input Prompts, glyphs\LICENSE.txt): the player's only.
         Copy-Item (Join-Path $build "glyphs") (Join-Path $bin "glyphs") -Recurse
         # The news window's YouTube player (bf\src\news_video.cpp, docs\NEWS.md): Microsoft's WebView2 loader, signed by
         # Microsoft (no submission of ours needed). The player's only.
