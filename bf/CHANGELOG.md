@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.7.1 (17 November 2026): a hotfix
+
+- **Promoted community servers.** When you join a community server we've promoted to the Reborn list, you now see
+  whose server it is, where to report problems, and the server's own description. Tick "Don't show this again" to skip
+  it next time.
+- **Fewer server crashes.** Fixed two crashes that could take a whole server down mid match.
+
 ## 0.4.7 (16 November 2026): the biggest Reborn update yet
 
 Stats, leaderboards and achievements, clan tags, protected names, fairer teams, a news window and a lot of performance
