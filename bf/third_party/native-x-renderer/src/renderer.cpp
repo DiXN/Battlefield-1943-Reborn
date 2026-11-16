@@ -1680,18 +1680,21 @@ bool FillableTarget(const HostTarget& target) {
 // Clears a color target's rectangle (guest pixels, within it): the whole target through DiligentCore, a part of it
 // filled by the blitter (D80).
 void ClearColorRect(HostTarget* target, Blitter::Rect r, const float color[4]) {
-  auto* context = g_device->context();
   if (ClipToTarget(*target, r)) {
-    context->SetRenderTargets(1, &target->view, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    context->ClearRenderTarget(target->view, color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    if (target->msaa_view) {  // host MSAA: the twin too, and both are then alike
-      context->SetRenderTargets(1, &target->msaa_view, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      context->ClearRenderTarget(target->msaa_view, color, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      target->msaa_stale = target->single_stale = target->msaa_delta = false;
-    }
+    g_device->recorder().Do([view = target->view, msaa = target->msaa_view,
+                             c = std::array<float, 4>{color[0], color[1], color[2], color[3]}](
+                                IDeviceContext* context) mutable {
+      context->SetRenderTargets(1, &view, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->ClearRenderTarget(view, c.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      if (msaa) {  // host MSAA: the twin too, and both are then alike
+        context->SetRenderTargets(1, &msaa, nullptr, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        context->ClearRenderTarget(msaa, c.data(), RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      }
+    });
+    if (target->msaa_view) target->msaa_stale = target->single_stale = target->msaa_delta = false;
   } else if (r.width && r.height && FillableTarget(*target)) {
-    g_blit.FillColor(context, target->view, HostRect(target->scale, r), color);
-    if (target->msaa_view) g_blit.FillColor(context, target->msaa_view, HostRect(target->scale, r), color);
+    g_blit.FillColor(g_device->context(), target->view, HostRect(target->scale, r), color);
+    if (target->msaa_view) g_blit.FillColor(g_device->context(), target->msaa_view, HostRect(target->scale, r), color);
   }
   target->written = ++g_target_writes;
   if (g_draw) g_draw->TargetsChanged();
@@ -1699,22 +1702,23 @@ void ClearColorRect(HostTarget* target, Blitter::Rect r, const float color[4]) {
 
 // The same for a depth-stencil target's depth and/or stencil.
 void ClearDepthStencilRect(HostTarget* target, Blitter::Rect r, bool depth, float z, bool stencil, uint8_t s) {
-  auto* context = g_device->context();
   if (ClipToTarget(*target, r)) {
     CLEAR_DEPTH_STENCIL_FLAGS clear_flags = CLEAR_DEPTH_FLAG_NONE;
     if (depth) clear_flags |= CLEAR_DEPTH_FLAG;
     if (stencil) clear_flags |= CLEAR_STENCIL_FLAG;
-    context->SetRenderTargets(0, nullptr, target->view, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    context->ClearDepthStencil(target->view, clear_flags, z, s, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-    if (target->msaa_view) {  // host MSAA: the twin too; alike once the depth is cleared (the stencil is not carried)
-      context->SetRenderTargets(0, nullptr, target->msaa_view, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      context->ClearDepthStencil(target->msaa_view, clear_flags, z, s, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
-      if (depth) target->msaa_stale = target->single_stale = false;
-    }
+    g_device->recorder().Do([view = target->view, msaa = target->msaa_view, clear_flags, z, s](IDeviceContext* context) {
+      context->SetRenderTargets(0, nullptr, view, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      context->ClearDepthStencil(view, clear_flags, z, s, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      if (msaa) {  // host MSAA: the twin too; alike once the depth is cleared (the stencil is not carried)
+        context->SetRenderTargets(0, nullptr, msaa, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+        context->ClearDepthStencil(msaa, clear_flags, z, s, RESOURCE_STATE_TRANSITION_MODE_TRANSITION);
+      }
+    });
+    if (target->msaa_view && depth) target->msaa_stale = target->single_stale = false;
   } else if (r.width && r.height && FillableTarget(*target)) {
-    g_blit.FillDepthStencil(context, target->view, HostRect(target->scale, r), depth, z, stencil, s);
+    g_blit.FillDepthStencil(g_device->context(), target->view, HostRect(target->scale, r), depth, z, stencil, s);
     if (target->msaa_view)
-      g_blit.FillDepthStencil(context, target->msaa_view, HostRect(target->scale, r), depth, z, stencil, s);
+      g_blit.FillDepthStencil(g_device->context(), target->msaa_view, HostRect(target->scale, r), depth, z, stencil, s);
   }
   target->written = ++g_target_writes;
   if (g_draw) g_draw->TargetsChanged();
