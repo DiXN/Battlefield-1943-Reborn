@@ -341,9 +341,17 @@ WATCHLIST_GENERIC = ['TRG', 'T.R.G.', 'T R G', 'TRGaming', 'TRG Gaming', 'TR Gam
 # Lookalikes the watchlist does not hold, and ordinary names that must stay free.
 LOOKALIKES = {'TekRantGaming': ['xXTekRantGamingXx', 'T3kR4ntG4m1ng', 'TEKRANTGAMING', 'MyTekRankGamingFan',
                                 'TekRantGamingFan', 'Tek_R_G', 'TekRanGaming', 'tekrantgaminggg', 'TheRealTekRant'],
-              'ZALIAS': ['xXZaliusXx', 'ThatZaliaSGuy', 'Z_alias_TV', 'zalias', 'ZaliosTV', 'Za11as', 'The_Zalias_99']}
+              'ZALIAS': ['xXZaliusXx', 'ThatZaliaSGuy', 'Z_alias_TV', 'zalias', 'ZaliosTV', 'Za11as', 'The_Zalias_99',
+                         # ThatZaliaSGuy's (its variation list's kinds: casing, separators, lookalikes, a slip in each
+                         # part, two words)
+                         'thatzaliaguy', 'That_Zalia_Guy', 'Th4tZ4l1aSGuy', 'ThatZalisGai', 'DatZaleasGuy',
+                         'ThatSaliasGuy', 'ThatXaliaSGuy', 'ThaZaliaSGuy', 'ThatZaliaSGuyy', 'ThatZaliaSUgy',
+                         'ZaliaGai', 'TZalia', 'ThatZalia', 'ZaliaSGuy', 'TheZaliaDude', 'ThatZaliaSGuy69']}
 ORDINARY = ['Gamer123', 'Alias', 'Zalia', 'Zaid', 'Zeus', 'Elias', 'Salias', 'Tekken', 'TekTonic', 'TechGamer',
-            'RantMaster', 'Ranger', 'TankGaming', 'Kestrel_7', 'Soldier', 'TekRanger', 'Zaliyah']
+            'RantMaster', 'Ranger', 'TankGaming', 'Kestrel_7', 'Soldier', 'TekRanger', 'Zaliyah',
+            # near ThatZaliaSGuy, and its generic short forms
+            'ThatGuy', 'ThatTallGuy', 'ThatSaladGuy', 'ThatJuliaGuy', 'ThatTaliaGuy', 'ThatDaliaGuy', 'ThatAsianGuy',
+            'ThatSalsaGuy', 'ZaidGuy', 'ZainGuy', 'ZaraGuy', 'TheSaladMan', 'TZG', 'ZGuy', 'ThatZGuy']
 TEAM_TEST_OWNERS = []  # two test owners (codes of their own, never the real ones) in place of TEAM_OWNERS' keys
 
 
@@ -450,6 +458,11 @@ async def team_checks(port):
     report(bad, 'ZALIAS protects Zalias2 with the same code', r.get('ok') is True and r.get('name') == 'Zalias2', r)
     r = await zal.name('ZALIAS')
     report(bad, '... and plays as ZALIAS again', r.get('name') == 'ZALIAS' and r.get('protected') is True, r)
+    r = await zal.name('ThatZaliaSGuy')
+    report(bad, '... and as ThatZaliaSGuy with the same code', r.get('name') == 'ThatZaliaSGuy' and
+           r.get('protected') is True, r)
+    r = await other.name('ThatZaliaSGuy', signed=False)
+    report(bad, 'ThatZaliaSGuy is refused to others', r.get('name') != 'ThatZaliaSGuy' and r.get('team_name') is True, r)
     r = await other.name('Zalias2', signed=False)
     report(bad, 'Zalias2 stays refused to others after the owner moved off it', r.get('name') != 'Zalias2' and
            r.get('team_name') is True, r)

@@ -79,8 +79,12 @@ VERIFIED_FOR = 12 * 3600  # a sign in holds the name for the game's FESL login f
 # log in under one (they get Soldier with a number), stats for them come only signed by the owner, they never expire
 # (account_active), and the owner plays under any of them with the same code (signed_name, claim). Lookalikes: any case,
 # underscores, leetspeak (0 o, 1 i, l i, 3 e, 4 a, @ a, 5 s, 7 t, 2 z), doubled letters, anything before or after a
-# "contains" stem, and up to "typos" edits of a stem once prefixes and suffixes (xX, The, Real, Its, digits, TV...) are
-# off. TekRantGaming's watchlist of variations is in "names", each entry with spaces,
+# "contains" stem, up to "typos" edits of a stem once prefixes and suffixes (xX, The, Real, Its, digits, TV...) are
+# off, and "parts": a name made of a "before" word (or none), a "middle" word and an "after" word, with a slip in each
+# (one edit each, two in all; with no "before" the middle exactly as written; the middle starting with the middle
+# word's letter, or for a Z its lookalike S or its neighbour X; no letter of the middle taken as an "after" word's
+# extra first letter), so
+# ThatZalisGai, ThatSaliasGuy and ZaliaGai are ZALIAS's while ThatTallGuy, ThatSaladGuy and ZaidGuy are not. TekRantGaming's watchlist of variations is in "names", each entry with spaces,
 # dots and hyphens left out (names are 3 to 15 letters, digits and underscores). --team-names FILE replaces this list.
 TEAM_OWNERS = [
     {'owner': 'TekRantGaming', 'key': 'a183dac812d9732ea9982188b799feb4eb2f8e074977568b3f8f690a9c63b18a',
@@ -99,18 +103,28 @@ TEAM_OWNERS = [
                'TekRantGmz', 'TekRantGng', 'TekRant_G', 'tekrantgamingcom', 'wwwtekrantgamingcom',
                'chattekrantgamingcom', 'tek_rant']},
     {'owner': 'ZALIAS', 'key': 'da315ef804e4b95c28113f41e930b9a9227a88b227f480dd43b52505193f3bfb',
-     'contains': ['ZALIAS'], 'typos': {'ZALIAS': 1},
+     'contains': ['ZALIAS', 'ThatZalia', 'ZaliaGuy'],
+     'typos': {'ZALIAS': 1},
+     # ThatZaliaSGuy (16 Nov 2026, TekRantGaming: "do the same for the following name too ThatZaliaSGuy"): ZALIAS's
+     # own other name, so under this key too; its 25073 entry variation list is caught by these rules but for the
+     # generic short forms in TEAM_NAMES_LEFT_FREE (tools/test_accounts.py team checks a sample)
+     'parts': {'before': ['That', 'Dat', 'Tha', 'Da', 'The', 'Tht', ''], 'middle': ['Zalias', 'Zalia'],
+               'after': ['Guy', 'Gai', 'Gui', 'Guey', 'Guys', 'Dude', 'Boy', 'Man']},
      'names': ['ZALIAS', 'ZAlias', 'ZALIAS_', '_ZALIAS', 'ZALIAS1', 'ZALIAS01', 'ZALIAS123', 'ZALIASX', 'TheZALIAS',
                'ItsZALIAS', 'ImZALIAS', 'RealZALIAS', 'OfficialZALIAS', 'ZALIASOfficial', 'ZALIASGaming',
                'ZALIASGamer', 'ZALIASDev', 'ZALIASTeam', 'ZALIASProject', 'ZALIASNetwork', 'Z_A_L_I_A_S', 'Zaliass',
                'Zaliasss', 'Zallias', 'Zalais', 'Zaliasz', 'Zalials', 'Zalius', 'Zaleas', 'Zaleis', 'Zalies', 'Zalyas',
                'Zalyass', 'Zaliash', 'Zalias2', 'Zalias3', 'ZaliasYT', 'ZaliasTV', 'ZaliasUK', 'ZaliasGames',
                'ZaliasG', 'ZAL1AS', 'ZALlAS', 'Z4LIAS', 'Z@LIAS', 'Z4L1AS', 'ZALl4S', '2ALIAS', 'ZALIA5', 'ZALlA5',
-               'ZALIASSSS', 'ZALIAScom', 'wwwzaliascom', 'z_alias']},
+               'ZALIASSSS', 'ZALIAScom', 'wwwzaliascom', 'z_alias', 'ThatZaliaSGuy', 'ThatZaliaGuy', 'ThatZalia',
+               'TZalia', 'TZaliaGuy', 'ZaliaGuy', 'ThatZalGuy', 'ThatZaliGuy', 'DatZaliaGuy', 'ThatxZaliaxSxGu']},
 ]
 # The watchlist's generic entries, left free for everyone (they would block normal players): TekRantGaming decides.
 TEAM_NAMES_LEFT_FREE = ['TRG', 'TRGaming', 'TRGGaming', 'TR_Gaming', 'TekGaming', 'Tek_Gaming', 'RantGaming', 'Rant',
-                        'Gaming', 'TechRant', 'Tech_Rant']
+                        'Gaming', 'TechRant', 'Tech_Rant',
+                        # ThatZaliaSGuy's short forms
+                        'TZG', 'TZSG', 'TZAG', 'ThatZ', 'ThatZG', 'ThtZG', 'ThatZGuy', 'ZGuy', 'ZSGuy', 'TZGuy', 'TZSGuy',
+                        'Zal', 'Zali', 'Zals', 'Zalia', 'ZalGuy', 'ZalsGuy', 'ZaliGuy', 'TZalGuy', 'ThatSGuy', 'ThatGuy']
 TEAM = {'owners': [], 'by_key': {}, 'exact': {}, 'free': set(), 'cache': {}}  # set_team_names, below the accounts
 
 # ---- The version players need (TekRantGaming, 13 Nov 2026: "server version check for latest version and only to allow
@@ -541,7 +555,9 @@ def set_team_names(owners, left_free):
         int(key, 16)
         e = {'owner': str(o['owner']), 'key': key,
              'contains': [name_skeleton(s) for s in o.get('contains', [])],
-             'typos': [(name_skeleton(s), int(n)) for s, n in o.get('typos', {}).items()]}
+             'typos': [(name_skeleton(s), int(n)) for s, n in o.get('typos', {}).items()],
+             'parts': {k: sorted({name_skeleton(w) for w in o['parts'].get(k, [])})
+                       for k in ('before', 'middle', 'after')} if o.get('parts') else None}
         TEAM['owners'].append(e)
         TEAM['by_key'][key] = e
         for n in [o['owner']] + list(o.get('names', [])):
@@ -587,7 +603,33 @@ def _team_owner(raw):
             shortest = len(stem) - most if len(stem) >= 8 else len(stem)
             if any(c[:1] == stem[:1] and len(c) >= shortest and _edits(c, stem, most) <= most for c in looks):
                 return o
+    for o in TEAM['owners']:
+        if o['parts'] and _in_parts(skel, o['parts']):
+            return o
     return None
+
+
+def _near(text, words):
+    '''The fewest edits from text to one of the words (2 when more than one).'''
+    return min([_edits(text, w, 1) for w in words] or [2])
+
+
+def _in_parts(skel, parts):
+    '''Whether the name is a "before" word (or none), a "middle" word and an "after" word, a slip in each (team_owner).'''
+    middles = parts['middle']
+    first = {w[:1] for w in middles} | ({'s', 'x'} if any(w[:1] == 'z' for w in middles) else set())  # S, 5, X for Z
+    for j in range(len(skel) - 1, 0, -1):  # where the after word starts
+        after = _near(skel[j:], parts['after'])
+        if after > 1 or skel[j + 1:] in parts['after']:  # (ThatSaladGuy: the D is Salad's, not a slip of Guy)
+            continue
+        for i in range(0, j):  # where the middle word starts
+            if skel[i] not in first or j - i < min(len(w) for w in middles) - 1:
+                continue
+            before = 0 if i == 0 and '' in parts['before'] else _near(skel[:i], [w for w in parts['before'] if w])
+            middle = _near(skel[i:j], middles)
+            if before <= 1 and middle <= (1 if i else 0) and before + middle + after <= 2:
+                return True
+    return False
 
 
 def team_account(owner):
