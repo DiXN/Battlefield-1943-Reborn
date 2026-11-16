@@ -14,6 +14,10 @@ updates, the game's files, the logs.
     manager.py start [n] | stop [n] | restart [n]
     manager.py broadcast --kind restart --minutes 5 [--server n] [--no-restart]
     manager.py broadcast --kind custom --text "Teams are balanced after this round"
+    manager.py maintenance on --preset deploy [--minutes 15] [--allow ADDRESS]
+    manager.py maintenance on --text "Back after the new maps are in" | off | status
+                                                 maintenance mode on the machine that runs the main backend: new joins
+                                                 are refused with the text; players in a match play on
     manager.py update                            look for a new release now, and install it
     manager.py install <package or folder>       the game's files, from the host's own copy of the game
     manager.py quit [--keep-servers]             stops the manager (and, without the option, its servers)
@@ -144,6 +148,10 @@ def update_target():
 LOGS = os.path.join(DATA, 'logs')
 CONFIG = os.path.join(DATA, 'server.json')
 STATE = os.path.join(LOGS, 'manager.json')  # the running manager: its pid, its port, the token of this machine's tools
+# Maintenance mode (TekRantGaming, 15 Nov 2026): the switch our own backend reads (plasma.py --maintenance-file,
+# maintenance_now). Kept in the data folder, so it holds through a restart of the backend or of the manager; a deploy
+# to a new folder copies it with server.json.
+MAINTENANCE_FILE = os.path.join(DATA, 'maintenance.json')
 
 
 def read_text(path, default=''):
@@ -160,6 +168,71 @@ def write_atomic(path, text):
     with open(tmp, 'w', encoding='utf-8', newline='\n') as f:
         f.write(text)
     os.replace(tmp, path)
+
+
+def notices():
+    """plasma.py, for its maintenance presets and its text check: one list for the backend and the manager."""
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import plasma
+    return plasma
+
+
+def read_maintenance():
+    """The maintenance switch as it is on disk ({} when there is none)."""
+    try:
+        raw = json.loads(read_text(MAINTENANCE_FILE, '') or '{}')
+    except ValueError:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def maintenance_words(raw=None):
+    """One line for the switch: on or off, the preset, the time left, the text the players see."""
+    raw = read_maintenance() if raw is None else raw
+    state = notices().clean_maintenance(raw)
+    if state and state['until'] and time.time() >= state['until']:
+        return 'maintenance: off (its end time has passed)'
+    if not state:
+        return 'maintenance: off' + (' (the file does not check: %s)' % MAINTENANCE_FILE if raw.get('on') else '')
+    left = (', %s left' % time_words(60 * ((int(state['until'] - time.time()) + 59) // 60)) if state['until']
+            else ', until switched off')
+    allow = ', let in: %s' % ', '.join(sorted(state['allow'])) if state['allow'] else ''
+    return 'maintenance: on (%s%s%s). Players see: %s: %s' % (state['kind'], left, allow, state['title'], state['text'])
+
+
+def set_maintenance(on, kind='', text='', minutes=0.0, allow=()):
+    """Maintenance mode on or off: checked, then written where the backend reads it. Returns the line for it."""
+    plasma = notices()
+    if not on:
+        raw = dict(read_maintenance(), on=False)
+    else:
+        text = ' '.join(str(text or '').split())
+        kind = str(kind or ('custom' if text else 'deploy'))
+        if kind not in plasma.NOTICE_PRESETS:
+            raise RuntimeError('There is no such preset: %s (%s).' % (kind, ', '.join(plasma.NOTICE_PRESETS)))
+        if kind == 'custom':
+            problem = plasma.notice_text_problem(text)
+            if problem:
+                raise RuntimeError('That text cannot be shown to the players: %s.' % problem)
+        elif text:
+            raise RuntimeError('A preset has its own text: leave out --text, or use --preset custom.')
+        try:
+            minutes = float(minutes or 0)
+        except (TypeError, ValueError):
+            raise RuntimeError('The minutes must be a number.')
+        if minutes < 0 or minutes > 24 * 60:
+            raise RuntimeError('The minutes must be 0 (until switched off) to 1440.')
+        allow = [str(a).strip() for a in allow or () if str(a).strip()]
+        for a in allow:
+            try:
+                socket.inet_pton(socket.AF_INET6 if ':' in a else socket.AF_INET, a)
+            except OSError:
+                raise RuntimeError('%s is not an address.' % a)
+        raw = {'on': True, 'kind': kind, 'text': text if kind == 'custom' else '',
+               'until': int(time.time() + minutes * 60) if minutes else 0, 'allow': allow, 'since': int(time.time())}
+    write_atomic(MAINTENANCE_FILE, json.dumps(raw, indent=1) + '\n')
+    return maintenance_words(raw)
 
 
 def package_version(root=None):
@@ -583,7 +656,7 @@ class Manager:
             if not mode or self.backend:
                 return
             args = [sys.executable, '-I', os.path.join(HERE, 'plasma.py'), '--host', BACKEND_BIND or '0.0.0.0',
-                    '--log', os.path.join(LOGS, 'backend.log')]
+                    '--log', os.path.join(LOGS, 'backend.log'), '--maintenance-file', MAINTENANCE_FILE]
             public = self.public_address()
             if mode == 'lan':
                 args.append('--lan')
@@ -1167,8 +1240,16 @@ class Manager:
                 'maps': [{'key': k, 'title': t} for k, t, _ in MAPS],
                 'presets': PRESETS, 'tick': self.cfg['tick'], 'data': DATA, 'root': ROOT, 'max_servers': MAX_SERVERS,
                 'backend_ports': list(BACKEND_PORTS), 'now': int(time.time()),
+                'maintenance': self.maintenance_line(),
                 'autostart': autostart_enabled(),
             }
+
+    def maintenance_line(self):
+        """The switch for the page: never a page that fails because plasma.py could not be loaded."""
+        try:
+            return maintenance_words()
+        except Exception as e:  # noqa: BLE001 (a plasma.py that does not load: said, the rest of the page works)
+            return 'maintenance: not known (%s: %s)' % (type(e).__name__, e)
 
     def set_config(self, new):
         """The settings from the page: checked, kept, saved. What a running server reads only at its start (its name,
@@ -1452,6 +1533,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             ident = m.broadcast(str(data.get('kind', 'custom')), int(data.get('seconds') or 0), str(data.get('text', '')),
                                 servers or None, bool(data.get('restart')))
             return {'countdown': ident}
+        elif path == '/api/maintenance':
+            if data.get('on') and not m.own_backend():
+                raise RuntimeError('This machine runs no backend of its own: maintenance mode is switched on the '
+                                   'machine that runs the main backend.')
+            words = set_maintenance(bool(data.get('on')), str(data.get('kind', '')), str(data.get('text', '')),
+                                    data.get('minutes') or 0, data.get('allow') or [])
+            m.note(words)
+            return {'maintenance': words}
         elif path == '/api/broadcast/cancel':
             m.cancel_countdown(str(data.get('id', '')))
         elif path == '/api/update/check':
@@ -1714,6 +1803,13 @@ def main():
     b.add_argument('--text', default='')
     b.add_argument('--server', type=int, action='append', default=[])
     b.add_argument('--no-restart', action='store_true', help='a restart or update countdown that only tells the players')
+    mt = sub.add_parser('maintenance', help='maintenance mode: new joins refused with a message the players see')
+    mt.add_argument('action', choices=['on', 'off', 'status'], nargs='?', default='status')
+    mt.add_argument('--preset', choices=['deploy', 'update', 'restart', 'emergency', 'custom'], default='',
+                    help='the message (default: deploy, or custom with --text)')
+    mt.add_argument('--text', default='', help='a custom message, at most 200 characters')
+    mt.add_argument('--minutes', type=float, default=0, help='switches itself off after this long (0: never)')
+    mt.add_argument('--allow', action='append', default=[], help='a player address let in anyway (an admin)')
     sub.add_parser('update', help='look for a new release now, and install it')
     i = sub.add_parser('install', help='the game\'s files from your own copy of the game')
     i.add_argument('path')
@@ -1754,6 +1850,17 @@ def main():
             ask('/api/broadcast', {'kind': args.kind, 'seconds': int(args.minutes * 60), 'text': args.text,
                                    'servers': args.server, 'restart': args.kind == 'restart' and not args.no_restart})
             print('sent')
+            return 0
+        if command == 'maintenance':
+            if args.action == 'status':
+                print(maintenance_words())
+                return 0
+            fields = {'on': args.action == 'on', 'kind': args.preset, 'text': args.text, 'minutes': args.minutes,
+                      'allow': args.allow}
+            if running_manager():  # the running manager writes it, and keeps a note of it in its log
+                print(ask('/api/maintenance', fields)['maintenance'])
+            else:  # no manager: the file itself (the backend, when it starts, reads it)
+                print(set_maintenance(fields['on'], fields['kind'], fields['text'], fields['minutes'], fields['allow']))
             return 0
         if command == 'update':
             reply = ask('/api/update/apply', {}, timeout=600)

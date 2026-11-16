@@ -191,6 +191,108 @@ def update_notice(mode):
                            'choose Update on the main menu. It updates itself.' % need}
 
 
+# ---- Maintenance mode (TekRantGaming, 15 Nov 2026: maintenance periods that players learn about in the game, not only
+# on Discord). A file the server manager writes (manager.py maintenance on|off, --maintenance-file here), read again
+# when it changes: {"on", "kind", "text" (custom only), "until" (UTC seconds, 0: none), "allow" [addresses]}. While it
+# is on, new connections are refused with its text: "reserve" (every join from our menus) answers {"op": "closed",
+# "kind", "title", "message"}, Quick Match finds no server, and the list carries the notice (notice_kind, notice_title,
+# notice_text, notice_seconds; a game from before it gets one row in place of the servers). Players in a match never
+# ask again and are not touched, nor are the servers' registrations, logins and Direct connect's find. The addresses in
+# "allow" (admins) are let in. With an end time the mode switches itself off then.
+NOTICE_PRESETS = {
+    'deploy': ('MAINTENANCE', 'Unable to connect: maintenance period. Check Discord for details and try again in a few '
+                              'minutes.'),
+    'update': ('UPDATE IN PROGRESS', 'Unable to connect: the servers are being updated to a new version. Check Discord '
+                                     'for details and try again in a few minutes.'),
+    'restart': ('SERVERS RESTARTING', 'Unable to connect: the servers are restarting. Try again in a few minutes.'),
+    'emergency': ('EMERGENCY FIX', 'Unable to connect: the servers are down for an urgent fix. Check Discord for '
+                                   'details and try again soon.'),
+    'custom': ('MAINTENANCE', ''),
+}
+NOTICE_TEXT_MAX = 200
+NOTICE_CHARS = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,:;!?\'()/&+%#@-')
+MAINTENANCE = {'file': '', 'mtime': None, 'looked': 0.0, 'state': None, 'note': None}
+
+
+def notice_text_problem(text):
+    """Why a maintenance text cannot be shown to every player, or '' when it can. Characters every game font has, no
+    quotes or braces (the games read the replies with a small parser), and never the word "reserved": a game from
+    before this takes any answer to "reserve" that holds it as a yes."""
+    if not text or len(text) > NOTICE_TEXT_MAX:
+        return 'the text must be 1 to %d characters' % NOTICE_TEXT_MAX
+    bad = sorted(set(c for c in text if c not in NOTICE_CHARS))
+    if bad:
+        return 'the text has characters that cannot be shown: %s' % ' '.join(repr(c) for c in bad)
+    if 'reserved' in text.lower():
+        return 'the text may not hold the word "reserved"'
+    return ''
+
+
+def clean_maintenance(raw):
+    """A maintenance file's contents as the backend uses them, or None (off, or a file that does not check)."""
+    if not isinstance(raw, dict) or raw.get('on') is not True:
+        return None
+    kind = str(raw.get('kind', 'deploy'))
+    if kind not in NOTICE_PRESETS:
+        return None
+    title, text = NOTICE_PRESETS[kind]
+    if kind == 'custom':
+        text = ' '.join(str(raw.get('text', '')).split())
+    if notice_text_problem(text):
+        return None
+    try:
+        until = float(raw.get('until') or 0)
+    except (TypeError, ValueError):
+        until = 0.0
+    allow = raw.get('allow', [])
+    allow = {str(a)[:45] for a in allow if isinstance(a, str)} if isinstance(allow, list) else set()
+    return {'kind': kind, 'title': title, 'text': text, 'until': until, 'allow': allow}
+
+
+def maintenance_now(address=None):
+    """The maintenance notice for a player at `address` now ({'kind', 'title', 'text', 'seconds'}), or None: off, past
+    its end time, or the player is one of its allowed addresses. The file is looked at at most once a second."""
+    path, now = MAINTENANCE['file'], time.time()
+    if path and now - MAINTENANCE['looked'] >= 1.0:
+        MAINTENANCE['looked'] = now
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            mtime = None
+        if mtime != MAINTENANCE['mtime']:
+            MAINTENANCE['mtime'] = mtime
+            try:
+                with open(path, encoding='utf-8') as f:
+                    MAINTENANCE['state'] = clean_maintenance(json.load(f)) if mtime is not None else None
+            except (OSError, ValueError):
+                MAINTENANCE['state'] = None
+    state = MAINTENANCE['state']
+    note = MAINTENANCE['note']
+    if state and state['until'] and now >= state['until']:
+        state = None
+    if note:
+        word = ('on (%s%s)' % (state['kind'], ', until %s UTC' % time.strftime('%H:%M', time.gmtime(state['until']))
+                               if state['until'] else '') if state else 'off')
+        if word != note.get('said'):
+            note['said'] = word
+            note['say']('maintenance: %s' % word)
+    if not state or (address and address in state['allow']):
+        return None
+    text, seconds = state['text'], 0
+    if state['until']:
+        seconds = max(1, int(state['until'] - now))
+        minutes = (seconds + 59) // 60
+        text += ' Expected back in about %d minute%s.' % (minutes, '' if minutes == 1 else 's')
+    return {'kind': state['kind'], 'title': state['title'], 'text': text, 'seconds': seconds}
+
+
+def notice_row(notice):
+    """The server list's one row for a game from before maintenance mode (as update_notice): its browser shows it."""
+    return {'gid': 'notice-' + notice['kind'], 'name': 'SERVERS CLOSED: ' + notice['title'], 'address': ['0.0.0.0', 0],
+            'map': 'Wake Island', 'players': 0, 'max_players': 0, 'mode': 'classic', 'official': True, 'next_map': '',
+            'maps': [], 'night': False, 'region': '', 'tick': 60, 'description': notice['text']}
+
+
 def leaderboard_put(m, test_progression=False):
     """A player's totals from their game (our Stats & Awards): kept by name, the newest wins, at most 5,000 names."""
     name = ''.join(c for c in str(m.get('name', '')) if c.isalnum() or c in ' _')[:15].strip()
@@ -694,7 +796,11 @@ class Client:
             # A server picked in our menu's server browser (Registry "reserve", by the player's address).
             reserved = RESERVATIONS.get(self.peer.split(':')[0])
             gated = False
-            if reserved and time.time() - reserved[1] < 300 and reserved[0] in GAMES:
+            if maintenance_now(self.peer.split(':')[0]):
+                # Maintenance mode: no server for a new connection, and no hosting either.
+                games, gated = [], True
+                self.note('Quick Match during maintenance: no server')
+            elif reserved and time.time() - reserved[1] < 300 and reserved[0] in GAMES:
                 games = [GAMES[reserved[0]]]
             elif VERSION_GATE['required']:
                 # The version gate: every join from our menus reserves first, and "reserve" is where a game's version
@@ -1402,6 +1508,13 @@ class Registry:
                 elif op == 'leaderboard':
                     rows, total = leaderboard_top()
                     writer.write((json.dumps({'op': 'leaderboard', 'rows': rows, 'total': total}) + '\n').encode())
+                elif op == 'reserve' and maintenance_now(address):
+                    # Maintenance mode (maintenance_now): every join refused with its text, whatever server was picked.
+                    notice = maintenance_now(address)
+                    RESERVATIONS.pop(address, None)
+                    writer.write((json.dumps({'op': 'closed', 'kind': notice['kind'], 'title': notice['title'],
+                                              'message': notice['text']}) + '\n').encode())
+                    self.note('%s refused game %s: maintenance (%s)' % (peer, str(m.get('gid', ''))[:16], notice['kind']))
                 elif op == 'reserve' and m.get('gid') in GAMES:
                     yours, platform = str(m.get('version', ''))[:24], str(m.get('platform', ''))[:16]
                     if outdated(yours, platform):
@@ -1418,8 +1531,13 @@ class Registry:
                         if full and not renewal:
                             # (A game that does not know "full" says the list did not answer, and joins nothing.)
                             RESERVATIONS.pop(address, None)
+                            # (Never the server's name in "message": a name holding "reserved" would read as a yes.)
                             writer.write((json.dumps({'op': 'full', 'gid': m['gid'], 'players': players,
-                                                      'max_players': most}) + '\n').encode())
+                                                      'max_players': most, 'title': 'SERVER FULL',
+                                                      'message': 'This server has %d of %d players. Pick another '
+                                                                 'server, or try again in a moment.' %
+                                                                 (min(players + arriving, most), most)}) +
+                                          '\n').encode())
                             self.note('%s refused game %s: full (%d players, %d on their way, %d at most)' %
                                       (peer, m['gid'], players, arriving, most))
                         else:
@@ -1452,12 +1570,19 @@ class Registry:
                     # the servers' own.
                     hosts = {g.get('HN') for g in GAMES.values()}
                     online = len([p for p in Client.online if p not in hosts])
-                    reply = {'op': 'servers', 'servers': servers, 'players_online': online}
+                    reply = {'op': 'servers'}
+                    notice = maintenance_now(address)
+                    if notice:  # before "servers": the games read the first field of each name
+                        reply.update(notice_kind=notice['kind'], notice_title=notice['title'],
+                                     notice_text=notice['text'], notice_seconds=notice['seconds'])
+                        if 'notice' not in m:  # a game from before maintenance mode: one row says it
+                            servers = [notice_row(notice)]
+                    reply.update(servers=servers, players_online=online)
                     need = required_version(str(m.get('platform', '')))
                     if need:
                         reply['required_version'] = need
-                        if 'version' not in m:  # a game from before the gate: it has no pop-up, so its list says it
-                            reply['servers'] = [update_notice('classic'), update_notice('modern')]
+                        if 'version' not in m and not notice:  # a game from before the gate: it has no pop-up, so
+                            reply['servers'] = [update_notice('classic'), update_notice('modern')]  # its list says it
                     writer.write((json.dumps(reply) + '\n').encode())
                 await writer.drain()
         except (ConnectionError, ValueError, KeyError) as e:
@@ -1600,6 +1725,9 @@ async def main():
     ap.add_argument('--version-feed-every', type=float, default=300.0, help='seconds between two looks at the feed')
     ap.add_argument('--required-version', default='',
                     help='the version gate: players need this version (in place of --version-feed)')
+    ap.add_argument('--maintenance-file', default='',
+                    help='maintenance mode: a file the server manager writes (manager.py maintenance); while it is on, '
+                         'new joins are refused with its text (maintenance_now)')
     ap.add_argument('--log', default='runs/plasma.log')
     ap.add_argument('--leaderboard', default='', help="a file keeping the players' totals (our Leaderboards)")
     ap.add_argument('--accounts', default='',
@@ -1668,6 +1796,9 @@ async def main():
             log.write('%s %s\n' % (time.strftime('%H:%M:%S'), text))
             log.flush()
         feed_task = None
+        if args.maintenance_file:
+            MAINTENANCE.update(file=args.maintenance_file, note={'said': None, 'say': gate_note})
+            maintenance_now()
         accounts_task = asyncio.ensure_future(keep_accounts_saved(max(0.5, args.accounts_save_every)))
         log.write('%s accounts: %d%s\n' % (time.strftime('%H:%M:%S'), len(ACCOUNTS),
                                              ' (%s)' % ACCOUNTS_FILE if ACCOUNTS_FILE else ' (kept in memory only)'))
