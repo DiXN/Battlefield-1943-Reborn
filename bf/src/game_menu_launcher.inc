@@ -2382,7 +2382,19 @@
   // Later that day: the match's name, whether the server browser shows it, and the router port as a box to tick
   // (UPnP) with the port typed when it is not ticked.
   static constexpr int kPmMap = 0, kPmName = 1, kPmNet = 2, kPmListed = 3, kPmUpnp = 4, kPmPort = 5, kPmHost = 6, kPmTick = 7,
-                       kPmPass = 8, kPmPassText = 9, kPmRows = 10;
+                       kPmPass = 8, kPmPassText = 9,
+                       // 14 Nov 2026, the match's world ("cloud coverage, rate, weather percentage, day/night
+                       // adjustment and time scale settings and sliders ... in the create match menu"): one row
+                       // that opens its own list in the rail (the rail has no room for six more rows).
+                       kPmWorld = 10, kPmDayNight = 11, kPmTime = 12, kPmDayLen = 13, kPmCloud = 14, kPmRate = 15,
+                       kPmWeather = 16, kPmFog = 17, kPmGroundFog = 18, kPmWind = 19, kPmCloudHeight = 20, kPmWorldBack = 21, kPmRows = 22;
+  bool pm_world_view_ = false;  // the rail shows the world's rows
+  bool pm_dn_ = false;          // day and night
+  float pm_time_ = 16.0f;       // the hour the match starts at
+  static constexpr int kPmDayLens[] = {0, 24, 48, 60, 120, 240};  // minutes a day takes; 0 stands still
+  int pm_daylen_ = 0;
+  int pm_cloud_ = 35, pm_rate_ = 33, pm_weather_ = 0, pm_fog_ = 0, pm_ground_fog_ = 0, pm_wind_ = 30;  // per cent
+  int pm_cloud_height_ = 450;  // the cloud base over the sea, metres
   // A password for the match (13 Nov 2026): a switch under the name, and its field while it is on.
   bool pm_pass_on_ = false;
   std::string pm_pass_;
@@ -2453,6 +2465,17 @@
     pm_tick_ = std::atoi(settings_.Get("private_match_tick", "60").c_str());
     if (std::find(std::begin(kPmTicks), std::end(kPmTicks), pm_tick_) == std::end(kPmTicks)) pm_tick_ = 60;
     pm_edit_ = -1;  // the on screen keys never left open from an earlier visit
+    pm_dn_ = settings_.Get("private_match_day_night", "0") == "1";
+    pm_time_ = std::clamp(float(std::atof(settings_.Get("private_match_time", "16").c_str())), 0.0f, 23.5f);
+    pm_daylen_ = std::atoi(settings_.Get("private_match_day_minutes", "0").c_str());
+    if (std::find(std::begin(kPmDayLens), std::end(kPmDayLens), pm_daylen_) == std::end(kPmDayLens)) pm_daylen_ = 0;
+    pm_cloud_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_cover", "35").c_str()), 0, 100);
+    pm_rate_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_rate", "33").c_str()), 0, 100);
+    pm_weather_ = std::clamp(std::atoi(settings_.Get("private_match_weather", "0").c_str()), 0, 100);
+    pm_fog_ = std::clamp(std::atoi(settings_.Get("private_match_fog", "0").c_str()), 0, 100);
+    pm_ground_fog_ = std::clamp(std::atoi(settings_.Get("private_match_ground_fog", "0").c_str()), 0, 100);
+    pm_wind_ = std::clamp(std::atoi(settings_.Get("private_match_wind", "30").c_str()), 0, 100);
+    pm_cloud_height_ = std::clamp(std::atoi(settings_.Get("private_match_cloud_height", "450").c_str()), 200, 1500);
   }
   void SavePrivateMatchChoices() {
     settings_.values["private_match_map"] = std::to_string(pm_map_);
@@ -2464,6 +2487,16 @@
     settings_.values["private_match_tick"] = std::to_string(pm_tick_);
     settings_.values["private_match_password_on"] = pm_pass_on_ ? "1" : "0";
     settings_.values["private_match_password"] = pm_pass_;
+    settings_.values["private_match_day_night"] = pm_dn_ ? "1" : "0";
+    settings_.values["private_match_time"] = fmt::format("{:.2f}", pm_time_);
+    settings_.values["private_match_day_minutes"] = std::to_string(pm_daylen_);
+    settings_.values["private_match_cloud_cover"] = std::to_string(pm_cloud_);
+    settings_.values["private_match_cloud_rate"] = std::to_string(pm_rate_);
+    settings_.values["private_match_weather"] = std::to_string(pm_weather_);
+    settings_.values["private_match_fog"] = std::to_string(pm_fog_);
+    settings_.values["private_match_ground_fog"] = std::to_string(pm_ground_fog_);
+    settings_.values["private_match_wind"] = std::to_string(pm_wind_);
+    settings_.values["private_match_cloud_height"] = std::to_string(pm_cloud_height_);
     settings_.Save();
   }
 
@@ -2496,6 +2529,10 @@
     }
     o.password = pm_pass_on_ ? pm_pass_ : std::string();
     o.tick = pm_tick_;
+    o.day_night = pm_dn_, o.time = pm_time_, o.day_minutes = pm_daylen_;
+    o.cloud_cover = pm_cloud_ / 100.0f, o.cloud_rate = pm_rate_ / 100.0f, o.weather = pm_weather_ / 100.0f;
+    o.fog = pm_fog_ / 100.0f, o.ground_fog = pm_ground_fog_ / 100.0f, o.wind = pm_wind_ / 100.0f;
+    o.cloud_height = float(pm_cloud_height_);
     // The host's own game runs at the match's rate, set before its timers are made. Once a match was played at
     // another, this run cannot change: the server would start, and the host's join would have to start the game again,
     // which ends the server with it (the review of pull request 16). Said instead.
@@ -2651,15 +2688,19 @@
     // UPnP and the port as a smaller pair under Network type, and no UPnP at all for a LAN match).
     std::vector<int> order = {kPmName, kPmPass};
     if (pm_pass_on_) order.push_back(kPmPassText);
-    order.insert(order.end(), {kPmMap, kPmTick, kPmNet});
+    order.insert(order.end(), {kPmMap, kPmTick, kPmWorld, kPmNet});
     if (!pm_lan_) order.push_back(kPmListed);
     if (!pm_lan_) order.push_back(kPmUpnp);
     order.insert(order.end(), {kPmPort, kPmHost});
+    if (pm_world_view_) order = {kPmDayNight, kPmTime, kPmDayLen, kPmCloud, kPmRate, kPmWeather, kPmFog, kPmGroundFog, kPmWind, kPmCloudHeight, kPmWorldBack};
     {
       int at = 0;
       for (int k = 0; k < int(order.size()); ++k)
         if (order[size_t(k)] == pm_row_) at = k;
-      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) pm_row_ = kPmNet, at = 3;  // UPnP went with LAN
+      if (std::find(order.begin(), order.end(), pm_row_) == order.end()) {
+        if (pm_world_view_) pm_row_ = kPmDayNight, at = 0;
+        else pm_row_ = kPmNet, at = int(std::find(order.begin(), order.end(), kPmNet) - order.begin());  // UPnP went with LAN
+      }
       const int n = int(order.size());
       if (in.up) pm_row_ = order[size_t((at + n - 1) % n)];
       if (in.down) pm_row_ = order[size_t((at + 1) % n)];
@@ -2693,6 +2734,24 @@
       if (row == kPmPass) pm_pass_on_ = !pm_pass_on_;
       if (row == kPmListed && !pm_lan_) pm_listed_ = !pm_listed_;
       if (row == kPmUpnp && !pm_lan_) pm_upnp_ = !pm_upnp_;
+      if (row == kPmWorld) pm_world_view_ = true, pm_row_ = kPmDayNight;
+      if (row == kPmWorldBack) pm_world_view_ = false, pm_row_ = kPmWorld;
+      if (row == kPmDayNight) pm_dn_ = !pm_dn_;
+      if (row == kPmTime) pm_time_ = std::fmod(pm_time_ + 24.0f + 0.5f * step, 24.0f);
+      if (row == kPmDayLen) {
+        const int n = int(std::size(kPmDayLens));
+        int at = 0;
+        for (int k = 0; k < n; ++k)
+          if (kPmDayLens[k] == pm_daylen_) at = k;
+        pm_daylen_ = kPmDayLens[(at + n + step) % n];
+      }
+      if (row == kPmCloud) pm_cloud_ = std::clamp(pm_cloud_ + 5 * step, 0, 100);
+      if (row == kPmRate) pm_rate_ = std::clamp(pm_rate_ <= 5 && step < 0 ? pm_rate_ - 1 : pm_rate_ < 5 ? pm_rate_ + 1 : pm_rate_ + 5 * step, 0, 100);
+      if (row == kPmWeather) pm_weather_ = std::clamp(pm_weather_ + 5 * step, 0, 100);
+      if (row == kPmFog) pm_fog_ = std::clamp(pm_fog_ + 5 * step, 0, 100);
+      if (row == kPmGroundFog) pm_ground_fog_ = std::clamp(pm_ground_fog_ + 5 * step, 0, 100);
+      if (row == kPmWind) pm_wind_ = std::clamp(pm_wind_ + 5 * step, 0, 100);
+      if (row == kPmCloudHeight) pm_cloud_height_ = std::clamp(pm_cloud_height_ + 50 * step, 200, 1500);
       SavePrivateMatchChoices();
     };
     if (in.left && pm_row_ != kPmHost) change(pm_row_, -1);
@@ -2700,7 +2759,10 @@
     // ---- the rows, as the main menu's. By the row's own number (kPm...): its title, and its help in the band.
     static constexpr const char* kTitles[] = {"MAP",  "SERVER NAME", "NETWORK TYPE",  "SHOW IN BROWSER",
                                               "UPNP", "PORT",        "HOST THE MATCH", "TICK RATE",
-                                              "PASSWORD", "PASSWORD"};
+                                              "PASSWORD", "PASSWORD", "WEATHER AND TIME", "DAY AND NIGHT",
+                                              "TIME OF DAY", "A DAY LASTS", "CLOUD COVER", "CLOUD CHANGE RATE",
+                                              "WEATHER", "DISTANCE FOG", "GROUND FOG", "WIND", "CLOUD HEIGHT",
+                                              "BACK TO THE MATCH"};
     int clicked = -1;
     float y = rows_y;
     int number = 0;
@@ -2773,6 +2835,36 @@
       } else if (i == kPmTick) {
         value_text(std::to_string(pm_tick_) + (pm_tick_ == 60 ? "Hz - Default" : pm_tick_ == 30 ? "Hz - Original" : "Hz - Experimental"),
                    true, false);
+      } else if (i == kPmWorld) {
+        value_text(!pm_dn_ && pm_weather_ == 0 ? std::string("AFTERNOON, FAIR")
+                                               : fmt::format("{}{}", pm_dn_ ? fmt::format("{:02d}:{:02d}", int(pm_time_), int(pm_time_ * 60) % 60)
+                                                                            : std::string("AFTERNOON"),
+                                                             pm_weather_ > 0 ? fmt::format(", WEATHER {}%", pm_weather_) : std::string()),
+                   false, false);
+      } else if (i == kPmDayNight) {
+        draw_switch(pm_dn_);
+      } else if (i == kPmTime) {
+        value_text(fmt::format("{:02d}:{:02d}", int(pm_time_), int(pm_time_ * 60) % 60), true, !pm_dn_);
+      } else if (i == kPmDayLen) {
+        value_text(pm_daylen_ == 0 ? std::string("TIME STANDS STILL")
+                                   : pm_daylen_ % 60 == 0 ? fmt::format("{} H", pm_daylen_ / 60) : fmt::format("{} MIN", pm_daylen_),
+                   true, !pm_dn_);
+      } else if (i == kPmCloud) {
+        value_text(fmt::format("{}%", pm_cloud_), true, false);
+      } else if (i == kPmRate) {
+        value_text(fmt::format("{}%", pm_rate_), true, false);
+      } else if (i == kPmWeather) {
+        value_text(pm_weather_ == 0 ? std::string("FAIR") : fmt::format("{}%", pm_weather_), true, false);
+      } else if (i == kPmFog) {
+        value_text(pm_fog_ == 0 ? std::string("NONE") : fmt::format("{}%", pm_fog_), true, false);
+      } else if (i == kPmGroundFog) {
+        value_text(pm_ground_fog_ == 0 ? std::string("NONE") : fmt::format("{}%", pm_ground_fog_), true, false);
+      } else if (i == kPmWind) {
+        value_text(pm_wind_ == 0 ? std::string("CALM") : fmt::format("{}%", pm_wind_), true, false);
+      } else if (i == kPmCloudHeight) {
+        value_text(fmt::format("{} M", pm_cloud_height_), true, false);
+      } else if (i == kPmWorldBack) {
+        if (sel) kit::Glyph(d, PromptStyle(), kit::Button::kA, "Enter", ImVec2(right - st(20), mid), st(20));
       } else if (i == kPmNet) {
         value_text(pm_lan_ ? "LAN" : "ONLINE", true, false);
       } else if (i == kPmListed) {
@@ -2841,7 +2933,24 @@
           "On, only players who type the match's password can join; the server browser shows a padlock by its name. "
           "Off, anybody who sees the match can join.",
           "The password players type to join: up to 24 letters, digits or signs, no spaces. Give it to your friends "
-          "yourself."};
+          "yourself.",
+          "The match's time of day, clouds and weather: every player sees the same. You can change them while the "
+          "match runs, with the admin panel (F9).",
+          "On, the match has a clock: the light, the shadows and the sky follow the time of day, with dusk and "
+          "night. Off, it is the game's own afternoon.",
+          "The hour the match starts at: 12 is noon, 18 sunset, 0 midnight. Needs Day and night.",
+          "How long a whole day and night take in the match, or the time stands still at the hour above. Needs Day "
+          "and night.",
+          "How much of the sky the clouds take, for players who chose the volumetric sky.",
+          "How fast the clouds form and dissolve. Lower is calmer and closer to real weather.",
+          "From fair to a storm: more and denser cloud, a greyer sky and less sun; from about half, mist and far "
+          "rain shafts; a little higher, rain; from about two thirds, lightning in the clouds.",
+          "A haze that hides what is far: at 100% the sight is about a kilometre.",
+          "A low layer of fog over the sea and the shore, in patches that drift.",
+          "From calm to a gale: the stronger the wind, the further the rain leans.",
+          "How high over the sea the clouds begin, for players who chose the volumetric sky. Low, the planes fly "
+          "through them and can hide in them.",
+          "Back to the match's other settings."};
       kit::Spaced(d, f.typed, st(9), ImVec2(band.x + st(20), band.y + st(14)), kit::kInkSection, kTitles[pm_row_], st(2));
       kit::GameText(d, kit::GameFont::kHeadline, st(26), ImVec2(band.x + st(20), band.y + st(29)), kit::kInk,
                     kPmMapNames[pm_map_]);
@@ -2864,7 +2973,10 @@
       if (clicked == kPmHost) HostPrivateMatch();
       else change(clicked, 1);
     }
-    if (in.back) BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+    if (in.back) {
+      if (pm_world_view_) pm_world_view_ = false, pm_row_ = kPmWorld;  // the world's rows: back to the match's
+      else BackToMenu(kRowPrivateMatch, MainRowOf("CUSTOM MATCH")), pm_error_.clear();  // back to the menu
+    }
   }
 
   // The on screen keys over the map's picture (a..b) while the server name or the password is edited: its field with
@@ -3151,6 +3263,7 @@
       joining_ = "The game's tutorial", joining_map_ = "Wake Island";
       joined_gid_.clear();
       comms::NoteJoined("");
+      world::NoteJoined("");
       SetJoinedServerNight(false);
       failed_ = false, joined_from_start_ = true;
       page_ = Page::kJoining;
@@ -3168,6 +3281,7 @@
     joining_map_ = "Wake Island";
     joined_gid_.clear();
     comms::NoteJoined("");  // no server: no voice or text chat in the tutorial
+    world::NoteJoined("");
     SetJoinedServerNight(false);  // nor a Night Ops server's night
     failed_ = false;
     joined_from_start_ = false;

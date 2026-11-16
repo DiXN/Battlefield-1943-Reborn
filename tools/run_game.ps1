@@ -154,7 +154,7 @@ if (-not $Interactive) { $launchArgs += "--bf_update_feed=$(if ($env:BF_TEST_UPD
     foreach ($kind in $helpers) {
         $pad = $(if ($kind -eq "peer") { $PeerPad } elseif ($kind -eq "peer2") { $Peer2Pad } else { "" })
         $sdir = Join-Path $dir $kind; New-Item -ItemType Directory -Force (Join-Path $sdir "user") | Out-Null
-        $helperArgs = @("--game_data_root=`"$(Join-Path $root 'input\pkg')`"", "--user_data_root=`"$(Join-Path $sdir 'user')`"",
+        $helperArgs = @("--game_data_root=`"$(if ($env:BF_TEST_GAME_ROOT) { $env:BF_TEST_GAME_ROOT } else { Join-Path $root 'input\pkg' })`"", "--bf_update_feed=http://127.0.0.1:9/no-feed", "--user_data_root=`"$(Join-Path $sdir 'user')`"",
                         "--log_file=`"$(Join-Path $sdir 'bf1943.log')`"", "--fullscreen=false", "--window_start=background")
         if ($kind -eq "server") { $helperArgs += @("--server", "--cl=`"$ServerCl`""); if ($ServerArgs) { $helperArgs += $ServerArgs } } else { if ($pad -ne "driver") { $helperArgs += "--bf_launcher=false" }; if ($PeerArgs) { $helperArgs += $PeerArgs } }
         Set-Content (Join-Path $sdir "args.txt") ($helperArgs -join " ") -Encoding ascii
