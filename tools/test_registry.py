@@ -125,8 +125,8 @@ def main():
         # Regions and tick rates (the browser's REGION and TICK columns).
         check('the region and the tick rate a server said arrive',
               names.get('Community one', {}).get('region') == 'gb' and names.get('Community one', {}).get('tick') == 60)
-        check('a server that said no region has none, and the usual 30 Hz',
-              names.get('Official one', {}).get('region') == '' and names.get('Official one', {}).get('tick') == 30)
+        check('a server that said no region has none, and the usual 60 Hz (the default of gmhost.py since 14 Nov 2026)',
+              names.get('Official one', {}).get('region') == '' and names.get('Official one', {}).get('tick') == 60)
         # LAN only mode: the address each player can reach.
         local = {s['name']: s for s in ask({'op': 'list'}, port=LAN_REG)['servers']}
         check('LAN only: a player on this machine gets this machine as it reached it',

@@ -568,8 +568,44 @@ REX_HOOK_RAW(sub_8237CE40) {
     bf1943::g.ended = true;
     bf1943::g.ended_at = bf1943::Clock::now();
   }
-  REXLOG_INFO("BF menu driver: game connection ended, reason {}", ctx.r4.u32);
+  // Who ended it (17 Nov 2026: when the backend restarts, every player's match ends here with reason 0, while the
+  // server and its host go on): the caller and the guest's return addresses above it.
+  const auto load = [base](uint32_t at) {
+    uint32_t v;
+    std::memcpy(&v, base + at, 4);
+    return __builtin_bswap32(v);
+  };
+  std::string callers = fmt::format("{:08X}", uint32_t(ctx.lr));
+  for (uint32_t sp = ctx.r1.u32, i = 0; i < 6 && sp >= 0x70000000u && sp < 0x80000000u; ++i) {
+    const uint32_t back = load(sp);
+    if (back <= sp || back >= 0x80000000u) break;
+    callers += fmt::format(" {:08X}", load(back - 8));
+    sp = back;
+  }
+  REXLOG_INFO("BF menu driver: game connection ended, reason {} (from {})", ctx.r4.u32, callers);
   __imp__sub_8237CE40(ctx, base);
+}
+
+// The client's online events (sub_823ACE78(this, ?, event, data)): for event 23 its status (data +40, 0 to 6) decides;
+// every status but 3 sets the game session's state to 3, and the session update (sub_823ACA80) then ends the match
+// ("game connection ended, reason 0" above). Logged, to see which status a lost backend link brings (17 Nov 2026:
+// every player's match ended at a backend restart while the server and its host went on).
+// Runs bounce3 and keep1 (17 Nov 2026): status 3 when the game comes online (at the join), status 4 the moment its
+// backend link drops, and the match ends a millisecond later. Passing status 4 over does not keep the match: the
+// online layer also closes the game's own socket to the host and unregisters its network keys, so the client sat in a
+// dead match instead of going back to the menu. Logged only.
+REX_EXTERN(__imp__sub_823ACE78);
+REX_HOOK_RAW(sub_823ACE78) {
+  if (ctx.r5.u32 == 23 && ctx.r6.u32 >= 0x10000 && ctx.r3.u32 >= 0x10000) {
+    const auto load = [base](uint32_t at) {
+      uint32_t v;
+      std::memcpy(&v, base + at, 4);
+      return __builtin_bswap32(v);
+    };
+    REXLOG_INFO("BF menu driver: online event 23, status {} (session state {}, lr {:08X})", load(ctx.r6.u32 + 40),
+                load(ctx.r3.u32 + 84), uint32_t(ctx.lr));
+  }
+  __imp__sub_823ACE78(ctx, base);
 }
 
 REX_EXTERN(sub_82434578);  // a call message from the UI's pool

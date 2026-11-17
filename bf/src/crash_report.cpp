@@ -39,6 +39,9 @@
 
 REXCVAR_DEFINE_BOOL(bf_null_page_guard, true, "BF1943",
                     "Reads of the game's null page give zeros (each logged) instead of a crash (Windows)");
+REXCVAR_DEFINE_BOOL(bf_stray_read_guard, true, "BF1943",
+                    "Reads of guest memory never committed give zeros (each page logged) instead of a crash, as on "
+                    "Linux (Windows)");
 
 namespace bf1943 {
 namespace {
@@ -385,13 +388,93 @@ void InstallNullPageGuard() {
   AddVectoredExceptionHandler(1, NullPageGuard);
   REXLOG_INFO("BF null page: reads of the game's null page give zeros (logged) instead of a crash");
 }
+
+// Stray reads of guest memory that was never committed. 17 Nov 2026 01:31 server time, All Maps 3 on 0.4.7.1: the
+// server's tick (sub_822A81C0 to sub_822F26E8) read guest 7D8803C2 through an object pointer it had loaded from the
+// game's code (7D8802A6, an instruction word), after calls through broken pointers (skipped) and null reads (zeros) in
+// the frames before. On Linux reserved guest memory reads as zeros; on Windows the page is only reserved in the guest
+// mapping and the read crashed the server. Here, last in the chain (after the runtime's own handler, which knows
+// its watched and device ranges), such a read commits that one 4 KB page read only and the read goes on with zeros;
+// writes still crash. The guest's heap can still take the page later: its commit makes it read and write (tested
+// 17 Nov on a SEC_RESERVE view). The pages are marked so the guards' live check (GuestLive, game_fixes.cpp) does not
+// take them for live memory. At most 4096 pages (16 MB); bf_stray_read_guard false keeps the crash.
+std::atomic<uint64_t> g_stray_bits[(uint64_t(1) << 20) / 64];  // one bit per guest 4 KB page
+std::atomic<uint32_t> g_stray_pages{0};
+uint8_t* g_guest_base = nullptr;
+constexpr uint32_t kStrayPageCap = 4096;
+
+bool Readable(DWORD protect) {
+  if (protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
+  return (protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                     PAGE_EXECUTE_WRITECOPY)) != 0;
+}
+
+LONG CALLBACK StrayReadGuard(EXCEPTION_POINTERS* ep) {
+  const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+  if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] != 0)
+    return EXCEPTION_CONTINUE_SEARCH;
+  const uint64_t at = er->ExceptionInformation[1], base = reinterpret_cast<uint64_t>(g_guest_base);
+  if (at < base + 0x10000 || at >= base + 0x100000000ull) return EXCEPTION_CONTINUE_SEARCH;
+  const uint32_t guest_page = uint32_t(at - base) & ~0xFFFu;
+  uint8_t* page = g_guest_base + guest_page;
+  MEMORY_BASIC_INFORMATION mb{};
+  if (!VirtualQuery(page, &mb, sizeof(mb))) return EXCEPTION_CONTINUE_SEARCH;
+  // Another thread committed it between the fault and here (this guard, or the guest's heap): the read now works.
+  if (mb.State == MEM_COMMIT && Readable(mb.Protect)) return EXCEPTION_CONTINUE_EXECUTION;
+  if (mb.State != MEM_RESERVE) return EXCEPTION_CONTINUE_SEARCH;
+  if (g_stray_pages.load() >= kStrayPageCap) {
+    static std::atomic<bool> told{false};
+    if (!told.exchange(true))
+      REXLOG_ERROR("BF stray read: {} pages already given; guest {:08X} is left to crash", kStrayPageCap,
+                   uint32_t(at - base));
+    return EXCEPTION_CONTINUE_SEARCH;
+  }
+  if (!VirtualAlloc(page, 0x1000, MEM_COMMIT, PAGE_READONLY)) return EXCEPTION_CONTINUE_SEARCH;
+  const uint64_t bit = uint64_t(1) << ((guest_page >> 12) & 63);
+  if (g_stray_bits[guest_page >> 18].fetch_or(bit) & bit) return EXCEPTION_CONTINUE_EXECUTION;
+  const uint32_t n = ++g_stray_pages;
+  if (n <= 16 || (n & (n - 1)) == 0) {
+    bool approximate = false;
+    const uint32_t guest = GuestFunctionOf(ep->ContextRecord->Rip, &approximate);
+    auto* ts = rex::runtime::ThreadState::Get();
+    PPCContext* ctx = ts ? ts->context() : nullptr;
+    const std::string where = guest ? std::string(approximate ? "near sub_" : "in sub_") + Hex(guest)
+                                     : std::string("outside the game's code: ") + Where(ep->ContextRecord->Rip);
+    REXLOG_WARN("BF stray read: the game read guest {:08X}, memory never committed; that page now reads as zeros "
+                "(page {} so far), play goes on ({}, game thread {}, lr {:08X})",
+                uint32_t(at - base), n, where, ts ? ts->thread_id() : 0, ctx ? uint32_t(ctx->lr) : 0);
+  }
+  return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void InstallStrayReadGuard() {
+  if (!REXCVAR_GET(bf_stray_read_guard)) return;
+  auto* ts = rex::runtime::ThreadState::Get();
+  if (!ts || !ts->memory()) return;
+  g_guest_base = ts->memory()->virtual_membase();
+  AddVectoredExceptionHandler(0, StrayReadGuard);
+  REXLOG_INFO("BF stray read: reads of guest memory never committed give zeros (logged) instead of a crash");
+}
 }  // namespace
+
+// Whether a guest page is one the guard above gave (read only zeros) and the guest's heap has not taken since.
+bool StrayReadPage(uint32_t guest_page) {
+  const uint64_t bit = uint64_t(1) << ((guest_page >> 12) & 63);
+  std::atomic<uint64_t>& word = g_stray_bits[guest_page >> 18];
+  if (!(word.load(std::memory_order_relaxed) & bit) || !g_guest_base) return false;
+  MEMORY_BASIC_INFORMATION mb{};
+  if (VirtualQuery(g_guest_base + (guest_page & ~0xFFFu), &mb, sizeof(mb)) && mb.State == MEM_COMMIT &&
+      mb.Protect == PAGE_READONLY)
+    return true;
+  word.fetch_and(~bit);  // the guest's heap made it its own
+  return false;
+}
 
 // The null page guard, once: at the first game frame, or at a dedicated server's first tick (a server draws no
 // frame, so until 13 Nov 2026 it never had the guard: official server 8 crashed on a read of guest 0x8C in
 // sub_822A90D8, a vehicle's physics, 30 s after a player joined).
 void InstallNullPageGuardOnce() {
-  static const bool guard = (InstallNullPageGuard(), true);
+  static const bool guard = (InstallNullPageGuard(), InstallStrayReadGuard(), true);
   (void)guard;
 }
 
@@ -465,6 +548,8 @@ REXCVAR_DEFINE_BOOL(bf_null_page_guard, true, "BF1943",
 namespace bf1943 {
 void InstallCrashReports(const std::filesystem::path&) {}
 void NoteGuestFrame() {}
+// Linux: reserved guest memory already reads as zeros, so the Windows stray read guard gives no pages here.
+bool StrayReadPage(uint32_t) { return false; }
 
 // The guest's null page on Linux (15 Nov 2026): a dedicated server's abort of 14 Nov was a server tick
 // walking a plane's part tree (sub_822A8F80) into a part already freed (its method table pointer was a heap address;

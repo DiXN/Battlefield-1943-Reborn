@@ -1429,6 +1429,8 @@ class Registry:
                listed false: not in the list, joined by Direct connect ("find") only
                official: {"stamp", "nonce", "mac"} from the official key (gmhost.official_code); checked against
                --official-key-file, else refused
+               "resume" {"uid", "pid", "pids"}?: a host whose link to the backend dropped asks to keep its user id
+               (its tunnel's id) and player id; pids: its players' ids (resume below)
       backend: {"op": "registered", "gid", "uid", "pid", "official", "listed", "address"}
       backend: {"op": "reachable", "ok", "address", "local"} after a UDP probe of the server's port; for a server on
                this backend's own machine ("local"), ok is null when it answers: a probe from here never passes
@@ -1478,6 +1480,42 @@ class Registry:
       anyone:  {"op": "achievement_share"} -> {"op": "achievement_share", "players", "have": {id: count}}
     """
     ids = itertools.count(1)
+
+    @staticmethod
+    def resume(asked, address, m):
+        """(uid, pid) for a host that asks to keep its ids, or None (17 Nov 2026: gmhost.py keeps its players through
+        a lost link to the backend, which needs the same tunnel id, a hash of its user id, and the same player id). A
+        user id no listed game has, ids in the ranges this backend gives, and its counters moved past them and the
+        players' ids named, so nobody is given them again (a backend that restarted counts from the start). A game
+        that still holds the user id from the same address and port is this server's own old registration, whose
+        link died without this side seeing it (nothing times out here): it is let go."""
+        if not isinstance(asked, dict):
+            return None
+        try:
+            uid, pid = int(asked.get('uid')), int(asked.get('pid'))
+            pids = [int(x) for x in asked.get('pids') or []][:64]
+        except (TypeError, ValueError):
+            return None
+        top = 10 ** 7
+        if not 901 <= uid < top or not 7 <= pid < top or any(not 7 <= x < top for x in pids):
+            return None
+        try:
+            port = int(m['address'][1]) if 'address' in m else int(m.get('port', 18300))
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        for gid, g in list(GAMES.items()):
+            if g.get('HU') != uid:
+                continue
+            if g.get('from') != address or int(g.get('P', 0)) != port:
+                return None
+            GAMES.pop(gid, None)  # its connection's own end still notes it gone
+            try:
+                g['gmhost'].writer.close()
+            except Exception:  # a connection already gone
+                pass
+        Registry.ids = itertools.count(max(next(Registry.ids), uid - 900 + 1))
+        TheaterClient.pids = itertools.count(max([next(TheaterClient.pids), pid + 1] + [x + 1 for x in pids]))
+        return uid, pid
 
     def __init__(self, log, args=None):
         self.log = log
@@ -1780,8 +1818,11 @@ class Registry:
                     elif self.promoted and not official and isinstance(m.get('build'), dict):
                         host_key = signed_host_key(m, str(m.get('name', 'Server')),
                                                    str(m['build'].get('digest', '')).lower())
+                    kept = Registry.resume(m.get('resume'), writer.get_extra_info('peername')[0], m)
                     n = next(Registry.ids)
                     gid, uid, pid = str(200 + n), 900 + n, next(TheaterClient.pids)
+                    if kept:
+                        uid, pid = kept
                     local = False
                     if 'address' in m:
                         host, port = m['address']
@@ -1826,6 +1867,9 @@ class Registry:
                         '' if GAMES[gid]['listed'] else ' (not listed)',
                         ': hidden, %s' % GAMES[gid]['hidden'] if GAMES[gid]['hidden'] else
                         ' (host %s)' % host_key[:16] if host_key else ''))
+                    if kept:
+                        self.note('%s game %s kept the ids of its host (user %d, player %d): its players stay' % (
+                            peer, gid, uid, pid))
                     asyncio.get_running_loop().create_task(self.probe(writer, host, int(port), local))
                     self.refresh_promoted()
                 elif op == 'status' and gid in GAMES:

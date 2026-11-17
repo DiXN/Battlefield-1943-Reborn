@@ -417,6 +417,35 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
       return;
     }
   }
+
+  // No handler took it. Returning runs the faulting instruction again; for a real fault that is forever: a Linux
+  // dedicated server looped "Unhandled guest access violation" with no ticks and its process alive, so nothing
+  // restarted it (Battlefield 1943 Reborn, 17 Nov 2026). The same unhandled fault at the same instruction and address
+  // 16 times in a row on a thread is not a passing race: the handler that was there before ours goes back (the
+  // system's: the process ends with a core dump, as an unhandled exception ends a Windows process), and the next
+  // try faults into it. One that passes (another thread changed the page meanwhile) never repeats that often.
+  // Initial exec TLS: nothing to allocate inside a signal handler.
+  static __thread __attribute__((tls_model("initial-exec"))) uint64_t last_pc = 0, last_address = 0;
+  static __thread __attribute__((tls_model("initial-exec"))) uint32_t repeats = 0;
+#if REX_ARCH_AMD64
+  const uint64_t pc = thread_context.rip;
+#else
+  const uint64_t pc = thread_context.pc;
+#endif
+  const uint64_t address = reinterpret_cast<uint64_t>(signal_info->si_addr);
+  if (pc == last_pc && address == last_address) {
+    ++repeats;
+  } else {
+    last_pc = pc, last_address = address, repeats = 1;
+  }
+  if (repeats >= 16) {
+    const struct sigaction* original =
+        signal_number == SIGILL ? &original_sigill_handler_ : &original_sigsegv_handler_;
+#if REX_PLATFORM_MAC
+    if (signal_number == SIGBUS) original = &original_sigbus_handler_;
+#endif
+    sigaction(signal_number, original, nullptr);
+  }
 }
 
 void ExceptionHandler::Install(Handler fn, void* data) {

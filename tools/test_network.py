@@ -266,8 +266,11 @@ def main():
     time.sleep(1.5)
     check('promoted A got it as a community server (everyone), not as official',
           'network broadcast' in host_log('A') and '(to everyone)' in host_log('A'))
-    check('B, with no broadcast key, refuses it (fails closed)',
-          'refused: no official broadcast key is known' in host_log('B'), host_log('B')[-400:])
+    # Since the official key is in gmhost.py (OFFICIAL_BROADCAST_KEYS), B knows that key only: a message signed with
+    # this test's key fails its signature check. Before it, B knew no key at all. Either way it must refuse.
+    check('B, without the test broadcast key, refuses it (fails closed)',
+          'refused: no official broadcast key is known' in host_log('B')
+          or 'refused: the signature does not check' in host_log('B'), host_log('B')[-400:])
     check('the released 0.4.6.7 host ignores it and stays registered',
           'Everyone: test two' not in host_log('O') and 'backend link lost' not in host_log('O') and
           'Test O' in listed(), host_log('O')[-400:])

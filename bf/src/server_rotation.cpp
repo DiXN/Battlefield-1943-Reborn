@@ -12,6 +12,7 @@
 // With one map in the list the same level is loaded again.
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -39,7 +40,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>  // GetThreadTimes (the server's stall notes)
+#include <psapi.h>    // K32GetProcessMemoryInfo (the server's memory, each 30 s)
 #else
+#include <unistd.h>  // sysconf (the server's memory, each 30 s)
 #include <sys/resource.h>
 #include <time.h>
 #endif
@@ -54,6 +57,9 @@ REXCVAR_DEFINE_STRING(bf_map_rotation, "", "BF1943",
                       "paths). Empty: the -level of the command line only");
 REXCVAR_DEFINE_DOUBLE(bf_round_end_delay, 45.0, "BF1943",
                       "Seconds between a round's end and the next map of bf_map_rotation (the end of round screen)");
+REXCVAR_DEFINE_DOUBLE(bf_server_hang_seconds, 120.0, "BF1943",
+                      "A dedicated server that has not ticked for this long ends its process, so its manager starts "
+                      "it again (0: never)");
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -304,14 +310,76 @@ static bool MachineTimes(double& total, double& stolen) {
 #endif
 }
 
+// The process's memory in MB (17 Nov 2026: servers run for days and nothing showed whether they grow): Windows' private
+// bytes (what the process has committed, the guest's memory included), Linux's resident set. 0 when not known.
+static double ProcessMemoryMb() {
+#if defined(_WIN32)
+  PROCESS_MEMORY_COUNTERS_EX pmc{};
+  if (K32GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&pmc), sizeof(pmc)))
+    return double(pmc.PrivateUsage) / (1024.0 * 1024.0);
+  return 0;
+#else
+  std::ifstream statm("/proc/self/statm");
+  double size = 0, resident = 0;
+  if (!(statm >> size >> resident)) return 0;
+  return resident * double(sysconf(_SC_PAGESIZE)) / (1024.0 * 1024.0);
+#endif
+}
+
 // The server's own tick rate, logged every 30 s (a dedicated server only): how many ticks a second, the longest gap
 // between two and the tick's own time, so a server on a slow machine shows in its log (TekRantGaming's 7 Nov 2026 play test:
 // the frame rate fell on the larger maps of the official server, a Hetzner machine, and not on Wake Island).
 // 14 Nov 2026: each stall is said as it happens too (a tick of 50 ms or more, or as long between two ticks), with
 // what the thread cost meanwhile, and each 30 s how many there were, the machine's processors, its load and what its
 // host took away.
+// The server's tick watchdog (17 Nov 2026): a server that stops ticking with its process alive (a deadlock, a loop
+// with no fault) keeps its players and its place in the list and nothing restarts it, since the manager and systemd
+// only see a process end. A thread started with the first tick checks every 5 s; after bf_server_hang_seconds with no
+// tick it logs and ends the process (a crash report with a minidump on Windows, a core dump on Linux), and the
+// manager starts the server again. A level load ticks too (its longest tick on the official servers is under a second).
+std::atomic<int64_t> g_last_tick_ms{0};
+int64_t SteadyMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
+void StartTickWatchdogOnce() {
+  static const bool started = [] {
+    const double limit = REXCVAR_GET(bf_server_hang_seconds);
+    if (limit <= 0) return true;
+    std::thread([limit] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        const int64_t seen = g_last_tick_ms.load(std::memory_order_relaxed);
+        double quiet = double(SteadyMs() - seen) / 1000.0;
+        if (quiet < limit) continue;
+        // Still no tick 3 s later: a machine that slept or a paused virtual machine wakes this thread and the tick's
+        // at once, and the tick then runs within milliseconds.
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        if (g_last_tick_ms.load(std::memory_order_relaxed) != seen) continue;
+        quiet = double(SteadyMs() - seen) / 1000.0;
+        {
+          REXLOG_ERROR("BF server hang: no tick for {:.0f} s (bf_server_hang_seconds {:.0f}): ending the process so "
+                       "its manager starts it again",
+                       quiet, limit);
+          rex::FlushLogging();
+#if defined(_WIN32)
+          // An exception of our own, so the crash report and its minidump (every thread's stack, the stuck tick's
+          // included) are written; abort() is a fail fast that ends the process before any report.
+          RaiseException(0xE0000BF1, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+#endif
+          std::abort();  // Linux: SIGABRT, the abort's stack in game.out and a core dump
+        }
+      }
+    }).detach();
+    REXLOG_INFO("BF server: tick watchdog on ({:.0f} s without a tick ends the process)", limit);
+    return true;
+  }();
+  (void)started;
+}
+
 static void NoteServerTick(double work_ms, const ThreadCost& before, const ThreadCost& after) {
   bf1943::InstallNullPageGuardOnce();
+  g_last_tick_ms.store(SteadyMs(), std::memory_order_relaxed);
+  StartTickWatchdogOnce();
   static Clock::time_point window{}, last{};
   static uint32_t ticks = 0, slow25 = 0, slow100 = 0, gaps50 = 0, said = 0;
   static double longest_gap = 0, work_total = 0, work_longest = 0;
@@ -362,6 +430,7 @@ static void NoteServerTick(double work_ms, const ThreadCost& before, const Threa
   double load[3] = {};
   if (getloadavg(load, 3) >= 1) host += fmt::format(", load {:.2f}", load[0]);
 #endif
+  if (const double mb = ProcessMemoryMb(); mb > 0) host += fmt::format("; memory {:.0f} MB", mb);
   REXLOG_INFO("BF server ticks: {:.1f} a second over {:.0f} s, longest gap {:.1f} ms; the tick's own work {:.2f} ms average, "
               "{:.1f} ms longest; {} ticks of 25 ms or more, {} of 100 ms or more, {} waits of 50 ms or more between ticks{}",
               ticks / seconds, seconds, longest_gap, work_total / ticks, work_longest, slow25, slow100, gaps50, host);
@@ -539,8 +608,21 @@ REX_HOOK_RAW(sub_824123F0) {
     return v && *v ? std::atof(v) : 0.0;
   }();
   if (slow_ms > 0) std::this_thread::sleep_for(std::chrono::microseconds(int64_t(slow_ms * 1000)));
+  // BF_DEV_SERVER_HANG_AT=<s> (tests of the tick watchdog): that long after the first tick, the tick stops for good.
+  static const double hang_at = [] {
+    const char* v = std::getenv("BF_DEV_SERVER_HANG_AT");
+    return v && *v ? std::atof(v) : -1.0;
+  }();
+  static const auto first_tick = Clock::now();
+  if (hang_at >= 0 && std::chrono::duration<double>(Clock::now() - first_tick).count() > hang_at) {
+    REXLOG_WARN("BF dev: the server's tick stops now (BF_DEV_SERVER_HANG_AT)");
+    for (;;) std::this_thread::sleep_for(std::chrono::hours(1));
+  }
   DevMoveSpawns(base);
   DevTickets(base);
+  // The null page guard first, as in a real tick: on Linux a read of reserved guest memory gives zeros, and the
+  // self test's walks then read the null page (without the guard that read faults again and again).
+  bf1943::InstallNullPageGuardOnce();
   bf1943::RunGameFixTest(ctx, base);  // game_fixes.cpp: BF_DEV_FIX_TEST=1, once
 #endif
   NoteServerTick(std::chrono::duration<double, std::milli>(Clock::now() - tick_start).count(), cost_before,
