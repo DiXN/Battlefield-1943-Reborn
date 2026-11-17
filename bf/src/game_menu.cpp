@@ -1064,6 +1064,7 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       auto_joined_ = true, QuickJoin();
     PrivateMatchTick();  // our Create Private Match: its server's state, the join, its end
     TickRejoinTick();    // the join asked for before a restart at the server's tick rate
+    CountedAchievementsTick();  // an achievement whose counted progress is complete (issue 37)
     OwnBackendLeaveTick();  // a LAN match is over: back on the main servers
     HostLanAtStartTick();   // a LAN match asked for before a restart
     // The server list is wanted (server_list.h Want) by a match being played and the friends page here; the browser
@@ -3631,8 +3632,8 @@ class GameMenu final : public rex::ui::ImGuiDialog {
       rate_names.push_back(r == "30" ? "30 (Xbox 360)" : r == "unlimited" ? "Unlimited" : r);
     const std::string fps = EffectiveFrameRate();
     std::string help =
-        "The most frames the game draws a second. The game updates its world 30 times a second, so these rates keep "
-        "motion even. The Xbox 360 ran it at 30. Applies at once.";
+        "The most frames the game draws a second. The world keeps its speed and the server's tick rate at every "
+        "choice. The Xbox 360 ran it at 30. Applies at once.";
     SettingRow frame{"Frame rate", "Frame rate", help, rate_names,
                      int(std::find(rates.begin(), rates.end(), fps) - rates.begin())};
     if (frame.index >= int(rates.size())) frame.index = std::min(1, int(rates.size()) - 1);
