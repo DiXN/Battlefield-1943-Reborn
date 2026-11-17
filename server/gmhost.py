@@ -28,6 +28,10 @@ CONTROL, LINK, VOICE = 7, 1, 0
 INIT, CONN, UNREL, DATA = 1, 2, 0x80, 0x100
 KIND_STREAM, KIND_DATAGRAM, KIND_SYNC = 6, 7, 0x40
 RESEND_SECONDS = 0.3
+# At most this many clients that have not joined at a time (the one heard from longest ago gives way to a new one),
+# and at most this many log lines in 10 s.
+MAX_LINKING = 64
+NOTE_BUDGET = 200
 
 
 PING, PROBE, PONG = b'BF43PING', b'BF43PRBE', b'BF43PONG'
@@ -738,6 +742,7 @@ class Peer:
         self.server = None            # our socket to the dedicated server for this client
         self.clock0 = time.monotonic()
         self.last_heard = time.monotonic()
+        self.first = None  # the first bytes of its first packet (said when it is dropped without ever linking)
 
     def note(self, text_):
         self.host.note('%s:%d %s' % (self.addr[0], self.addr[1], text_))
@@ -753,9 +758,12 @@ class Peer:
         return CONTROL, b'\0' + struct.pack('>I', self.host.ident) + bytes([1 if self.peer_bound else 0])
 
     def send_subs(self, subs):
+        transport = self.host.transport
+        if transport is None or transport.is_closing():
+            return  # a host being replaced (GameHost.close): its server sockets may still deliver a packet
         if not self.client_bound:
             subs = [self.control()] + subs
-        self.host.transport.sendto(self.datagram(subs), self.addr)
+        transport.sendto(self.datagram(subs), self.addr)
 
     def link_packet(self, seq, body):
         return LINK, struct.pack('>II', seq, self.peer_ack if seq >= UNREL else self.connident) + body
@@ -794,6 +802,8 @@ class Peer:
 
     def receive(self, data):
         self.last_heard = time.monotonic()
+        if self.first is None:
+            self.first = data[:16]
         if len(data) < 4:
             return
         heads, at = [], 2
@@ -1088,9 +1098,33 @@ class GameHost(asyncio.DatagramProtocol):
         self.comms = Comms(self)
         self.world = World(self)
         self.transport = None
+        self.tick_task = None
         self.error_noted = 0  # monotonic time of the last socket error written to the log
+        self.note_window, self.notes_in_window, self.notes_dropped = 0.0, 0, 0
+        self.bad_packets, self.refused_peers, self.quiet_noted = 0, 0, 0.0
+
+    def close(self):
+        """This host is replaced by another (a registration that gave other ids): its players' links, their sockets to
+        the dedicated server, its tick and its socket end with it."""
+        for addr in list(self.peers):
+            self.drop(addr)
+        if self.tick_task:
+            self.tick_task.cancel()
+        if self.transport:
+            self.transport.close()
 
     def note(self, text_):
+        # A budget of lines each 10 s; what was left out is counted.
+        now = time.monotonic()
+        if now - self.note_window >= 10:
+            dropped = self.notes_dropped
+            self.note_window, self.notes_in_window, self.notes_dropped = now, 0, 0
+            if dropped:
+                self.note('%d log lines left out in the last 10 s (too many)' % dropped)
+        self.notes_in_window += 1
+        if self.notes_in_window > NOTE_BUDGET:
+            self.notes_dropped += 1
+            return
         line = '%s GMHOST %s' % (time.strftime('%H:%M:%S'), text_)
         print(line, flush=True)
         if self.log:
@@ -1114,9 +1148,27 @@ class GameHost(asyncio.DatagramProtocol):
         if DEV_DELAY or DEV_JITTER:
             self.note('test delay: game datagrams held %.0f ms each way, plus up to %.0f ms' % (
                 DEV_DELAY * 1000, DEV_JITTER * 1000))
-        asyncio.get_running_loop().create_task(self.tick())
+        self.tick_task = asyncio.get_running_loop().create_task(self.tick())
 
     def datagram_received(self, data, addr):
+        # A packet that cannot be read is passed over and counted.
+        try:
+            self.packet(data, addr)
+        except Exception as e:
+            self.bad_packets += 1
+            self.quiet_note('packets that could not be read passed over (the last from %s:%d: %s)' % (
+                addr[0], addr[1], type(e).__name__))
+
+    def quiet_note(self, what):
+        """At most one line each 10 s about passed over packets and refused clients."""
+        now = time.monotonic()
+        if now - self.quiet_noted >= 10:
+            self.quiet_noted = now
+            self.note('%d %s; %d clients that had not joined let go for new ones (%d at most)' % (
+                self.bad_packets, what, self.refused_peers, MAX_LINKING))
+            self.bad_packets = self.refused_peers = 0
+
+    def packet(self, data, addr):
         # The server browser's ping and the backend's reachability probe (SERVERS-PLAN.md sections 5 and 6): answered
         # at once, never a game packet (those start with a flag byte, 0 or 1).
         if data[:8] in (PING, PROBE):
@@ -1132,6 +1184,12 @@ class GameHost(asyncio.DatagramProtocol):
             return
         peer = self.peers.get(addr)
         if not peer:
+            waiting = [(p.last_heard, a) for a, p in self.peers.items() if p.state != 'joined']
+            if len(waiting) >= MAX_LINKING:
+                # The one heard from longest ago gives way (a real player's new link is never kept out for long).
+                self.drop(min(waiting)[1])
+                self.refused_peers += 1
+                self.quiet_note('packets passed over')
             peer = self.peers[addr] = Peer(self, addr)
             peer.note('new client')
         try:
@@ -1169,7 +1227,10 @@ class GameHost(asyncio.DatagramProtocol):
             for addr, peer in list(self.peers.items()):
                 peer.resend()
                 if now - peer.last_heard > 30:
-                    peer.note('silent for 30 s, dropped')
+                    # 17 Nov 2026: on US Central most of these were addresses that sent one packet and never linked
+                    # (336 of 414), so what they sent is said.
+                    peer.note('silent for 30 s, dropped' + ('' if peer.connected else
+                                                            ' (it never linked; its first packet %s)' % (peer.first or b'').hex()))
                     self.drop(addr)
             self.comms.tick(now)
             # A join the backend announced whose client never linked (its game failed to connect): forgotten after
@@ -1206,6 +1267,7 @@ async def serve(args):
         print('%s build check: the package could not be read (%s)' % (time.strftime('%H:%M:%S'), e), flush=True)
     official_key = read_key(args.official_key_file) if args.official_key_file else None
     network = None  # NetworkCheck, made at the first registration
+    host = None  # the GameHost, kept through a lost backend link (its players stay)
     host_seed = None
     if args.host_key_file:
         try:
@@ -1220,6 +1282,14 @@ async def serve(args):
                   flush=True)
             await asyncio.sleep(5)
             continue
+        # A link that stops answering (no acknowledgement for 30 s) ends with an error instead of after the system's
+        # own retransmission time (about 15 minutes on Linux), so the host registers again while its players play on.
+        link = writer.get_extra_info('socket')
+        if link is not None and hasattr(socket, 'TCP_USER_TIMEOUT'):
+            try:
+                link.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 30000)
+            except OSError:
+                pass
         send = lambda obj: writer.write((json.dumps(obj) + '\n').encode())
         # The address comes from the connection (the backend sees it; nothing to type, SERVERS-PLAN.md section 6);
         # --public only when given (older packages and tests).
@@ -1240,27 +1310,69 @@ async def serve(args):
                     reg['host'] = host_proof(host_seed, args.name, build['digest'])
                 except Exception as e:  # never stop a server over it: the backend then lists it not
                     print('%s host key: no signature (%r)' % (time.strftime('%H:%M:%S'), e), flush=True)
-        # Listening before the backend is told: its reachability probe comes at once.
-        sock = udp_socket(listen)
-        send(reg)
-        await writer.drain()
-        reply = json.loads(await reader.readline())
+        # A host whose link to the backend dropped (the backend restarted, or the link timed out) keeps its players
+        # (17 Nov 2026: each restart of the main backend dropped every player of US Central, which registers with it
+        # from across the ocean, and on 16 Nov 08:59 a link that timed out ended its host and the whole server with
+        # it). It asks to keep its user id (its tunnel's id) and player id, and names its players' ids so a backend
+        # that restarted gives them to nobody else (plasma.py Registry.resume). A backend that keeps them leaves the
+        # players' links as they are; one that cannot (or one from before this) gives other ids, and the host is
+        # replaced as before.
+        if host is not None:
+            reg['resume'] = {'uid': host.user_id, 'pid': host.pid,
+                             'pids': sorted({p.player.pid for p in host.peers.values() if p.player})[:64]}
+        # Listening before the backend is told: its reachability probe comes at once (a kept host listens already).
+        sock = None
+        try:
+            if host is None:
+                sock = udp_socket(listen)
+            send(reg)
+            await writer.drain()
+            reply = json.loads(await reader.readline())
+        except (OSError, ValueError) as e:  # the backend went away again or answered nothing, or the port is taken
+            print('%s registration with the backend %s:%d failed (%s: %s), retrying' % (
+                time.strftime('%H:%M:%S'), *backend, type(e).__name__, e), flush=True)
+            if sock:
+                sock.close()
+            writer.close()
+            await asyncio.sleep(5)
+            continue
         if reply.get('op') == 'refused':
             print('%s backend refused the server: %s' % (time.strftime('%H:%M:%S'), reply.get('why')), flush=True)
             write_status(args, {'state': 'refused', 'why': reply.get('why', '')})
-            sock.close()
+            if sock:
+                sock.close()
             writer.close()
             await asyncio.sleep(30)
             continue
-        host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
-                           public, sock)
-        host.comms.broadcast_file = args.broadcast_file
-        if network is None:  # once: the ids it has seen stay through a new registration
-            network = NetworkCheck(trusted_broadcast_keys(official_key))
-            if not network.keys:
-                host.note('network broadcasts: no official broadcast key known, none will be shown')
-        host.comms.balance_file = args.balance_file
-        host.world.configure(args)
+        if host is not None and reply.get('uid') == host.user_id and reply.get('pid') == host.pid:
+            host.note('the backend kept this server\'s ids: its %d players stay' % host.player_count())
+        else:
+            if host is not None:
+                host.note('the backend gave this server other ids: its %d players are dropped' % host.player_count())
+                host.close()
+                for _ in range(60):  # the old socket closes on one of the loop's next turns
+                    await asyncio.sleep(0.05)
+                    try:
+                        sock = udp_socket(listen)
+                        break
+                    except OSError:
+                        sock = None
+                if sock is None:
+                    print('%s the server\'s port is still taken, registering again' % time.strftime('%H:%M:%S'),
+                          flush=True)
+                    host = None
+                    writer.close()
+                    await asyncio.sleep(5)
+                    continue
+            host = await start(listen, parse_address(args.game_server), reply['uid'], reply['pid'], args.name, log,
+                               public, sock)
+            host.comms.broadcast_file = args.broadcast_file
+            if network is None:  # once: the ids it has seen stay through a new registration
+                network = NetworkCheck(trusted_broadcast_keys(official_key))
+                if not network.keys:
+                    host.note('network broadcasts: no official broadcast key known, none will be shown')
+            host.comms.balance_file = args.balance_file
+            host.world.configure(args)
         host.note('registered with the backend as game %s%s%s' % (
             reply['gid'], ' (official)' if reply.get('official') else '', '' if reply.get('listed', True) else
             ' (not listed: Direct connect only)'))
@@ -1359,7 +1471,11 @@ async def serve(args):
                              'is not checked from there' if m.get('ok') is None
                         else 'players cannot reach this server', m.get('address', '?')))
                 elif m.get('op') == 'join':
-                    host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'])
+                    try:
+                        host.expect(m['ticket'], m['pid'], m['name'], m['xuid'], m['xnaddr'])
+                    except (KeyError, TypeError, ValueError) as e:  # never the host's end: the message is passed over
+                        host.note('backend: a join notice that cannot be read (%s)' % type(e).__name__)
+                        continue
                     host.note('backend: %s joins (PID %s)' % (m['name'], m['pid']))
                 elif m.get('op') == 'network_broadcast':
                     # A broadcast from the official machine, through the main backend (sign_network): checked here
@@ -1372,11 +1488,13 @@ async def serve(args):
                     else:
                         host.note('network broadcast %s (to %s)' % (b['id'], b['scope']))
                         host.comms.broadcast(b['text'], b['kind'], b['seconds'])
-        except (ConnectionError, ValueError) as e:
+        except (OSError, ValueError) as e:  # OSError: ConnectionError and also TimeoutError (errno 110, 16 Nov)
             host.note('backend link lost (%s)' % type(e).__name__)
+        else:
+            host.note('backend link lost (closed by the backend)')
         beat.cancel()
-        host.transport.close()
-        await asyncio.sleep(2)
+        writer.close()
+        await asyncio.sleep(2)  # the host keeps its players; the next registration asks to keep its ids
 
 
 def write_status(args, state):

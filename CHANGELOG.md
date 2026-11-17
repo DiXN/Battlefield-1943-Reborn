@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.7.2 (17 November 2026): a hotfix
+
+Earlier versions update to it by themselves, and the servers only let the newest version in.
+
+- **Fewer server crashes.** Fixed the crashes that took official servers down mid match after 0.4.7.1, and guarded
+  the rest of the same kind.
+- **Servers recover by themselves.** A server that stops responding now restarts on its own, and Linux servers no
+  longer freeze when they hit an error.
+- **Steadier connections.** Players stay in their match when a server briefly loses its link to the main backend.
+- **General bug fixes.**
+
 ## 0.4.7.1 (17 November 2026): a hotfix
 
 Earlier versions update to it by themselves, and the servers only let the newest version in.
